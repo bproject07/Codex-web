@@ -1,0 +1,102 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  ApiError,
+  getSession,
+  listSessions,
+  type SessionSnapshot,
+} from "./api";
+
+const PRIMARY_SESSION: SessionSnapshot = {
+  terminalId: "11111111-1111-4111-8111-111111111111",
+  name: "Terminal 1",
+  isPrimary: true,
+  createdAt: 1_000,
+  sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  status: "running",
+  connected: true,
+  connectedClients: 1,
+  startedAt: 1_100,
+  pid: 123,
+  exitCode: null,
+  project: "C:\\Projects\\my-app",
+  lastError: null,
+};
+
+const SECONDARY_SESSION: SessionSnapshot = {
+  ...PRIMARY_SESSION,
+  terminalId: "22222222-2222-4222-8222-222222222222",
+  name: "Terminal 2",
+  isPrimary: false,
+  createdAt: 2_000,
+  sessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  pid: 456,
+};
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("terminal session API selection", () => {
+  it("returns the exact requested terminal from the session list", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse([PRIMARY_SESSION, SECONDARY_SESSION]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      getSession("0123456789abcdef", SECONDARY_SESSION.terminalId),
+    ).resolves.toEqual(SECONDARY_SESSION);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a stable 404 when the selected terminal disappeared", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse([PRIMARY_SESSION])),
+    );
+
+    const result = getSession(
+      "0123456789abcdef",
+      SECONDARY_SESSION.terminalId,
+    );
+
+    await expect(result).rejects.toBeInstanceOf(ApiError);
+    await expect(result).rejects.toMatchObject({
+      status: 404,
+      message: "The selected terminal session no longer exists.",
+    });
+  });
+
+  it("normalizes the legacy primary endpoint when the list route is absent", async () => {
+    const {
+      terminalId: _terminalId,
+      name: _name,
+      isPrimary: _isPrimary,
+      createdAt: _createdAt,
+      ...legacySession
+    } = PRIMARY_SESSION;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ error: "route not found" }, 404),
+      )
+      .mockResolvedValueOnce(jsonResponse(legacySession));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listSessions("0123456789abcdef")).resolves.toMatchObject([
+      {
+        terminalId: "primary",
+        name: "Primary",
+        isPrimary: true,
+      },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});

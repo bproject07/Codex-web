@@ -1,0 +1,28 @@
+# Rust
+/server/target/
+
+# Node
+/web/node_modules/
+/web/dist/
+/web/coverage/
+
+# Packaged application
+/dist/
+/dist-*/
+
+# Local test/runtime artifacts
+__pycache__/
+*.py[cod]
+*.log
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
+
+# Local environment overrides
+.env
+.env.*
+!.env.example

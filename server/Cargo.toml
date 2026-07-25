@@ -1,0 +1,35 @@
+[package]
+name = "codex-web-terminal"
+version = "0.1.0"
+edition = "2024"
+description = "Run the real Codex CLI in a Windows ConPTY and control it from a browser"
+license = "MIT"
+
+[[bin]]
+name = "codex-web"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.8", features = ["json", "ws"] }
+base64 = "0.22"
+bytes = "1.10"
+clap = { version = "4.5", features = ["derive", "env"] }
+dunce = "1.0"
+futures-util = "0.3"
+getrandom = "0.3"
+portable-pty = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+subtle = "2.6"
+tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2.5"
+uuid = { version = "1.17", features = ["serde", "v4"] }
+webbrowser = "1.0"
+
+[dev-dependencies]
+tempfile = "3.20"
