@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest a focused improvement for the community.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What limitation or workflow problem should be solved?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Explain the behavior, security boundaries, and user experience.
+    validations:
+      required: true
+
+  - type: textarea
+    id: platforms
+    attributes:
+      label: Windows and Linux considerations
+      description: Describe how the proposal should behave and be tested on both platforms.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: The proposal does not require exposing a terminal directly to the public Internet.
+          required: true

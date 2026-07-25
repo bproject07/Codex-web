@@ -90,10 +90,26 @@ button:disabled {
 }
 
 .app-identity h1 {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   margin: 0;
   font-size: 0.95rem;
   font-weight: 650;
   letter-spacing: 0.01em;
+}
+
+.community-label {
+  display: inline-flex;
+  padding: 0.12rem 0.35rem;
+  border: 1px solid #466180;
+  border-radius: 999px;
+  color: #a9ccec;
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  text-transform: uppercase;
 }
 
 .project-path {
@@ -386,6 +402,11 @@ button:disabled {
   margin: 0;
   color: #aeb5c0;
   line-height: 1.5;
+}
+
+.auth-card .auth-disclaimer {
+  color: #7f8997;
+  font-size: 0.82rem;
 }
 
 .auth-card label {

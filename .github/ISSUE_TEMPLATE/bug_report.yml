@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a reproducible Codex Web Terminal problem.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve the project.
+        Never paste an authenticated URL, token, terminal transcript, account name,
+        company name, private project path, or Codex credentials into an issue.
+
+  - type: dropdown
+    id: server-os
+    attributes:
+      label: Server operating system
+      options:
+        - Windows 10/11
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Codex Web Terminal version or commit
+      placeholder: v0.1.0 or commit SHA
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and client device
+      placeholder: Chrome on Android, Edge on Windows, and so on
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use neutral example paths and remove all credentials.
+      placeholder: |
+        1. Start the server with...
+        2. Open...
+        3. Select...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed tokens, authenticated URLs, account/company names, private paths, and terminal content.
+          required: true

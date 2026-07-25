@@ -29,12 +29,22 @@ The most important properties are:
 ├── OPERATIONS.md              Runtime, UI, Tailscale, service, and upgrade guide
 ├── TODO.md                    Deliberately unimplemented, security-scoped ideas
 ├── README.md                  Product overview, architecture, API, and protocol
+├── CONTRIBUTING.md            Contribution workflow and validation contract
+├── SECURITY.md                Private vulnerability reporting policy
+├── CODE_OF_CONDUCT.md         Community behavior and enforcement
+├── THIRD_PARTY_NOTICES.md     Dependency licensing and attribution
 ├── LICENSE
+├── .github/
+│   ├── workflows/ci.yml       Windows/Linux continuous integration
+│   └── ISSUE_TEMPLATE/        Privacy-safe issue forms
+├── docs/
+│   └── screenshots/           Sanitized, reproducible product screenshots
 ├── scripts/
 │   ├── build.ps1              Windows production package
 │   ├── run.ps1                Windows launcher
 │   ├── build.sh               Linux production package
 │   ├── run.sh                 Linux launcher
+│   ├── fixtures/              Deterministic, synthetic demo PTY
 │   ├── mobile-codex-smoke.py  Browser/mobile smoke test
 │   └── mobile-resize-regression.py
 ├── server/
@@ -154,6 +164,9 @@ when changing batching or reconnect behavior.
 - `Top`, `PgUp`, `PgDn`, and `Live` manipulate client scrollback; they are not
   terminal input.
 - Diagnostics must not include token, keystrokes, or terminal content.
+- Screenshots must use only synthetic fixtures. They must not contain account,
+  organization, company, device, or host names; credentials; tokens; private
+  addresses; terminal history; or personal filesystem paths.
 
 For mobile changes, run unit tests and the relevant Python browser regression
 where the required browser tooling is available.
@@ -180,8 +193,8 @@ where the required browser tooling is available.
 Every code change, bug fix, refactor, or dependency update requires validation
 on both Windows and Linux. This rule applies even when a change looks
 platform-independent. A Windows-only result is incomplete. If Linux is not
-available locally, use the designated Linux test host or equivalent Linux
-CI/VM; do not skip or simulate the platform result.
+available locally, use GitHub Actions, a Linux VM, or a Linux host you control;
+do not skip or simulate the platform result.
 
 ### Frontend
 
@@ -294,7 +307,9 @@ size, so competing viewports are an intentional operational limitation.
   explicitly requested.
 - Before staging, inspect `git diff --check`, `git diff`, and `git status`.
 - Stage only intended source, tests, scripts, and documentation.
-- Preserve the private repository setting unless explicitly told otherwise.
+- Preserve the repository's current visibility unless explicitly told
+  otherwise. A public release requires a secret scan of the current tree and
+  Git history before push.
 - A user who only needs to clone should receive `read`, not `write` or `admin`.
 - After push, verify the remote branch commit matches local `HEAD`.
 

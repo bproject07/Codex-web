@@ -81,9 +81,20 @@ install -d "$distribution_directory/web"
 install -m 0755 "$built_executable" "$distribution_directory/codex-web"
 cp -R "$frontend_build/." "$distribution_directory/web/"
 
-for documentation_file in README.md BUILDING.md OPERATIONS.md AGENTS.md TODO.md LICENSE; do
+for documentation_file in \
+  README.md \
+  BUILDING.md \
+  OPERATIONS.md \
+  AGENTS.md \
+  TODO.md \
+  CONTRIBUTING.md \
+  SECURITY.md \
+  CODE_OF_CONDUCT.md \
+  THIRD_PARTY_NOTICES.md \
+  LICENSE; do
   cp "$project_root/$documentation_file" "$distribution_directory/"
 done
+cp -R "$project_root/docs" "$distribution_directory/"
 
 printf '\nBuild complete.\n'
 printf 'Executable: %s\n' "$distribution_directory/codex-web"

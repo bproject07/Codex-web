@@ -169,18 +169,25 @@ Copy-Item -Path (Join-Path $frontendBuild "*") `
     -Destination $packagedWebDirectory.FullName `
     -Recurse `
     -Force
-Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") `
-    -Destination $distributionDirectory
-Copy-Item -LiteralPath (Join-Path $projectRoot "BUILDING.md") `
-    -Destination $distributionDirectory
-Copy-Item -LiteralPath (Join-Path $projectRoot "OPERATIONS.md") `
-    -Destination $distributionDirectory
-Copy-Item -LiteralPath (Join-Path $projectRoot "AGENTS.md") `
-    -Destination $distributionDirectory
-Copy-Item -LiteralPath (Join-Path $projectRoot "TODO.md") `
-    -Destination $distributionDirectory
-Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") `
-    -Destination $distributionDirectory
+$documentationFiles = @(
+    "README.md",
+    "BUILDING.md",
+    "OPERATIONS.md",
+    "AGENTS.md",
+    "TODO.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE"
+)
+foreach ($documentationFile in $documentationFiles) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot $documentationFile) `
+        -Destination $distributionDirectory
+}
+Copy-Item -LiteralPath (Join-Path $projectRoot "docs") `
+    -Destination $distributionDirectory `
+    -Recurse
 
 Write-Host
 Write-Host "Build complete." -ForegroundColor Green

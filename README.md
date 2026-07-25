@@ -1,5 +1,9 @@
 # Codex Web Terminal
 
+[![CI](https://github.com/bproject07/Codex-web/actions/workflows/ci.yml/badge.svg)](https://github.com/bproject07/Codex-web/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-4c8bf5.svg)](BUILDING.md)
+
 Codex Web Terminal runs the **real Codex CLI** in a native pseudo-terminal
 (ConPTY on Windows, a Unix PTY on Linux and macOS) and exposes that terminal to
 a browser through an authenticated WebSocket. It does not reimplement or
@@ -10,8 +14,33 @@ interpreted by xterm.js from the original PTY byte stream.
 The project is an independent wrapper. It does not download, vendor, modify,
 or update the OpenAI Codex source code.
 
+> [!IMPORTANT]
+> This is an independent, unofficial community project. It is not affiliated
+> with, sponsored by, or endorsed by OpenAI. Codex CLI is installed separately
+> and is not included in this repository.
+
 > **This application provides remote terminal access.**
 > **Do not expose it directly to the public internet.**
+
+## Screenshots
+
+### Desktop terminal
+
+![Desktop terminal showing the synthetic community demo](docs/screenshots/desktop-terminal.png)
+
+### Session manager
+
+![Desktop session manager showing synthetic terminal sessions](docs/screenshots/session-manager.png)
+
+### Mobile terminal
+
+![Mobile terminal with the touch toolbar and synthetic demo output](docs/screenshots/mobile-terminal.png)
+
+All screenshots are generated from the repository's deterministic demo PTY.
+They contain synthetic terminal text only—no live Codex conversation, model
+output, credentials, tokens, account or company names, personal paths, or
+private host data. See [the screenshot guide](docs/screenshots/README.md) for
+the reproducible capture procedure.
 
 ## Documentation
 
@@ -23,6 +52,13 @@ or update the OpenAI Codex source code.
   definition of done for coding agents
 - [TODO.md](TODO.md) — deliberately unimplemented ideas and their safety
   requirements
+- [CONTRIBUTING.md](CONTRIBUTING.md) — contribution workflow and required
+  cross-platform validation
+- [SECURITY.md](SECURITY.md) — supported versions and private vulnerability
+  reporting
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community expectations
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) — dependency licensing and
+  attribution
 
 ## Architecture
 
@@ -274,6 +310,12 @@ dist/                    # Windows
 ├── OPERATIONS.md
 ├── AGENTS.md
 ├── TODO.md
+├── CONTRIBUTING.md
+├── SECURITY.md
+├── CODE_OF_CONDUCT.md
+├── THIRD_PARTY_NOTICES.md
+├── docs/
+│   └── screenshots/
 └── LICENSE
 
 dist-linux/              # Linux
@@ -286,12 +328,22 @@ dist-linux/              # Linux
 ├── OPERATIONS.md
 ├── AGENTS.md
 ├── TODO.md
+├── CONTRIBUTING.md
+├── SECURITY.md
+├── CODE_OF_CONDUCT.md
+├── THIRD_PARTY_NOTICES.md
+├── docs/
+│   └── screenshots/
 └── LICENSE
 ```
 
 Keep the `web` directory next to `codex-web.exe`. The executable serves those
 assets. A Linux package uses the same layout with the extensionless
 `codex-web` binary. During `cargo run`, the backend also looks for `web/dist`.
+
+These are local build outputs, not published binary releases. Anyone
+redistributing them must first include the complete dependency license and
+NOTICE texts described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Command-line interface
 

@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            runner: windows-2025
+          - name: Linux
+            runner: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Test frontend
+        working-directory: web
+        run: npm test
+
+      - name: Build frontend
+        working-directory: web
+        run: npm run build
+
+      - name: Check deterministic demo fixture
+        run: node --check scripts/fixtures/demo-terminal.js
+
+      - name: Check Rust formatting
+        working-directory: server
+        run: cargo fmt --all -- --check
+
+      - name: Test Rust
+        working-directory: server
+        run: cargo test --all-targets --locked
+
+      - name: Lint Rust
+        working-directory: server
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Build Rust release
+        working-directory: server
+        run: cargo build --release --locked
+
+      - name: Validate Windows package script
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $parseTokens = $null
+          $parseErrors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path .\scripts\build.ps1),
+            [ref]$parseTokens,
+            [ref]$parseErrors
+          )
+          if ($parseErrors.Count -gt 0) {
+            throw ($parseErrors | Out-String)
+          }
+          cmd /d /c scripts\fixtures\demo-terminal.cmd --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows demo fixture failed."
+          }
+          .\scripts\build.ps1
+          $required = @(
+            ".\dist\codex-web.exe",
+            ".\dist\web\index.html",
+            ".\dist\README.md",
+            ".\dist\BUILDING.md",
+            ".\dist\OPERATIONS.md",
+            ".\dist\AGENTS.md",
+            ".\dist\TODO.md",
+            ".\dist\CONTRIBUTING.md",
+            ".\dist\SECURITY.md",
+            ".\dist\CODE_OF_CONDUCT.md",
+            ".\dist\THIRD_PARTY_NOTICES.md",
+            ".\dist\docs\screenshots\README.md",
+            ".\dist\docs\screenshots\desktop-terminal.png",
+            ".\dist\docs\screenshots\session-manager.png",
+            ".\dist\docs\screenshots\mobile-terminal.png",
+            ".\dist\LICENSE"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing packaged file: $path"
+            }
+          }
+          .\dist\codex-web.exe --version
+
+      - name: Validate Linux package script
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for script in \
+            ./scripts/build.sh \
+            ./scripts/run.sh \
+            ./scripts/fixtures/demo-terminal.sh; do
+            bash -n "$script"
+          done
+          ./scripts/fixtures/demo-terminal.sh --version
+          ./scripts/build.sh
+          test -x ./dist-linux/codex-web
+          for path in \
+            ./dist-linux/web/index.html \
+            ./dist-linux/README.md \
+            ./dist-linux/BUILDING.md \
+            ./dist-linux/OPERATIONS.md \
+            ./dist-linux/AGENTS.md \
+            ./dist-linux/TODO.md \
+            ./dist-linux/CONTRIBUTING.md \
+            ./dist-linux/SECURITY.md \
+            ./dist-linux/CODE_OF_CONDUCT.md \
+            ./dist-linux/THIRD_PARTY_NOTICES.md \
+            ./dist-linux/docs/screenshots/README.md \
+            ./dist-linux/docs/screenshots/desktop-terminal.png \
+            ./dist-linux/docs/screenshots/session-manager.png \
+            ./dist-linux/docs/screenshots/mobile-terminal.png \
+            ./dist-linux/LICENSE; do
+            test -f "$path"
+          done
+          ./dist-linux/codex-web --version
+
+  minimum-rust:
+    name: Minimum Rust 1.88
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install declared minimum Rust
+        run: rustup toolchain install 1.88.0 --profile minimal
+
+      - name: Check all Rust targets with the declared minimum
+        working-directory: server
+        run: cargo +1.88.0 check --all-targets --locked

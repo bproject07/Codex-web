@@ -16,8 +16,8 @@ The repository contains two applications:
 2. `server/` is a Rust backend that owns the PTYs, serves the frontend, and
    exposes the authenticated HTTP and WebSocket interfaces.
 
-The frontend must be built before creating a distributable package. A packaged
-application has this layout:
+The frontend must be built before creating a local application package. A
+packaged application has this layout:
 
 ```text
 package-directory/
@@ -31,11 +31,24 @@ package-directory/
 ├── OPERATIONS.md
 ├── AGENTS.md
 ├── TODO.md
+├── CONTRIBUTING.md
+├── SECURITY.md
+├── CODE_OF_CONDUCT.md
+├── THIRD_PARTY_NOTICES.md
+├── docs/
+│   └── screenshots/
 └── LICENSE
 ```
 
 The `web` directory must remain next to the executable. When the backend is run
 with `cargo run`, it also searches the source tree's `web/dist` directory.
+
+The build scripts create local packages; the repository does not currently
+publish prebuilt binary releases. Before redistributing an executable or
+browser bundle, generate and include the complete upstream license and NOTICE
+texts described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The
+informational notice alone is not a complete binary-redistribution license
+bundle.
 
 ## Supported and validated platforms
 
@@ -67,8 +80,8 @@ At minimum:
    changes;
 5. update every affected Markdown file in the same commit.
 
-If the local machine cannot run Linux, use the project's Linux test host or an
-equivalent Linux CI/VM. Do not mark the change complete or describe it as
+If the local machine cannot run Linux, use GitHub Actions, a Linux VM, or a
+Linux host you control. Do not mark the change complete or describe it as
 Linux-supported until that validation has actually passed.
 
 Documentation must describe the current source and verified behavior. Check
@@ -78,22 +91,16 @@ of copying potentially stale text from an earlier release.
 
 ## Source checkout
 
-The canonical repository is private:
+The public source repository is:
 
 ```text
-https://git.bvsoft.net/bproject07/Codex-web.git
+https://github.com/bproject07/Codex-web.git
 ```
-
-An account must have at least `read` permission before it can clone:
 
 ```bash
-git clone https://git.bvsoft.net/bproject07/Codex-web.git
+git clone https://github.com/bproject07/Codex-web.git
 cd Codex-web
 ```
-
-Use the credential prompt or the operating system's Git credential manager.
-Do not put a username, password, access token, or authenticated URL into a
-script, shell history, Markdown file, or Git remote.
 
 After cloning, verify the checkout:
 
@@ -113,7 +120,7 @@ Both Windows and Linux builds require:
 - Node.js `^20.19.0` or `>=22.12.0`
 - npm
 - a current stable Rust toolchain with Cargo (the locked graph currently
-  requires Rust 1.86 or newer)
+  requires Rust 1.88 or newer)
 - enough space for `web/node_modules` and `server/target`
 
 Codex CLI is not needed to compile or run the automated unit tests. It is
@@ -211,6 +218,12 @@ dist/
 ├── OPERATIONS.md
 ├── AGENTS.md
 ├── TODO.md
+├── CONTRIBUTING.md
+├── SECURITY.md
+├── CODE_OF_CONDUCT.md
+├── THIRD_PARTY_NOTICES.md
+├── docs/
+│   └── screenshots/
 └── LICENSE
 ```
 
@@ -347,6 +360,12 @@ dist-linux/
 ├── OPERATIONS.md
 ├── AGENTS.md
 ├── TODO.md
+├── CONTRIBUTING.md
+├── SECURITY.md
+├── CODE_OF_CONDUCT.md
+├── THIRD_PARTY_NOTICES.md
+├── docs/
+│   └── screenshots/
 └── LICENSE
 ```
 
@@ -435,7 +454,10 @@ frontend and release backend have already been built:
 install -d dist-linux/web
 install -m 0755 server/target/release/codex-web dist-linux/codex-web
 cp -R web/dist/. dist-linux/web/
-cp README.md BUILDING.md OPERATIONS.md AGENTS.md TODO.md LICENSE dist-linux/
+cp README.md BUILDING.md OPERATIONS.md AGENTS.md TODO.md \
+  CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md \
+  THIRD_PARTY_NOTICES.md LICENSE dist-linux/
+cp -R docs dist-linux/
 ```
 
 If `dist-linux` already contains an older build, prefer

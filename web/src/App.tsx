@@ -682,7 +682,10 @@ export function App() {
     <main className="app-shell">
       <header className="app-header">
         <div className="app-identity">
-          <h1>Codex Web Terminal</h1>
+          <h1>
+            Codex Web Terminal
+            <span className="community-label">Unofficial</span>
+          </h1>
           <div className="project-path" title={session?.project}>
             <span>Project:</span> {session?.project ?? "Loading…"}
           </div>
@@ -1037,8 +1040,14 @@ function AuthenticationScreen({ onToken }: { onToken: (token: string) => void })
         <div className="auth-mark" aria-hidden="true">
           &gt;_
         </div>
-        <h1>Codex Web Terminal</h1>
+        <h1>
+          Codex Web Terminal
+          <span className="community-label">Unofficial</span>
+        </h1>
         <p>Enter the authentication token printed once in the server console.</p>
+        <p className="auth-disclaimer">
+          Independent community wrapper. Codex CLI is installed separately.
+        </p>
         <label htmlFor="token">Authentication token</label>
         <input
           id="token"
