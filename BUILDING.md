@@ -49,6 +49,33 @@ The following paths have been exercised:
 The Unix command construction also applies to macOS, but macOS has not yet had
 a full runtime validation.
 
+## Cross-platform validation policy
+
+Every code change, bug fix, refactor, or dependency update must be tested on
+both Windows and Linux before commit or release. A successful test on only one
+operating system is not sufficient, even when the edited code appears
+platform-independent.
+
+At minimum:
+
+1. run the frontend tests and production build on Windows and Linux;
+2. run Rust formatting, tests, Clippy, and the locked release build on Windows
+   and Linux;
+3. validate the package layout on both platforms;
+4. run a native PTY/runtime smoke test on each affected platform when launch,
+   process lifecycle, WebSocket I/O, resize, replay, or terminal behavior
+   changes;
+5. update every affected Markdown file in the same commit.
+
+If the local machine cannot run Linux, use the project's Linux test host or an
+equivalent Linux CI/VM. Do not mark the change complete or describe it as
+Linux-supported until that validation has actually passed.
+
+Documentation must describe the current source and verified behavior. Check
+CLI flags, environment variables, dependency versions, build commands,
+package contents, UI labels, platform support, and known limitations instead
+of copying potentially stale text from an earlier release.
+
 ## Source checkout
 
 The canonical repository is private:
@@ -560,6 +587,10 @@ git status --short
 git diff --check
 git diff
 ```
+
+For any code change, also record that the complete Windows and Linux validation
+from this guide passed. Review all Markdown changes for current, verifiable
+information before committing.
 
 ## Troubleshooting build failures
 

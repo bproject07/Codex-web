@@ -539,7 +539,8 @@ before upgrading.
 Recommended sequence:
 
 1. Pull or check out the desired reviewed commit.
-2. Run the full build and test matrix from [BUILDING.md](BUILDING.md).
+2. Run the full Windows and Linux build/test matrix from
+   [BUILDING.md](BUILDING.md). Every code update must pass both platforms.
 3. Keep the old package until the new one has passed validation.
 4. Stop the existing server.
 5. Replace the executable and the entire adjacent `web` directory together.
@@ -550,6 +551,9 @@ Recommended sequence:
 8. Remove the old package only after the new runtime is confirmed.
 
 Do not mix a new frontend with an older backend during deployment.
+Before deployment, confirm that the Markdown documentation still matches the
+current commands, versions, package contents, supported platforms, behavior,
+and known limitations.
 
 ## Troubleshooting
 

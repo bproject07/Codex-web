@@ -561,6 +561,16 @@ still excluded.
 
 ## Tests
 
+Every code change, bug fix, refactor, or dependency update must be validated on
+both Windows and Linux before it is considered complete. Do not rely only on a
+successful Windows build. Run the matching frontend, Rust, package, and runtime
+checks from [BUILDING.md](BUILDING.md) on both platforms.
+
+Documentation is part of the change: keep commands, required versions,
+supported platforms, package layouts, UI behavior, and known limitations
+accurate in the same commit. Do not preserve a statement merely because it was
+true for an older build.
+
 Frontend:
 
 ```powershell

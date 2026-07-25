@@ -177,6 +177,12 @@ where the required browser tooling is available.
 
 ## Required validation
 
+Every code change, bug fix, refactor, or dependency update requires validation
+on both Windows and Linux. This rule applies even when a change looks
+platform-independent. A Windows-only result is incomplete. If Linux is not
+available locally, use the designated Linux test host or equivalent Linux
+CI/VM; do not skip or simulate the platform result.
+
 ### Frontend
 
 From `web/`:
@@ -225,6 +231,11 @@ Check:
 
 When CLI flags, environment variables, UI labels, session semantics, build
 outputs, or supported platforms change, update all affected Markdown files.
+Documentation must reflect the current source and the latest verified
+Windows/Linux behavior in the same commit. Recheck commands, versions,
+platform claims, package layouts, UI labels, and limitations; do not copy
+stale information forward.
+
 Search for stale platform-specific text:
 
 ```text
@@ -293,11 +304,14 @@ A change is complete only when:
 
 1. The requested behavior is implemented in source, not only in generated
    output.
-2. Relevant frontend and Rust tests pass.
-3. Both OS-specific paths are checked when platform code changed.
+2. Relevant frontend and Rust tests pass on both Windows and Linux for every
+   code change.
+3. Both OS-specific paths are checked, including for changes that appear
+   platform-independent.
 4. A real PTY/runtime test is performed when process launch or terminal I/O
    changed.
-5. Documentation matches the actual commands and package layout.
+5. Documentation contains current, verified information and matches the actual
+   commands, versions, behavior, supported platforms, and package layout.
 6. No secrets, generated artifacts, or unrelated changes are staged.
 7. Live services created for testing are stopped unless the user asked to keep
    them running.
