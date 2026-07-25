@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
     let static_directory = static_directory();
     if static_directory.is_none() {
         tracing::warn!(
-            "frontend build not found; use the Vite development server or run scripts\\build.ps1"
+            "frontend build not found; use the Vite development server or build the web package"
         );
     }
 

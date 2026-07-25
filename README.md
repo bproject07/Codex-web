@@ -1,17 +1,28 @@
 # Codex Web Terminal
 
-Codex Web Terminal runs the **real Codex CLI** in a Windows pseudo-terminal
-(ConPTY) and exposes that terminal to a browser through an authenticated
-WebSocket. It does not reimplement or scrape the Codex interface. ANSI output,
-cursor movement, menus, approval prompts, diffs, spinners, keyboard input, and
-the rest of the Codex TUI are interpreted by xterm.js from the original PTY
-byte stream.
+Codex Web Terminal runs the **real Codex CLI** in a native pseudo-terminal
+(ConPTY on Windows, a Unix PTY on Linux and macOS) and exposes that terminal to
+a browser through an authenticated WebSocket. It does not reimplement or
+scrape the Codex interface. ANSI output, cursor movement, menus, approval
+prompts, diffs, spinners, keyboard input, and the rest of the Codex TUI are
+interpreted by xterm.js from the original PTY byte stream.
 
 The project is an independent wrapper. It does not download, vendor, modify,
 or update the OpenAI Codex source code.
 
 > **This application provides remote terminal access.**
 > **Do not expose it directly to the public internet.**
+
+## Documentation
+
+- [BUILDING.md](BUILDING.md) — complete Windows and Linux prerequisites,
+  validation, build, package, and troubleshooting instructions
+- [OPERATIONS.md](OPERATIONS.md) — startup, tokens, browser controls,
+  Tailscale, services, monitoring, shutdown, and upgrades
+- [AGENTS.md](AGENTS.md) — repository map, invariants, test matrix, and
+  definition of done for coding agents
+- [TODO.md](TODO.md) — deliberately unimplemented ideas and their safety
+  requirements
 
 ## Architecture
 
@@ -27,13 +38,14 @@ Rust server
           │
           │ managed session registry (maximum 4)
           ▼
-Up to 4 Windows ConPTY sessions
+Up to 4 native PTY sessions
           │
-          ├── cmd.exe for codex.cmd
-          └── PowerShell or cmd.exe for codex.exe
-                    │
-                    ▼
-                Codex CLI per session
+          ├── Windows: cmd.exe for codex.cmd,
+          │             PowerShell or cmd.exe for codex.exe
+          └── Unix: resolved Codex executable launched directly
+                         │
+                         ▼
+                     Codex CLI per session
 ```
 
 The server owns up to four independent, web-managed Codex PTY sessions. The
@@ -45,19 +57,24 @@ resumes live output.
 
 ## Current scope
 
-- Up to four persistent, web-managed Codex processes per server
+- Up to four persistent, web-managed session entries per server; each running
+  entry owns one Codex process
 - One primary session named `Terminal 1`, started automatically
 - Up to four authenticated WebSocket clients per terminal session
 - Fixed project directory selected when the server starts
-- One 2 MiB bounded raw terminal output buffer per session
+- One 16 MiB bounded raw terminal output buffer per session
+- Up to the newest 2 MiB replayed to each newly attached client
 - Initial PTY size of 120 columns by 35 rows
 - Validated browser resize range: 20–500 columns and 5–300 rows
-- Windows 10/11 is the primary platform
+- Windows 10/11 and x86_64 Linux are tested platforms
+- Linux runtime validation currently covers Arch Linux
 - No built-in TLS, reverse proxy, or tunnel
 
 Clients attached to the same terminal session share its PTY and can type into
-it concurrently. The authenticated URL grants access to every managed session,
-so do not share it with people who should not have terminal access.
+it concurrently. They also share its PTY dimensions, so the most recent valid
+resize from any attached browser wins. The authenticated URL grants full
+read/write control over every managed session, so do not share it with anyone
+who should not have terminal access.
 
 ## Prerequisites
 
@@ -66,6 +83,12 @@ so do not share it with people who should not have terminal access.
 - Windows 10 version 1809 or newer, or Windows 11, for ConPTY
 - PowerShell 5.1 or newer
 - A supported browser: current Chrome, Edge, Firefox, or Safari on mobile
+
+### Linux
+
+- A current x86_64 Linux distribution with standard Unix PTY support
+- GCC or Clang and the normal native build tools required by Rust
+- A supported browser on the client device
 
 ### Rust
 
@@ -87,7 +110,8 @@ cargo --version
 
 ### Node.js
 
-Install Node.js 20.19 or newer with npm, then verify:
+Install a Vite-supported Node.js release: Node 20.19 or newer within the Node
+20 line, or Node 22.12 or newer. Then verify:
 
 ```powershell
 node --version
@@ -121,13 +145,23 @@ user environment and uses the existing Codex configuration and login.
 
 From the repository root:
 
+Windows:
+
 ```powershell
 .\scripts\build.ps1
 .\scripts\run.ps1 -Project "C:\Projects\my-app"
 ```
 
+Linux:
+
+```bash
+./scripts/build.sh
+./scripts/run.sh "/path/to/my-app" --no-open-browser
+```
+
 The server starts on `127.0.0.1:8787`, generates an ephemeral cryptographically
-secure token, and prints an authenticated URL once:
+secure token, and prints an authenticated URL. When bound to an unspecified
+address, it can print both local and discovered network URLs:
 
 ```text
 Codex Web Terminal started
@@ -149,7 +183,7 @@ The generated token changes whenever the server restarts. Supply `--token` or
 
 ## Development
 
-Use two PowerShell terminals.
+Use two terminals.
 
 Terminal 1:
 
@@ -158,9 +192,16 @@ cd server
 cargo run -- --project "C:\Projects\my-app" --no-open-browser
 ```
 
+On Linux, the equivalent command is:
+
+```bash
+cd server
+cargo run -- --project "/path/to/my-app" --no-open-browser
+```
+
 Terminal 2:
 
-```powershell
+```text
 cd web
 npm install
 npm run dev
@@ -179,53 +220,91 @@ If the active Rust toolchain is MSVC but Visual C++ is unavailable, use a
 configured GNU toolchain for local validation:
 
 ```powershell
-rustup run stable-x86_64-pc-windows-gnu cargo run -- `
+$gnuToolchainLine = rustup toolchain list |
+  Where-Object { $_ -match "x86_64-pc-windows-gnu" } |
+  Select-Object -First 1
+if (-not $gnuToolchainLine) {
+  throw "Install an x86_64-pc-windows-gnu Rust toolchain first."
+}
+$gnuToolchain = ($gnuToolchainLine -split "\s+")[0]
+
+rustup run $gnuToolchain cargo run -- `
   --project "C:\Projects\my-app" `
   --no-open-browser
 ```
 
-Replace the toolchain name with the exact installed name shown by
-`rustup toolchain list`.
+The command derives the exact installed GNU toolchain name instead of assuming
+that it is named `stable`.
 
 ## Production build
 
-The manual workflow is:
+The reproducible manual workflow is the same on every platform:
 
-```powershell
+```text
 cd web
-npm install
+npm ci
 npm run build
 
-cd ..\server
-cargo build --release
+cd ../server
+cargo build --release --locked
 ```
 
-The automated workflow is:
+On Windows, the convenience build script is:
 
 ```powershell
 .\scripts\build.ps1
 ```
 
-It checks Node.js, npm, Rust, builds both applications, and creates:
+On Linux:
+
+```bash
+./scripts/build.sh
+```
+
+The scripts check the required tools, build both applications, and create:
 
 ```text
-dist/
+dist/                    # Windows
 ├── codex-web.exe
 ├── web/
 │   ├── index.html
 │   └── assets/
 ├── README.md
+├── BUILDING.md
+├── OPERATIONS.md
+├── AGENTS.md
+├── TODO.md
+└── LICENSE
+
+dist-linux/              # Linux
+├── codex-web
+├── web/
+│   ├── index.html
+│   └── assets/
+├── README.md
+├── BUILDING.md
+├── OPERATIONS.md
+├── AGENTS.md
+├── TODO.md
 └── LICENSE
 ```
 
 Keep the `web` directory next to `codex-web.exe`. The executable serves those
-assets. During `cargo run`, the backend also looks for `web/dist`.
+assets. A Linux package uses the same layout with the extensionless
+`codex-web` binary. During `cargo run`, the backend also looks for `web/dist`.
 
 ## Command-line interface
 
 ```powershell
 .\dist\codex-web.exe --help
 .\dist\codex-web.exe --version
+```
+
+On Linux:
+
+```bash
+./server/target/release/codex-web --help
+./server/target/release/codex-web --version
 ```
 
 Local example:
@@ -239,14 +318,15 @@ Local example:
   --command codex
 ```
 
-Trusted network or Tailscale example:
+Tailscale example using the machine's exact Tailscale IP:
 
 ```powershell
+$env:CODEX_WEB_TOKEN = "generate-and-paste-a-long-random-token"
+$tailscaleIp = (tailscale ip -4 | Select-Object -First 1).Trim()
 .\dist\codex-web.exe `
   --project "C:\Projects\my-app" `
-  --host 0.0.0.0 `
-  --port 8787 `
-  --token "replace-with-a-long-random-token"
+  --host $tailscaleIp `
+  --port 8787
 ```
 
 Supported arguments:
@@ -256,7 +336,7 @@ Supported arguments:
 | `--host` | Bind address; defaults to `127.0.0.1` |
 | `--port` | TCP port; defaults to `8787` |
 | `--project` | Fixed Codex working directory |
-| `--shell` | `powershell` or `cmd` |
+| `--shell` | Windows-only: `powershell` or `cmd`; ignored on Unix |
 | `--command` | Executable name or path; defaults to `codex` |
 | `--token` | Authentication token, minimum 16 characters |
 | `--no-open-browser` | Do not launch the default browser |
@@ -264,7 +344,9 @@ Supported arguments:
 
 The command value is treated as an executable name or file path, not as an
 arbitrary shell expression. A discovered `.cmd` entry point is always invoked
-through `cmd.exe /d /s /c`, which is required for the npm Codex package.
+through `cmd.exe /d /s /c` on Windows, which is required for the npm Codex
+package. On Unix, the resolved executable is launched directly without a shell
+wrapper.
 
 ## Environment variables
 
@@ -277,7 +359,7 @@ CLI arguments override environment variables.
 | `CODEX_WEB_PROJECT_DIR` | Current directory |
 | `CODEX_WEB_TOKEN` | Secure random token generated at startup |
 | `CODEX_WEB_COMMAND` | `codex` |
-| `CODEX_WEB_SHELL` | `powershell` |
+| `CODEX_WEB_SHELL` | `powershell`; Windows-only and ignored on Unix |
 | `CODEX_WEB_LOG_LEVEL` | `info` |
 
 The project directory is canonicalized and checked once at startup. No API or
@@ -374,9 +456,10 @@ Normal xterm keyboard handling provides Enter, Escape, Backspace, Tab, arrow
 keys, Home, End, Page Up/Down, Ctrl+C, Ctrl+L, Ctrl+R, paste, and other terminal
 sequences.
 
-The mobile toolbar adds Esc, Tab, arrows, Enter, Page Up/Down, Ctrl+C, and
-Ctrl+L. Its Ctrl mode converts the next typed ASCII letter to the matching
-control character, then automatically turns off.
+The mobile toolbar begins with Enter and the arrow keys, followed by Page
+Up/Down, Ctrl mode, Esc, Tab, Ctrl+C, Ctrl+L, Top, Live, and Hide. Its Ctrl mode
+converts the next typed ASCII letter to the matching control character, then
+automatically turns off.
 
 The header's **Sessions**, **New**, and **Attach** controls manage independent
 live PTYs. They switch which managed session feeds the same xterm screen; they
@@ -401,13 +484,17 @@ Security measures in this application:
 - four-client-per-session limit
 - 64 KiB WebSocket message limit
 - 4 KiB JSON control-message limit
-- 2 MiB output-buffer limit
+- 16 MiB retained output-buffer limit per session
+- 2 MiB maximum initial replay per browser attachment
 - Content Security Policy, frame denial, no-referrer policy, and MIME sniffing
   protection
-- no logging of token, keys, input, or terminal output
+- structured tracing excludes token, keys, input, and terminal output
 
-The URL initially contains a credential. Do not paste it into chat, logs,
-screenshots, analytics, issue trackers, or browser-sync services.
+The startup console intentionally prints the authenticated URL. Redirected
+stdout and service journals can therefore retain that URL even though
+structured tracing excludes the token. Protect console output and journals.
+Do not paste the URL into chat, logs, screenshots, analytics, issue trackers,
+or browser-sync services.
 
 For remote use:
 
@@ -420,15 +507,23 @@ For remote use:
 Do not automatically expose the port with a public tunnel or router port
 forward. This project intentionally contains no such feature.
 
+Origin validation has a deliberate deployment consequence: a backend bound to
+`127.0.0.1` accepts only loopback browser origins. When an HTTPS reverse proxy
+serves a non-loopback hostname, bind the backend to a specific private or
+Tailscale address, or to `0.0.0.0` behind a restrictive firewall. The proxy
+must preserve the public `Host` header and port and forward WebSocket Upgrade
+and binary frames unchanged.
+
 ## Tailscale example
 
 Start the server with an explicit strong token:
 
 ```powershell
 $env:CODEX_WEB_TOKEN = "generate-and-paste-a-long-random-token"
+$tailscaleIp = (tailscale ip -4 | Select-Object -First 1).Trim()
 .\dist\codex-web.exe `
   --project "C:\Projects\my-app" `
-  --host 0.0.0.0 `
+  --host $tailscaleIp `
   --port 8787
 ```
 
@@ -439,7 +534,9 @@ http://my-windows-pc:8787/?token=...
 ```
 
 Restrict access with Tailscale ACLs. For stronger browser transport security,
-put an HTTPS reverse proxy on the Tailscale interface.
+put an HTTPS reverse proxy on the Tailscale interface. Binding to the exact
+Tailscale IP is narrower than `0.0.0.0`; see [OPERATIONS.md](OPERATIONS.md) for
+Windows, Linux, firewall, and service examples.
 
 ## Logging
 
@@ -447,12 +544,17 @@ put an HTTPS reverse proxy on the Tailscale interface.
 available, client connection/disconnection, restart, process exit, and
 sanitized errors.
 
-It deliberately does not record:
+Structured tracing deliberately does not record:
 
 - authentication tokens
 - pressed keys or terminal input
 - terminal output
 - Codex credentials or authentication files
+
+Separately, normal startup stdout prints the full authenticated URL so the
+operator can open it. Capturing stdout in a file or service journal captures
+that credential. Use an explicit protected token and an appropriate service
+logging policy for persistent installations; see [OPERATIONS.md](OPERATIONS.md).
 
 Use `--log-level debug` only for server-level diagnostics; terminal content is
 still excluded.
@@ -462,25 +564,28 @@ still excluded.
 Frontend:
 
 ```powershell
-cd web
+Push-Location .\web
+npm ci
 npm test
 npm run build
+Pop-Location
 ```
 
 Rust:
 
 ```powershell
-cd server
+Push-Location .\server
 cargo fmt --all -- --check
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+cargo test --all-targets --locked
+cargo clippy --all-targets --locked -- -D warnings
+Pop-Location
 ```
 
 Tests cover token validation and throttling, config validation, resize and
 control-message parsing, session state transitions, the bounded output buffer,
-Windows `.cmd` invocation with spaces, control encoding, reconnect
-state/backoff, UTF-8 input, and mobile Ctrl conversion. The automated tests do
-not require a real Codex process.
+Windows `.cmd` invocation with spaces, direct Unix PTY execution, control
+encoding, reconnect state/backoff, UTF-8 input, and mobile Ctrl conversion.
+The automated tests do not require a real Codex process.
 
 ## Troubleshooting
 
@@ -493,9 +598,17 @@ where.exe codex
 codex --version
 ```
 
+On Linux:
+
+```bash
+command -v codex
+codex --version
+```
+
 For an npm installation, `where.exe` should normally show `codex.cmd`. Restart
 PowerShell after installation so it receives the updated `PATH`. You can also
-pass a trusted absolute path with `--command`.
+pass a trusted absolute path with `--command`. On Linux, ensure the resolved
+file is executable.
 
 ### Authentication failed
 
@@ -508,9 +621,9 @@ before trying again.
 
 Check `/api/sessions` through the UI status, confirm that the selected
 `terminalId` still exists, and inspect the server log. Confirm that
-`codex --version` succeeds for the same Windows user. Try a manual Reconnect,
-then restart only the affected managed session. Browser privacy extensions
-that block WebSockets can also cause a blank terminal.
+`codex --version` succeeds for the same operating-system user. Try a manual
+Reconnect, then restart only the affected managed session. Browser privacy
+extensions that block WebSockets can also cause a blank terminal.
 
 ### Broken ANSI rendering
 
@@ -565,16 +678,18 @@ when available.
 - The four-session registry contains only PTYs created and owned by the current
   Codex Web Terminal server process.
 - Codex Web Terminal cannot retroactively attach to an arbitrary Codex CLI or
-  Windows Terminal process that was started elsewhere. It does not possess the
-  existing process's ConPTY master handle or input/output pipes.
+  terminal process that was started elsewhere. It does not possess the
+  existing process's PTY master handle or input/output pipes.
 - Concurrent clients attached to the same managed session share input and can
-  interfere with one another.
+  interfere with one another. They also share one PTY size; the last accepted
+  resize wins, so different viewport sizes can cause redraw or scroll changes.
 - The server does not implement TLS. Use a trusted proxy or private overlay
   network for remote transport.
 - Replay stores raw PTY output, not a server-side terminal screen model. If
-  more than 2 MiB has been emitted, the oldest ANSI state is discarded and a
-  reconnect may reconstruct an imperfect screen. A Codex redraw or restart
-  repairs it.
+  more than 16 MiB has been retained, the oldest bytes are discarded. A new
+  attachment receives only the newest 2 MiB, so a reconnect may reconstruct an
+  imperfect screen when required ANSI state is older. A Codex redraw or
+  restart repairs it.
 - Restarting the Rust server terminates all managed PTY sessions and changes an
   automatically generated token. Saved Codex conversations may be resumed in a
   new PTY, but the previous live terminal process cannot be adopted.
@@ -584,8 +699,13 @@ when available.
   followed by the portable-pty child kill and ConPTY handle closure. A process
   that deliberately detaches and escapes that process tree is outside the
   session lifecycle.
-- Linux and macOS may work through portable-pty, but Windows command discovery
-  and ConPTY are the tested priority.
+- Linux terminate/restart acts on the direct PTY child. A descendant that
+  deliberately detaches from that process is not guaranteed to be terminated;
+  stopping the documented systemd service with `KillMode=control-group`
+  provides service-wide cleanup.
+- Native Linux build and PTY runtime are validated on x86_64 Arch Linux. Unix
+  command construction is covered by automated tests; macOS has not yet been
+  runtime-tested.
 
 ## License
 

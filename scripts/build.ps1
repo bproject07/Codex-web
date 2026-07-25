@@ -44,10 +44,23 @@ if ($distributionDirectory -ne $expectedDistributionDirectory) {
     throw "Refusing to use an unexpected distribution directory."
 }
 
-Assert-Command -Name "node" -InstallHint "Install Node.js 20.19 or newer."
+Assert-Command -Name "node" -InstallHint "Install Node.js ^20.19.0 or >=22.12.0."
 Assert-Command -Name "npm" -InstallHint "Install npm with Node.js."
 Assert-Command -Name "cargo" -InstallHint "Install stable Rust from https://rustup.rs/."
 Assert-Command -Name "rustc" -InstallHint "Install stable Rust from https://rustup.rs/."
+
+Invoke-Checked `
+    -Command {
+        node -e @"
+const [major, minor] = process.versions.node.split(".").map(Number);
+const supported =
+  (major === 20 && minor >= 19) ||
+  (major === 22 && minor >= 12) ||
+  major > 22;
+if (!supported) process.exit(1);
+"@
+    } `
+    -FailureMessage "Unsupported Node.js version; use ^20.19.0 or >=22.12.0"
 
 Write-Host "Node.js: $(node --version)"
 Write-Host "npm:     $(npm --version)"
@@ -97,12 +110,12 @@ Push-Location $serverDirectory
 try {
     if ($gnuToolchain) {
         Invoke-Checked `
-            -Command { rustup run $gnuToolchain cargo build --release } `
+            -Command { rustup run $gnuToolchain cargo build --release --locked } `
             -FailureMessage "Rust release build failed"
     }
     else {
         Invoke-Checked `
-            -Command { cargo build --release } `
+            -Command { cargo build --release --locked } `
             -FailureMessage "Rust release build failed"
     }
 }
@@ -127,7 +140,22 @@ if (-not (Test-Path -LiteralPath (Join-Path $frontendBuild "index.html") -PathTy
 }
 
 if (Test-Path -LiteralPath $distributionDirectory) {
-    Remove-Item -LiteralPath $distributionDirectory -Recurse -Force
+    $distributionItem = Get-Item -LiteralPath $distributionDirectory -Force
+    if (($distributionItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Refusing to replace a reparse-point distribution directory."
+    }
+    try {
+        Remove-Item -LiteralPath $distributionDirectory -Recurse -Force
+    }
+    catch {
+        throw @"
+The distribution directory could not be recreated:
+$distributionDirectory
+
+Stop any process using files from that directory, then run the build again.
+Original error: $($_.Exception.Message)
+"@
+    }
 }
 New-Item -ItemType Directory -Path $distributionDirectory | Out-Null
 $packagedWebDirectory = New-Item `
@@ -142,6 +170,14 @@ Copy-Item -Path (Join-Path $frontendBuild "*") `
     -Recurse `
     -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") `
+    -Destination $distributionDirectory
+Copy-Item -LiteralPath (Join-Path $projectRoot "BUILDING.md") `
+    -Destination $distributionDirectory
+Copy-Item -LiteralPath (Join-Path $projectRoot "OPERATIONS.md") `
+    -Destination $distributionDirectory
+Copy-Item -LiteralPath (Join-Path $projectRoot "AGENTS.md") `
+    -Destination $distributionDirectory
+Copy-Item -LiteralPath (Join-Path $projectRoot "TODO.md") `
     -Destination $distributionDirectory
 Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") `
     -Destination $distributionDirectory

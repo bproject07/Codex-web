@@ -239,7 +239,7 @@ async fn development_fallback() -> impl IntoResponse {
 <body style="font:16px system-ui;background:#0c0c0c;color:#eee;padding:2rem">
 <h1>Frontend build not found</h1>
 <p>For development, run <code>npm run dev</code> in the <code>web</code> directory and open the Vite URL.</p>
-<p>For production, run <code>scripts\build.ps1</code>.</p>
+<p>For production, build the frontend and keep its <code>web</code> directory next to the server executable.</p>
 </body>
 </html>"#,
         ),

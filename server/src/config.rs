@@ -38,7 +38,7 @@ pub struct CliArgs {
     #[arg(long = "project", env = "CODEX_WEB_PROJECT_DIR", default_value = ".")]
     pub project_dir: PathBuf,
 
-    /// Windows shell used to launch an executable Codex entry point.
+    /// Windows shell used to launch an executable Codex entry point; ignored on non-Windows hosts.
     #[arg(
         long,
         env = "CODEX_WEB_SHELL",

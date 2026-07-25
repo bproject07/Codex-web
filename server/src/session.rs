@@ -800,6 +800,9 @@ fn child_wait_loop(
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     termination_receiver: Receiver<TerminationRequest>,
 ) {
+    #[cfg(not(windows))]
+    let _ = pid;
+
     loop {
         match termination_receiver.recv_timeout(Duration::from_millis(50)) {
             Ok(request) => {

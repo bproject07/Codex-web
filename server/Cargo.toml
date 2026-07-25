@@ -2,7 +2,8 @@
 name = "codex-web-terminal"
 version = "0.1.0"
 edition = "2024"
-description = "Run the real Codex CLI in a Windows ConPTY and control it from a browser"
+rust-version = "1.86"
+description = "Run the real Codex CLI in a native PTY and control it from a browser"
 license = "MIT"
 
 [[bin]]
