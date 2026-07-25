@@ -4,6 +4,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-4c8bf5.svg)](BUILDING.md)
 
+**Unlike structured remote-control interfaces, Codex Web Terminal provides
+full, self-hosted access to the real Codex CLI experience directly from any
+desktop or mobile browser.**
+
 Codex Web Terminal runs the **real Codex CLI** in a native pseudo-terminal
 (ConPTY on Windows, a Unix PTY on Linux and macOS) and exposes that terminal to
 a browser through an authenticated WebSocket. It does not reimplement or
