@@ -146,6 +146,130 @@ button:disabled {
   font-size: 0.76rem;
 }
 
+.session-switcher {
+  display: flex;
+  min-width: 0;
+  flex: none;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.session-tabs {
+  display: flex;
+  min-width: 5.5rem;
+  max-width: clamp(8rem, 28vw, 28rem);
+  align-items: center;
+  gap: 0.2rem;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+}
+
+.session-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.header-actions .session-tab {
+  display: inline-flex;
+  min-width: 6.2rem;
+  max-width: 10rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  overflow: hidden;
+  border-color: #3a414b;
+  background: #191d23;
+  color: #cbd2dc;
+  white-space: nowrap;
+}
+
+.header-actions .session-tab:hover {
+  border-color: #586373;
+  background: #232932;
+}
+
+.header-actions .session-tab--active {
+  border-color: #5c9de8;
+  background: #1b3048;
+  color: #f1f7ff;
+  box-shadow: inset 0 -2px 0 #63a8f5;
+}
+
+.session-tab-status {
+  width: 0.42rem;
+  height: 0.42rem;
+  flex: none;
+  border-radius: 50%;
+  background: #7d8795;
+}
+
+.session-tab-status--running {
+  background: #4fd66f;
+  box-shadow: 0 0 0.35rem #4fd66f66;
+}
+
+.session-tab-status--starting,
+.session-tab-status--terminating {
+  background: #f0b84f;
+}
+
+.session-tab-status--failed,
+.session-tab-status--exited,
+.session-tab-status--terminated {
+  background: #ef6262;
+}
+
+.session-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-tab-label--compact,
+.session-new-label--compact,
+.session-manage-label--compact {
+  display: none;
+}
+
+.session-tab-primary {
+  display: inline-grid;
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  place-items: center;
+  border: 1px solid #4c6684;
+  border-radius: 50%;
+  color: #b9d8f7;
+  font-size: 0.55rem;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.header-actions .session-scroll-button {
+  width: 1.75rem;
+  min-height: 2rem;
+  padding: 0;
+  border-color: #3b4654;
+  color: #cbd8e8;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.header-actions .session-scroll-button:disabled {
+  cursor: default;
+  opacity: 0.3;
+}
+
+.header-actions .session-new-button {
+  min-width: 3.65rem;
+}
+
+.header-actions .session-manage-button {
+  min-width: 4.5rem;
+}
+
 .header-actions .header-action--sessions {
   border-color: #466180;
   background: #1d2a39;
@@ -789,6 +913,15 @@ button:disabled {
     padding-bottom: 0.05rem;
   }
 
+  .session-tabs {
+    min-width: 5rem;
+    max-width: min(46vw, 11rem);
+  }
+
+  .session-scroll-button {
+    display: none;
+  }
+
   .header-actions button,
   .status {
     min-height: 2.5rem;
@@ -835,6 +968,36 @@ button:disabled {
   .status-label--compact,
   .action-label--compact {
     display: inline;
+  }
+
+  .session-tab-label--full,
+  .session-new-label--full,
+  .session-manage-label--full {
+    display: none;
+  }
+
+  .session-tab-label--compact,
+  .session-new-label--compact,
+  .session-manage-label--compact {
+    display: inline;
+  }
+
+  .header-actions .session-tab {
+    min-width: 3.35rem;
+    max-width: 4.5rem;
+    gap: 0.28rem;
+    padding-inline: 0.45rem;
+  }
+
+  .session-tab-primary {
+    width: 0.9rem;
+    height: 0.9rem;
+    font-size: 0.5rem;
+  }
+
+  .header-actions .session-new-button,
+  .header-actions .session-manage-button {
+    min-width: 2.75rem;
   }
 
   .header-actions {
@@ -944,6 +1107,10 @@ button:disabled {
     width: auto;
     margin-inline: 0;
     padding-inline: 0;
+  }
+
+  .session-tabs {
+    max-width: min(38vw, 18rem);
   }
 }
 

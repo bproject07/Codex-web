@@ -45,8 +45,10 @@ The most important properties are:
 │   ├── build.sh               Linux production package
 │   ├── run.sh                 Linux launcher
 │   ├── fixtures/              Deterministic, synthetic demo PTY
+│   ├── desktop-slash-regression.py
 │   ├── mobile-codex-smoke.py  Browser/mobile smoke test
-│   └── mobile-resize-regression.py
+│   ├── mobile-resize-regression.py
+│   └── session-tabs-regression.py
 ├── server/
 │   ├── Cargo.toml
 │   ├── Cargo.lock
@@ -69,6 +71,7 @@ The most important properties are:
     └── src/
         ├── App.tsx            Main UI, sessions, settings, lifecycle actions
         ├── api.ts             Token/session storage and HTTP API client
+        ├── sessions/          Header session tabs and navigation helpers
         ├── terminal/
         │   ├── TerminalView.tsx
         │   ├── MobileToolbar.tsx
@@ -168,6 +171,12 @@ when changing batching or reconnect behavior.
   and hidden xterm textarea are moving.
 - The mobile toolbar order starts with Enter and arrows, then history/control
   keys.
+- Session tabs remain horizontally scrollable on overflow. **+ New** and
+  **Manage** stay outside the inner tab scroller so they remain discoverable.
+- On desktop, an unmodified `/` pressed outside an editable control or dialog
+  is routed to the connected terminal and its browser default is suppressed.
+  Do not intercept modified shortcuts, form input, dialogs, IME composition,
+  or coarse-pointer/mobile input.
 - `Top`, `PgUp`, `PgDn`, and `Live` manipulate client scrollback; they are not
   terminal input.
 - Diagnostics must not include token, keystrokes, or terminal content.

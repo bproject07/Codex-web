@@ -31,6 +31,8 @@ import {
   type TerminalSettings,
   type ThemeName,
 } from "./terminal/settings";
+import { SessionTabs } from "./sessions/SessionTabs";
+import { shouldRouteDesktopSlash } from "./terminal/desktopSlash";
 
 const STATUS_LABELS: Record<ConnectionStatus | "codex_exited", string> = {
   connecting: "Connecting",
@@ -91,6 +93,101 @@ export function App() {
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  useEffect(() => {
+    if (
+      !token ||
+      connectionStatus !== "connected" ||
+      !selectedTerminalId ||
+      settingsOpen ||
+      sessionsOpen ||
+      window.matchMedia("(pointer: coarse)").matches
+    ) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      terminalRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    connectionStatus,
+    reconnectNonce,
+    selectedTerminalId,
+    sessionsOpen,
+    settingsOpen,
+    token,
+  ]);
+
+  useEffect(() => {
+    let routedSlashIsPending = false;
+
+    const routeSlashToTerminal = (event: KeyboardEvent) => {
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      const editableTarget = Boolean(
+        target &&
+          (target.isContentEditable ||
+            target.closest('input, textarea, select, [role="textbox"]')),
+      );
+
+      if (
+        !shouldRouteDesktopSlash({
+          key: event.key,
+          altKey: event.altKey,
+          ctrlKey: event.ctrlKey,
+          metaKey: event.metaKey,
+          defaultPrevented: event.defaultPrevented,
+          isComposing: event.isComposing,
+          coarsePointer: window.matchMedia("(pointer: coarse)").matches,
+          dialogOpen: settingsOpen || sessionsOpen,
+          editableTarget,
+          terminalAvailable:
+            Boolean(token && selectedTerminalId) &&
+            connectionStatus === "connected",
+        })
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      routedSlashIsPending = true;
+      terminalRef.current?.focus();
+      terminalRef.current?.send("/");
+    };
+
+    const suppressRoutedSlashFollowUp = (event: KeyboardEvent) => {
+      if (!routedSlashIsPending || event.key !== "/") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      if (event.type === "keyup") {
+        routedSlashIsPending = false;
+      }
+    };
+
+    window.addEventListener("keydown", routeSlashToTerminal, true);
+    window.addEventListener("keypress", suppressRoutedSlashFollowUp, true);
+    window.addEventListener("keyup", suppressRoutedSlashFollowUp, true);
+    return () => {
+      window.removeEventListener("keydown", routeSlashToTerminal, true);
+      window.removeEventListener(
+        "keypress",
+        suppressRoutedSlashFollowUp,
+        true,
+      );
+      window.removeEventListener("keyup", suppressRoutedSlashFollowUp, true);
+    };
+  }, [
+    connectionStatus,
+    selectedTerminalId,
+    sessionsOpen,
+    settingsOpen,
+    token,
+  ]);
 
   const applySessionList = useCallback(
     (nextSessions: SessionSnapshot[], preferredTerminalId?: string) => {
@@ -691,6 +788,17 @@ export function App() {
           </div>
         </div>
         <div className="header-actions">
+          <SessionTabs
+            sessions={sessions}
+            selectedTerminalId={selectedTerminalId}
+            busy={busy}
+            onSelect={attachSession}
+            onCreate={() => void handleCreateSession()}
+            onManage={() => {
+              setSessionsOpen(true);
+              void refreshSessions();
+            }}
+          />
           <span className={`status status--${effectiveStatus}`}>
             <span className="status-dot" aria-hidden="true" />
             <span className="status-label status-label--full">
@@ -700,28 +808,6 @@ export function App() {
               {COMPACT_STATUS_LABELS[effectiveStatus]}
             </span>
           </span>
-          <button
-            type="button"
-            className="header-action--sessions"
-            title="Show terminal sessions"
-            aria-haspopup="dialog"
-            aria-expanded={sessionsOpen}
-            onClick={() => {
-              setSessionsOpen(true);
-              void refreshSessions();
-            }}
-          >
-            Sessions ({sessions.length})
-          </button>
-          <button
-            type="button"
-            className="header-action--new"
-            title="Start a new Codex terminal"
-            disabled={busy}
-            onClick={() => void handleCreateSession()}
-          >
-            + New
-          </button>
           <button
             type="button"
             title="Reconnect the browser terminal"

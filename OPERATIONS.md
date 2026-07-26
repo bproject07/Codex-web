@@ -292,9 +292,16 @@ Reconnect attempts use increasing delays and do not restart Codex.
 
 ### Sessions
 
-**Sessions** opens the list of server-managed terminals.
+The header shows one tab for each server-managed terminal. The active tab is
+highlighted and each tab includes a lifecycle-status dot.
 
-- **Attach** switches the single browser terminal view to another managed PTY.
+- Select a tab to attach the single browser terminal view to that managed PTY.
+- Swipe the tab strip horizontally on mobile.
+- Use a wheel, trackpad, or the left/right overflow buttons on desktop.
+- **+ New** stays beside the tab strip and creates another terminal.
+- **Manage** opens the detailed session list.
+
+- **Attach** in the detailed list switches to that managed PTY.
 - Attaching does not stop the previously displayed session.
 - **Refresh** reloads sanitized session metadata.
 - **Remove** terminates and deletes a non-primary managed session.
@@ -324,6 +331,14 @@ of a descendant that deliberately detached itself.
 
 Requests browser fullscreen mode. Leaving fullscreen does not affect the
 server session.
+
+### Desktop slash key
+
+On desktop, pressing an unmodified `/` while a non-editable header control has
+focus sends `/` to the connected terminal. This prevents Firefox Quick Find
+from taking over after using controls such as Reconnect. Slash remains normal
+text in form fields and dialogs, and modified shortcuts such as `Ctrl+/` are
+left to the browser or operating system.
 
 ### Mobile keys
 

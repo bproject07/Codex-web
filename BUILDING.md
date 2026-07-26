@@ -533,6 +533,31 @@ production session. The standard cross-platform validation remains:
 - Rust format, test, Clippy, and release build;
 - a separate native PTY/browser smoke test.
 
+The session-tab regression creates four synthetic PTYs and checks desktop
+wheel/arrows, mobile swipe, active-tab switching, responsive header height,
+and the visibility of **+ New** and **Manage**:
+
+```powershell
+python .\scripts\session-tabs-regression.py `
+  --server .\dist\codex-web.exe `
+  --port 8798
+```
+
+The desktop-slash regression verifies in Chromium and Firefox that `/` reaches
+the terminal exactly once when a header control has focus, remains normal text
+inside an input, and is not intercepted when modified with Ctrl. It can also
+inspect the real Firefox Quick Find bar when Selenium and a Firefox executable
+are available:
+
+```powershell
+python .\scripts\desktop-slash-regression.py `
+  --server .\dist\codex-web.exe `
+  --port 8799 `
+  --system-firefox "C:\Program Files\Mozilla Firefox\firefox.exe"
+```
+
+Omit `--system-firefox` to run only the Playwright Chromium and Firefox checks.
+
 ## Updating dependencies intentionally
 
 Normal validation uses `npm ci` and Cargo `--locked`. If dependency updates are

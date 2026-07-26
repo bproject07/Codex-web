@@ -213,10 +213,11 @@ http://127.0.0.1:8787/?token=...
 Open that URL. The frontend moves the token into `sessionStorage` and removes it
 from the visible address. The token is not put in `localStorage`.
 
-Use **Sessions** to see the managed Codex terminals, **New** to create another
-live Codex PTY, and **Attach** to display an existing one in the same xterm
-screen. Attaching does not stop the previously displayed session; it continues
-running and buffering output in the background.
+Use the session tabs in the header to switch between managed Codex terminals
+and **+ New** to create another live Codex PTY. Swipe the tab strip on mobile,
+or use a wheel, trackpad, or the overflow arrows on desktop. **Manage** opens
+the detailed session list. Switching tabs does not stop the previously
+displayed session; it continues running and buffering output in the background.
 
 The generated token changes whenever the server restarts. Supply `--token` or
 `CODEX_WEB_TOKEN` when a stable token is required.
@@ -518,14 +519,21 @@ Normal xterm keyboard handling provides Enter, Escape, Backspace, Tab, arrow
 keys, Home, End, Page Up/Down, Ctrl+C, Ctrl+L, Ctrl+R, paste, and other terminal
 sequences.
 
+On desktop, an unmodified `/` pressed while a non-editable header control has
+focus is routed to the connected terminal. Its browser default is suppressed
+so Firefox Quick Find does not replace terminal input. Form fields, dialogs,
+mobile/coarse-pointer input, IME composition, and modified shortcuts keep their
+normal behavior.
+
 The mobile toolbar begins with Enter and the arrow keys, followed by Page
 Up/Down, Ctrl mode, Esc, Tab, Ctrl+C, Ctrl+L, Top, Live, and Hide. Its Ctrl mode
 converts the next typed ASCII letter to the matching control character, then
 automatically turns off.
 
-The header's **Sessions**, **New**, and **Attach** controls manage independent
-live PTYs. They switch which managed session feeds the same xterm screen; they
-do not send `/new` or `/resume` commands into the Codex TUI.
+The header's session tabs, **+ New**, and **Manage** controls operate on
+independent live PTYs. The active tab selects which managed session feeds the
+same xterm screen. The tab strip scrolls horizontally when it overflows; it
+does not send `/new` or `/resume` commands into the Codex TUI.
 
 ## Security
 
@@ -765,8 +773,9 @@ when available.
 - Restarting the Rust server terminates all managed PTY sessions and changes an
   automatically generated token. Saved Codex conversations may be resumed in a
   new PTY, but the previous live terminal process cannot be adopted.
-- Browser and mobile operating-system shortcut interception varies. xterm
-  receives only shortcuts the browser does not reserve.
+- Browser and mobile operating-system shortcut interception varies. The
+  desktop unmodified `/` case is handled explicitly; other reserved shortcuts
+  may remain unavailable to xterm.
 - Windows termination uses `taskkill /T /F` scoped to the exact PTY root PID,
   followed by the portable-pty child kill and ConPTY handle closure. A process
   that deliberately detaches and escapes that process tree is outside the
