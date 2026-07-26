@@ -348,6 +348,11 @@ impl SessionManager {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn configured_command(&self) -> &str {
+        &self.inner.terminal_config.command
+    }
+
     pub async fn start(&self) -> Result<()> {
         let manager = self.clone();
         tokio::task::spawn_blocking(move || manager.start_blocking())

@@ -15,6 +15,7 @@ use crate::config::ShellKind;
 
 pub const INITIAL_COLS: u16 = 120;
 pub const INITIAL_ROWS: u16 = 35;
+const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
 
 #[derive(Debug, Clone)]
 pub struct TerminalConfig {
@@ -108,9 +109,14 @@ fn pty_command(config: &TerminalConfig, resolved: &ResolvedCodex) -> CommandBuil
     let mut command = CommandBuilder::new(&resolved.path);
 
     command.cwd(&config.project_dir);
+    remove_parent_codex_thread(&mut command);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     command
+}
+
+fn remove_parent_codex_thread(command: &mut CommandBuilder) {
+    command.env_remove(CODEX_THREAD_ID_ENV);
 }
 
 fn resolve_codex(command: &str) -> Result<ResolvedCodex> {
@@ -248,6 +254,21 @@ fn verify_codex_version(resolved: &ResolvedCodex, project_dir: &Path) -> Result<
 fn powershell_invocation(path: &Path) -> String {
     let escaped = path.to_string_lossy().replace('\'', "''");
     format!("& '{escaped}'; exit $LASTEXITCODE")
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn child_codex_does_not_inherit_the_parent_thread() {
+        let mut command = CommandBuilder::new("codex");
+        command.env(CODEX_THREAD_ID_ENV, "parent-thread");
+
+        remove_parent_codex_thread(&mut command);
+
+        assert_eq!(command.get_env(CODEX_THREAD_ID_ENV), None);
+    }
 }
 
 #[cfg(all(test, windows))]

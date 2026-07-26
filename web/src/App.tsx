@@ -785,6 +785,7 @@ export function App() {
       <section className="terminal-region">
         {selectedTerminalId ? (
           <TerminalView
+            key={selectedTerminalId}
             ref={terminalRef}
             token={token}
             terminalId={selectedTerminalId}

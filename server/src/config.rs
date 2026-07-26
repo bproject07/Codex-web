@@ -51,6 +51,10 @@ pub struct CliArgs {
     #[arg(long, env = "CODEX_WEB_COMMAND", default_value = "codex")]
     pub command: String,
 
+    /// Executable used only for terminals created with New. Defaults to --command.
+    #[arg(long, env = "CODEX_WEB_NEW_SESSION_COMMAND")]
+    pub new_session_command: Option<String>,
+
     /// Authentication token. A secure ephemeral token is generated when omitted.
     #[arg(long, env = "CODEX_WEB_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
@@ -71,6 +75,7 @@ pub struct Config {
     pub project_dir: PathBuf,
     pub shell: ShellKind,
     pub command: String,
+    pub new_session_command: Option<String>,
     pub token: Option<String>,
     pub no_open_browser: bool,
     pub log_level: String,
@@ -92,9 +97,17 @@ impl Config {
             MAX_PROJECT_PATH_LENGTH,
         )?;
         validate_nonempty_length("command", &args.command, MAX_COMMAND_LENGTH)?;
+        if let Some(command) = args.new_session_command.as_deref() {
+            validate_nonempty_length("new session command", command, MAX_COMMAND_LENGTH)?;
+        }
         validate_nonempty_length("log level", &args.log_level, MAX_LOG_LEVEL_LENGTH)?;
 
-        if args.command.chars().any(|character| character == '\0') {
+        if args.command.chars().any(|character| character == '\0')
+            || args
+                .new_session_command
+                .as_deref()
+                .is_some_and(|command| command.chars().any(|character| character == '\0'))
+        {
             bail!("command must not contain a NUL character");
         }
 
@@ -116,6 +129,7 @@ impl Config {
             project_dir,
             shell: args.shell,
             command: args.command,
+            new_session_command: args.new_session_command,
             token: args.token,
             no_open_browser: args.no_open_browser,
             log_level: args.log_level,
@@ -185,6 +199,7 @@ mod tests {
             project_dir: project_dir.to_path_buf(),
             shell: ShellKind::Powershell,
             command: "codex".to_owned(),
+            new_session_command: None,
             token: Some("0123456789abcdef".to_owned()),
             no_open_browser: true,
             log_level: "info".to_owned(),
@@ -202,6 +217,7 @@ mod tests {
         );
         assert_eq!(config.port, 8787);
         assert_eq!(config.command, "codex");
+        assert_eq!(config.new_session_command, None);
     }
 
     #[test]
@@ -222,5 +238,18 @@ mod tests {
 
         let error = Config::from_args(args).expect_err("short token must be rejected");
         assert!(error.to_string().contains("at least"));
+    }
+
+    #[test]
+    fn accepts_a_distinct_new_session_command() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let mut args = args_for(directory.path());
+        args.command = "resume-current".to_owned();
+        args.new_session_command = Some("codex".to_owned());
+
+        let config = Config::from_args(args).expect("valid commands");
+
+        assert_eq!(config.command, "resume-current");
+        assert_eq!(config.new_session_command.as_deref(), Some("codex"));
     }
 }

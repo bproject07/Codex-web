@@ -143,7 +143,8 @@ not stop the server or change the server-side token.
 | `--host` | `127.0.0.1` | Address on which the HTTP server listens |
 | `--port` | `8787` | TCP port |
 | `--project` | current directory | Fixed working directory for every managed PTY |
-| `--command` | `codex` | Executable name or trusted absolute path |
+| `--command` | `codex` | Executable for the primary terminal |
+| `--new-session-command` | `--command` | Optional executable for terminals created with **New** |
 | `--shell` | `powershell` | Windows wrapper (`powershell` or `cmd`); ignored on Unix |
 | `--token` | generated | Explicit authentication token |
 | `--no-open-browser` | off | Prevent automatic browser launch |
@@ -156,6 +157,7 @@ CODEX_WEB_HOST
 CODEX_WEB_PORT
 CODEX_WEB_PROJECT_DIR
 CODEX_WEB_COMMAND
+CODEX_WEB_NEW_SESSION_COMMAND
 CODEX_WEB_SHELL
 CODEX_WEB_TOKEN
 CODEX_WEB_LOG_LEVEL
@@ -163,8 +165,13 @@ CODEX_WEB_LOG_LEVEL
 
 Command-line arguments override environment variables.
 
-The `--command` value is an executable name or path, not a shell expression.
-Do not pass pipes, redirections, command substitutions, or chained commands.
+The command values are executable names or paths, not shell expressions. Do
+not pass pipes, redirections, command substitutions, or chained commands.
+
+If the primary terminal is launched by a trusted wrapper that resumes one
+specific Codex thread, also set `--new-session-command codex`. The primary
+terminal will use the resume wrapper, while the **New** button will start an
+independent Codex CLI process.
 
 ## Windows command resolution
 

@@ -37,11 +37,23 @@ async fn main() -> Result<()> {
         );
     }
 
-    let sessions = SessionRegistry::new(TerminalConfig {
+    let primary_terminal_config = TerminalConfig {
         project_dir: config.project_dir.clone(),
         command: config.command.clone(),
         shell: config.shell,
-    });
+    };
+    let new_session_terminal_config = TerminalConfig {
+        project_dir: config.project_dir.clone(),
+        command: config
+            .new_session_command
+            .clone()
+            .unwrap_or_else(|| config.command.clone()),
+        shell: config.shell,
+    };
+    let sessions = SessionRegistry::with_new_session_config(
+        primary_terminal_config,
+        new_session_terminal_config,
+    );
 
     if let Err(error) = sessions.start_primary().await {
         tracing::error!(

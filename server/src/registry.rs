@@ -54,7 +54,7 @@ pub struct SessionRegistry {
 }
 
 struct RegistryInner {
-    terminal_config: TerminalConfig,
+    new_session_config: TerminalConfig,
     state: Mutex<RegistryState>,
     shutting_down: AtomicBool,
 }
@@ -67,19 +67,22 @@ struct RegistryState {
 
 impl SessionRegistry {
     pub fn new(terminal_config: TerminalConfig) -> Self {
+        Self::with_new_session_config(terminal_config.clone(), terminal_config)
+    }
+
+    pub fn with_new_session_config(
+        primary_config: TerminalConfig,
+        new_session_config: TerminalConfig,
+    ) -> Self {
         let primary_id = Uuid::new_v4();
-        let primary = SessionManager::new_managed(
-            terminal_config.clone(),
-            primary_id,
-            "Terminal 1".to_owned(),
-            true,
-        );
+        let primary =
+            SessionManager::new_managed(primary_config, primary_id, "Terminal 1".to_owned(), true);
         let mut sessions = HashMap::new();
         sessions.insert(primary_id, primary);
 
         Self {
             inner: Arc::new(RegistryInner {
-                terminal_config,
+                new_session_config,
                 state: Mutex::new(RegistryState {
                     primary_id,
                     next_terminal_number: 2,
@@ -217,7 +220,7 @@ impl SessionRegistry {
         let name = format!("Terminal {}", state.next_terminal_number);
         state.next_terminal_number = state.next_terminal_number.saturating_add(1);
         let session = SessionManager::new_managed(
-            self.inner.terminal_config.clone(),
+            self.inner.new_session_config.clone(),
             terminal_id,
             name,
             false,
@@ -263,6 +266,20 @@ mod tests {
         assert!(first.is_primary);
         assert_eq!(first.session_id, None);
         assert_eq!(registry.list().len(), 1);
+    }
+
+    #[test]
+    fn new_terminals_can_use_a_different_command_from_the_primary() {
+        let mut primary_config = terminal_config();
+        primary_config.command = "resume-current".to_owned();
+        let new_session_config = terminal_config();
+        let registry = SessionRegistry::with_new_session_config(primary_config, new_session_config);
+
+        let primary = registry.primary();
+        let created = registry.reserve_session().expect("reserved session");
+
+        assert_eq!(primary.configured_command(), "resume-current");
+        assert_eq!(created.configured_command(), "codex");
     }
 
     #[test]

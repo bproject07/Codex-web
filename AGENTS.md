@@ -139,6 +139,13 @@ preflight, PTY startup, or process termination requires:
 - `sessionId` identifies one PTY generation and changes on restart.
 - Output from an old generation must never be appended to the active buffer.
 - A browser attach changes only the displayed session.
+- A managed Codex child must not inherit the server's `CODEX_THREAD_ID`; each
+  new terminal must start independently even when the server was launched from
+  inside another Codex session.
+- When `--new-session-command` is configured, the primary terminal uses
+  `--command` and every terminal created with **New** uses the distinct new
+  session command. Both commands follow the same platform resolution and
+  preflight rules.
 - Reconnect changes only the WebSocket attachment.
 - Restart terminates and recreates the selected PTY.
 - Terminate stops the process but keeps the managed entry.

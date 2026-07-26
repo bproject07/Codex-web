@@ -393,16 +393,21 @@ Supported arguments:
 | `--port` | TCP port; defaults to `8787` |
 | `--project` | Fixed Codex working directory |
 | `--shell` | Windows-only: `powershell` or `cmd`; ignored on Unix |
-| `--command` | Executable name or path; defaults to `codex` |
+| `--command` | Executable for the primary terminal; defaults to `codex` |
+| `--new-session-command` | Optional executable used by terminals created with **New**; defaults to `--command` |
 | `--token` | Authentication token, minimum 16 characters |
 | `--no-open-browser` | Do not launch the default browser |
 | `--log-level` | tracing filter such as `info` or `debug` |
 
-The command value is treated as an executable name or file path, not as an
-arbitrary shell expression. A discovered `.cmd` entry point is always invoked
-through `cmd.exe /d /s /c` on Windows, which is required for the npm Codex
-package. On Unix, the resolved executable is launched directly without a shell
-wrapper.
+Command values are treated as executable names or file paths, not as arbitrary
+shell expressions. A discovered `.cmd` entry point is always invoked through
+`cmd.exe /d /s /c` on Windows, which is required for the npm Codex package. On
+Unix, the resolved executable is launched directly without a shell wrapper.
+
+`--new-session-command` is useful when the primary terminal uses a wrapper
+that resumes a specific Codex thread. For example, start the primary with that
+trusted wrapper and pass `--new-session-command codex` so **New** always opens
+an independent Codex session.
 
 ## Environment variables
 
@@ -415,6 +420,7 @@ CLI arguments override environment variables.
 | `CODEX_WEB_PROJECT_DIR` | Current directory |
 | `CODEX_WEB_TOKEN` | Secure random token generated at startup |
 | `CODEX_WEB_COMMAND` | `codex` |
+| `CODEX_WEB_NEW_SESSION_COMMAND` | Unset; uses `CODEX_WEB_COMMAND` |
 | `CODEX_WEB_SHELL` | `powershell`; Windows-only and ignored on Unix |
 | `CODEX_WEB_LOG_LEVEL` | `info` |
 
