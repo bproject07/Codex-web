@@ -14,6 +14,11 @@ authentication token can:
 
 - type into the selected agent terminal;
 - create, attach to, restart, or terminate managed sessions;
+- list server filesystem roots, browse readable directories, and resolve an
+  absolute server path;
+- read server-wide Favorites/Recent and add or remove Favorites; successful
+  launches update Recent;
+- launch an agent in any directory readable by the server account;
 - respond to approval prompts;
 - cause an agent to read or modify files allowed to the server user.
 
@@ -56,15 +61,21 @@ their usual updater behavior. The server does not copy or manage agent
 authentication. Spawned processes inherit the current user's environment and
 use that user's existing CLI configuration and credentials.
 
-Choose the project directory deliberately. It is fixed when the server starts
-and is inherited by every managed terminal:
+Choose the default project directory deliberately:
 
 ```text
 --project /absolute/path/to/project
 ```
 
 The backend canonicalizes this path, verifies that it is a readable directory,
-and does not allow the browser to replace it.
+and starts the primary terminal there. It is also the fallback for a
+new-session API request that omits `directoryId`.
+
+`--project` is not a filesystem sandbox or allowlist. An authenticated browser
+can use **+ New** to select another absolute directory readable by the
+operating-system account running the server. The selected directory applies
+only to that new managed terminal. The server canonicalizes and checks it
+again at browse and launch time.
 
 ### Installing or updating an agent CLI
 
@@ -190,13 +201,106 @@ The browser stores the token only in the current tab's `sessionStorage`.
 Closing that tab or choosing **Forget token** removes the browser copy. It does
 not stop the server or change the server-side token.
 
+## Workspace state and backup
+
+The folder picker's Favorites and Recent entries are host- and
+operating-system-account-local, server-wide state. They are shared by every
+browser that authenticates to this server and are stored in:
+
+```text
+<state-directory>/workspaces.json
+```
+
+Select the state directory with `--state-dir` or
+`CODEX_WEB_STATE_DIR`. Defaults:
+
+```text
+Windows: %LOCALAPPDATA%\codex-web-terminal
+         or %USERPROFILE%\AppData\Local\codex-web-terminal
+Unix:   $XDG_STATE_HOME/codex-web-terminal
+         or $HOME/.local/state/codex-web-terminal
+```
+
+Windows uses `LOCALAPPDATA` when it exists; the `USERPROFILE` path is used only
+when it does not. On Unix,
+`XDG_STATE_HOME` must be absolute or the `$HOME/.local/state` fallback is
+used. A relative explicit value is resolved against the working directory
+from which the server starts.
+
+For `run.ps1`, set the environment variable:
+
+```powershell
+$env:CODEX_WEB_STATE_DIR = Join-Path $env:LOCALAPPDATA "codex-web-terminal-instance-1"
+.\scripts\run.ps1 -Project "C:\Projects\my-app"
+```
+
+`run.sh` also accepts the backend option after its project argument:
+
+```bash
+./scripts/run.sh "/srv/projects/default" \
+  --state-dir "$HOME/.local/state/codex-web-terminal-instance-1"
+```
+
+The file uses schema version 1, is limited to 32 MiB (33,554,432 bytes) on
+both read and write, and stores at most 100 Favorites and 30 Recent folders.
+Recent is deduplicated by native directory, ordered newest first, and records
+the actual agent used. A successful primary startup, **New** launch, or
+restart updates Recent; it also updates the preferred agent of an existing
+Favorite for that directory. If this post-launch save fails, the PTY remains
+live and the server logs a warning. A Favorite mutation that would serialize
+beyond the limit is rejected with HTTP 507 before the current file or
+in-memory state is replaced.
+
+Writes use a new temporary file in the same directory, flush it, and
+atomically replace `workspaces.json`. Unix also syncs the parent directory and
+creates a missing final state directory with mode `0700` and new state files
+with `0600`. An existing Unix directory or file must already be owned by the
+effective server user and grant no group/other permissions. The server rejects
+unsafe existing targets instead of changing their mode. On Windows, protect
+the chosen directory with an ACL appropriate for the service account.
+
+The state location must be a dedicated real directory. Filesystem roots,
+known broad account/system locations, the current or system temporary
+directory, symlinks, and Windows reparse points are rejected. The existing
+`workspaces.json`, when present, must be a regular non-link file. An unsafe
+location prevents server startup rather than being silently repaired.
+The store coordinates writers only inside one process; it has no cross-process
+lock or merge. Assign a distinct `--state-dir` to every server instance that
+can run concurrently. Two instances sharing one file can overwrite each
+other's newer Favorites or Recent updates.
+
+At startup, malformed JSON, an unsupported version, invalid records, or a file
+larger than 32 MiB is renamed to
+`workspaces.corrupt.<uuid>.json`. The server logs a warning and continues with
+a clean schema-1 library; normal successful primary startup may immediately
+add the default folder to Recent. The quarantined bytes are preserved and are
+not overwritten. Do not publish that file because it contains filesystem
+paths and usage history.
+
+For a consistent backup, stop the server and copy `workspaces.json` together
+with any quarantined files you intend to retain. Restore only a reviewed
+schema-1 file while the server is stopped. Ensure the service account owns the
+directory and can create, replace, and rename files inside it. Both display
+paths and reversible native path IDs can reveal filesystem layout, so protect
+backups with the same care as the live file.
+
+Saved paths are not continuously monitored. A renamed, deleted, or newly
+restricted folder may remain visible in Favorites or Recent. Opening,
+updating, or launching from it performs a fresh canonicalization and read
+check; a missing path returns `404`, and an inaccessible path returns `403`.
+Restart performs the same launch-time validation before terminating the
+running PTY, and also rejects a path that now resolves through a symlink or
+junction to a different canonical directory. Remove the stale Favorite or
+browse to the new location.
+
 ## Command-line options
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | Address on which the HTTP server listens |
 | `--port` | `8787` | TCP port |
-| `--project` | current directory | Fixed working directory for every managed PTY |
+| `--project` | current directory | Default working directory for the primary PTY and new sessions without a selected folder |
+| `--state-dir` | per-user OS state directory | Dedicated directory containing `workspaces.json` Favorites/Recent state |
 | `--command` | derived | Explicit primary executable override; otherwise follows `--primary-agent` |
 | `--primary-agent` | `codex` | Agent represented by `--command`: `codex`, `claude`, or `agy` |
 | `--new-session-command` | resolved primary command | Optional executable used when **New** starts the primary agent |
@@ -217,6 +321,7 @@ Equivalent environment variables:
 CODEX_WEB_HOST
 CODEX_WEB_PORT
 CODEX_WEB_PROJECT_DIR
+CODEX_WEB_STATE_DIR
 CODEX_WEB_COMMAND
 CODEX_WEB_PRIMARY_AGENT
 CODEX_WEB_NEW_SESSION_COMMAND
@@ -290,9 +395,9 @@ The equivalent direct launches are
 `claude --dangerously-skip-permissions` and
 `agy --dangerously-skip-permissions`. These modes remove the normal approval
 barrier for file changes, commands, network access, and other supported tools.
-Use them only when the operating-system account, project directory, network,
-credentials, and reachable services are intentionally placed inside the
-agent's trust boundary. The switches are off by default.
+Use them only when the operating-system account, every selectable working
+directory, network, credentials, and reachable services are intentionally
+placed inside the agent's trust boundary. The switches are off by default.
 
 ## Windows command resolution
 
@@ -394,7 +499,11 @@ strict WebSocket Origin check rejects the connection.
 
 The current token is server-wide, not per-user or per-session. Anyone who
 receives it has the same ability as the owner to list, view, type into, create,
-restart, terminate, and remove eligible managed sessions.
+restart, terminate, and remove eligible managed sessions. It also authorizes
+filesystem-root discovery, directory browsing, manual absolute-path
+resolution, Favorites/Recent changes, and launching agents anywhere readable
+by the server account. The opaque directory IDs used by the API are transport
+values, not additional access control.
 
 Multiple browsers attached to one session share both input and PTY dimensions.
 The latest valid resize wins, so desktop and mobile clients with different
@@ -432,9 +541,39 @@ highlighted and each tab includes a lifecycle-status dot.
 
 ### New
 
-**+ New** opens **New terminal**. The dialog identifies the server operating
-system and architecture and makes clear that the CLI runs on the server host,
-not in the viewing browser or phone.
+**+ New** uses two focused steps.
+
+1. **Choose a project folder** selects the native working directory on the
+   server.
+2. **New terminal** selects Codex, Claude, or AGY and starts that CLI in the
+   chosen directory.
+
+The folder dialog has:
+
+- **Favorites** — explicitly starred server folders, up to 100;
+- **Recent** — up to 30 successfully used folders, newest first and
+  deduplicated;
+- **Browse** — filesystem roots, breadcrumbs, **Up**, and one level of sorted
+  child directories at a time;
+- **Folder path** — a manual absolute path on the server, useful when a folder
+  has more than the 10,000 displayed subdirectory limit.
+
+Files never appear in the browser and directory listing is not recursive.
+Paths refer to the host running Codex Web Terminal, not the viewing phone or
+laptop. **Use folder** advances to the agent picker. **Change folder** returns
+without losing the intended launch flow. The star action adds or removes a
+Favorite.
+
+A Recent entry remembers its last agent. A Favorite remembers its preferred
+agent after a successful launch from that directory. Those entries provide a
+direct **Start Codex**, **Start Claude**, or **Start AGY** action. The server
+still revalidates the folder and the frontend checks the current catalog. If
+the remembered agent is no longer ready, the full agent picker opens so
+another installed agent can be selected.
+
+The agent dialog identifies the server operating system and architecture and
+makes clear that the CLI runs on the server host, not in the viewing browser
+or phone. It also displays the chosen working folder.
 
 Each agent card reports:
 
@@ -474,7 +613,9 @@ or terminate the underlying agent process.
 
 **Restart** terminates and recreates the selected agent's PTY. Its stable
 `terminalId` remains, but its `sessionId`, PID, and PTY generation change.
-Output from the previous generation is not treated as current live output.
+The agent profile and selected working folder remain the same, and a
+successful restart refreshes that folder in Recent. Output from the previous
+generation is not treated as current live output.
 On Linux, termination targets the direct PTY child and cannot guarantee cleanup
 of a descendant that deliberately detached itself.
 
@@ -612,6 +753,32 @@ curl \
   http://127.0.0.1:8787/api/sessions
 ```
 
+Inspect filesystem roots and saved workspace state:
+
+```bash
+curl -H "Authorization: Bearer $CODEX_WEB_TOKEN" \
+  http://127.0.0.1:8787/api/filesystem/roots
+
+curl -H "Authorization: Bearer $CODEX_WEB_TOKEN" \
+  http://127.0.0.1:8787/api/workspaces
+```
+
+List the configured default directory with an empty object, or return a
+previously received opaque `directoryId`:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $CODEX_WEB_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  http://127.0.0.1:8787/api/filesystem/list
+```
+
+These responses contain server filesystem paths. Sanitize them before sharing
+diagnostics. All `/api/filesystem/*` and `/api/workspaces*` routes require the
+same bearer token as session control. Session-create, directory list/resolve,
+and Favorite-upsert JSON bodies are capped at 256 KiB.
+
 Do not paste production health commands containing real tokens into tickets,
 chat messages, or shared logs.
 
@@ -672,7 +839,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=%h/projects/my-app
 EnvironmentFile=%h/.config/codex-web/environment
-ExecStart=%h/apps/codex-web/codex-web --host 127.0.0.1 --port 8787 --project %h/projects/my-app --command /absolute/path/to/codex --no-open-browser
+ExecStart=%h/apps/codex-web/codex-web --host 127.0.0.1 --port 8787 --project %h/projects/my-app --state-dir %h/.local/state/codex-web-terminal --command /absolute/path/to/codex --no-open-browser
 Restart=on-failure
 RestartSec=3
 KillSignal=SIGINT
@@ -694,7 +861,11 @@ systemctl --user status codex-web.service
 
 Replace `/absolute/path/to/codex` with the result of `command -v codex` for the
 service user. Using an absolute path avoids differences between an interactive
-shell's `PATH` and the systemd user-manager environment.
+shell's `PATH` and the systemd user-manager environment. The explicit
+`--state-dir` keeps Favorites and Recent in a predictable per-user location;
+the server creates a missing final directory with mode `0700`. If it already
+exists, it must be owned by the service user and grant no group/other
+permissions.
 
 This hardened example discards stdout because startup stdout contains the
 authenticated URL. It also discards the normal structured tracing stream,
@@ -758,9 +929,9 @@ Recommended sequence:
 3. Keep the old package until the new one has passed validation.
 4. Stop the existing server.
 5. Replace the executable and the entire adjacent `web` directory together.
-6. Start the new server with the same project and explicit token if continuity
-   of the browser URL and credential is required. This does not preserve PTY
-   processes or live terminal sessions.
+6. Start the new server with the same project, state directory, and explicit
+   token if continuity of Favorites/Recent, the browser URL, and the credential
+   is required. This does not preserve PTY processes or live terminal sessions.
 7. Check `/api/health`, load the frontend, attach, and verify keyboard input.
 8. Remove the old package only after the new runtime is confirmed.
 
@@ -795,6 +966,78 @@ the displayed install command into the browser developer console.
 Use the URL from the current server instance. A generated token changes after
 restart. Five repeated failures from one address trigger a temporary
 one-minute block.
+
+### A selected folder cannot be opened or launched
+
+Confirm that the path is absolute on the server host, still exists, is a
+directory, and can be listed by the exact operating-system account running
+`codex-web`. A missing directory returns `404`; insufficient access returns
+`403`. A path copied from the viewing phone or laptop is not meaningful unless
+that same native path exists on the server. `--project` does not restrict the
+picker, and changing it does not repair permissions on another directory.
+
+### Workspace state was quarantined
+
+Look in the configured state directory for
+`workspaces.corrupt.<uuid>.json`. This means `workspaces.json` exceeded
+32 MiB, was invalid, or used an unsupported schema version. The server
+preserves the file and loads clean state; successful primary startup may then
+add the default folder to Recent. Stop the server before restoring a reviewed
+schema-1 backup.
+
+If startup instead reports an unsafe state location, nothing is quarantined or
+chmod-repaired. Use a dedicated non-link directory. On Unix, make it owned by
+the effective service user with no group/other permissions; `0700` for the
+directory and `0600` for an existing state file are the normal settings. Also
+verify create/rename permission for the service account.
+
+Inspect a Unix default without following or changing anything:
+
+```bash
+case "${XDG_STATE_HOME:-}" in
+  /*) workspace_state_dir="$XDG_STATE_HOME/codex-web-terminal" ;;
+  *) workspace_state_dir="$HOME/.local/state/codex-web-terminal" ;;
+esac
+if test -e "$workspace_state_dir" || test -L "$workspace_state_dir"; then
+  test ! -L "$workspace_state_dir"
+  stat -c '%F %U %G %a %n' -- "$workspace_state_dir"
+  if test -e "$workspace_state_dir/workspaces.json" ||
+    test -L "$workspace_state_dir/workspaces.json"; then
+    test ! -L "$workspace_state_dir/workspaces.json"
+    stat -c '%F %U %G %a %n' -- \
+      "$workspace_state_dir/workspaces.json"
+  fi
+fi
+```
+
+After verifying the exact owner and path, the owner can tighten overly broad
+Unix modes explicitly:
+
+```bash
+chmod 0700 -- "$workspace_state_dir"
+if test -e "$workspace_state_dir/workspaces.json"; then
+  chmod 0600 -- "$workspace_state_dir/workspaces.json"
+fi
+```
+
+Do not point `--state-dir` directly at `/`, the home directory,
+`XDG_STATE_HOME`, the current directory, or the system temporary directory;
+use a dedicated child directory. Correct wrong ownership deliberately as an
+administrator rather than making the application take ownership.
+
+On Windows, inspect reparse metadata and the inherited ACL before restarting:
+
+```powershell
+$workspaceStateDir = Join-Path $env:LOCALAPPDATA "codex-web-terminal"
+Get-Item -LiteralPath $workspaceStateDir -Force |
+  Format-List FullName,Attributes,LinkType,Target
+Get-Acl -LiteralPath $workspaceStateDir | Format-List
+```
+
+Use a dedicated child directory, not a drive root, profile/base directory,
+current directory, or temporary directory. Remove unexpected reparse points
+or repair ACLs through normal Windows administration; the application does
+not rewrite them.
 
 ### Browser reconnect loops
 
@@ -833,7 +1076,8 @@ test -r /dev/ptmx
 ```
 
 Check only the CLIs you intend to use. Also verify executable permission on the
-catalog's resolved command and read access to the project directory.
+catalog's resolved command and read access to the default or selected working
+directory.
 
 ### Windows reports a PowerShell policy error
 
@@ -855,12 +1099,19 @@ Before exposing the service to another device:
 - [ ] The primary CLI is ready and authenticated for the service user.
 - [ ] Optional agent status/version and manual commands match the server OS.
 - [ ] Dangerous permission-bypass flags are off unless explicitly required.
-- [ ] The project directory is correct and no broader than intended.
+- [ ] The default project directory is correct.
+- [ ] Everyone holding the token is trusted to browse and launch in every
+      directory readable by the server account.
+- [ ] The workspace state directory is private, writable by the service
+      account, and included in the intended backup policy.
+- [ ] Every server instance that can run concurrently has a distinct state
+      directory.
 - [ ] The build and tests passed on the target platform.
 - [ ] The package contains the matching executable and `web` assets.
 - [ ] The token is strong, private, and not committed.
 - [ ] The bind address is loopback or a private/Tailscale interface.
 - [ ] Firewall and Tailscale ACL scope is understood.
 - [ ] `/api/health` reports a running session.
-- [ ] The browser can attach, type, reconnect, and replay.
+- [ ] The browser can browse a disposable folder, start the selected agent
+      there, attach, type, reconnect, and replay.
 - [ ] A precise stop procedure is known.

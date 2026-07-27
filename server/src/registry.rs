@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fmt,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -151,7 +152,15 @@ impl SessionRegistry {
         &self,
         requested_agent: Option<AgentKind>,
     ) -> Result<SessionSnapshot, RegistryError> {
-        let session = self.reserve_session(requested_agent)?;
+        self.create_in(requested_agent, None).await
+    }
+
+    pub async fn create_in(
+        &self,
+        requested_agent: Option<AgentKind>,
+        project_dir: Option<PathBuf>,
+    ) -> Result<SessionSnapshot, RegistryError> {
+        let session = self.reserve_session_in(requested_agent, project_dir)?;
         let terminal_id = session.snapshot().terminal_id;
         if let Err(error) = session.start().await {
             session.shutdown().await;
@@ -238,9 +247,18 @@ impl SessionRegistry {
             .collect()
     }
 
+    #[cfg(test)]
     fn reserve_session(
         &self,
         requested_agent: Option<AgentKind>,
+    ) -> Result<SessionManager, RegistryError> {
+        self.reserve_session_in(requested_agent, None)
+    }
+
+    fn reserve_session_in(
+        &self,
+        requested_agent: Option<AgentKind>,
+        project_dir: Option<PathBuf>,
     ) -> Result<SessionManager, RegistryError> {
         let mut state = lock(&self.inner.state);
         if self.inner.shutting_down.load(Ordering::SeqCst) {
@@ -252,12 +270,15 @@ impl SessionRegistry {
 
         let terminal_id = Uuid::new_v4();
         let agent = requested_agent.unwrap_or(self.inner.default_new_agent);
-        let terminal_config = self
+        let mut terminal_config = self
             .inner
             .agent_configs
             .get(&agent)
             .cloned()
             .ok_or(RegistryError::AgentUnavailable)?;
+        if let Some(project_dir) = project_dir {
+            terminal_config.project_dir = project_dir;
+        }
         let name = format!("{} {}", agent.label(), state.next_terminal_number);
         state.next_terminal_number = state.next_terminal_number.saturating_add(1);
         let session = SessionManager::new_managed(terminal_config, terminal_id, name, false);
@@ -278,7 +299,10 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        path::{Path, PathBuf},
+        time::{Duration, Instant},
+    };
 
     use super::*;
     use crate::config::ShellKind;
@@ -320,6 +344,28 @@ mod tests {
         assert_eq!(primary.configured_command(), "resume-current");
         assert_eq!(created.configured_command(), "codex");
         assert_eq!(created.configured_agent(), AgentKind::Codex);
+    }
+
+    #[test]
+    fn selected_project_directory_applies_only_to_the_reserved_terminal() {
+        let registry = SessionRegistry::new(terminal_config());
+        let selected = if cfg!(windows) {
+            PathBuf::from(r"C:\projects\selected")
+        } else {
+            PathBuf::from("/projects/selected")
+        };
+
+        let created = registry
+            .reserve_session_in(None, Some(selected.clone()))
+            .expect("reserved session");
+
+        assert_eq!(created.snapshot().project, selected.to_string_lossy());
+        assert_eq!(
+            crate::filesystem::decode_directory_id(&created.snapshot().directory_id)
+                .expect("session directory ID"),
+            selected
+        );
+        assert_eq!(registry.primary().snapshot().project, ".");
     }
 
     #[test]
@@ -428,5 +474,224 @@ mod tests {
         ));
         assert_eq!(registry.session_count(), 1);
         assert_eq!(registry.list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn selected_project_directory_is_the_native_pty_working_directory() {
+        let fixture = tempfile::tempdir().expect("temporary project");
+        let selected = fixture.path().join("selected");
+        std::fs::create_dir(&selected).expect("create selected directory");
+        let selected = dunce::canonicalize(selected).expect("canonical selected directory");
+        let command = write_working_directory_fixture(fixture.path());
+        let mut config = terminal_config();
+        config.project_dir = fixture.path().to_path_buf();
+        config.command = command.to_string_lossy().into_owned();
+        let registry = SessionRegistry::new(config);
+
+        let snapshot = registry
+            .create_in(None, Some(selected.clone()))
+            .await
+            .expect("start fixture in selected directory");
+        let session = registry
+            .get(snapshot.terminal_id)
+            .expect("created session remains registered");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut answered_cursor_query = false;
+        let output = loop {
+            let output = session
+                .output_snapshot()
+                .chunks
+                .into_iter()
+                .flat_map(|chunk| chunk.data)
+                .collect::<Vec<_>>();
+            if cfg!(windows)
+                && !answered_cursor_query
+                && output.windows(4).any(|window| window == b"\x1b[6n")
+            {
+                session
+                    .write_input(b"\x1b[1;1R")
+                    .expect("answer ConPTY cursor query");
+                answered_cursor_query = true;
+            }
+            if String::from_utf8_lossy(&output).contains(&selected.to_string_lossy().into_owned())
+                || Instant::now() >= deadline
+            {
+                break String::from_utf8_lossy(&output).into_owned();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        assert!(
+            output.contains(&selected.to_string_lossy().into_owned()),
+            "PTY output did not contain selected cwd; output={output:?}"
+        );
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stale_workspace_restart_does_not_terminate_the_running_session() {
+        let fixture = tempfile::tempdir().expect("temporary project");
+        let selected = fixture.path().join("selected");
+        std::fs::create_dir(&selected).expect("create selected directory");
+        let selected = dunce::canonicalize(selected).expect("canonical selected directory");
+        let command = write_long_running_fixture(fixture.path());
+        let mut config = terminal_config();
+        config.project_dir = selected.clone();
+        config.command = command.to_string_lossy().into_owned();
+        let registry = SessionRegistry::new(config);
+        let session = registry.primary();
+
+        registry.start_primary().await.expect("start fixture");
+        wait_for_output(&session, "WORKSPACE-READY").await;
+        let before = session.snapshot();
+        std::fs::remove_dir(&selected).expect("remove stale selected directory");
+
+        let error = registry
+            .restart(before.terminal_id)
+            .await
+            .expect_err("stale workspace must reject restart");
+        let after = session.snapshot();
+
+        assert!(
+            error
+                .to_string()
+                .contains("configured project directory is no longer")
+        );
+        assert_eq!(after.status, crate::session::Lifecycle::Running);
+        assert_eq!(after.session_id, before.session_id);
+        assert_eq!(after.pid, before.pid);
+        registry.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_swapped_workspace_restart_preserves_the_running_session() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().expect("temporary project");
+        let selected = fixture.path().join("selected");
+        let replacement = fixture.path().join("replacement");
+        let original = fixture.path().join("selected-original");
+        std::fs::create_dir(&selected).expect("create selected directory");
+        std::fs::create_dir(&replacement).expect("create replacement directory");
+        let selected = dunce::canonicalize(selected).expect("canonical selected directory");
+        let replacement =
+            dunce::canonicalize(replacement).expect("canonical replacement directory");
+        let command = write_long_running_fixture(fixture.path());
+        let mut config = terminal_config();
+        config.project_dir = selected.clone();
+        config.command = command.to_string_lossy().into_owned();
+        let registry = SessionRegistry::new(config);
+        let session = registry.primary();
+
+        registry.start_primary().await.expect("start fixture");
+        wait_for_output(&session, "WORKSPACE-READY").await;
+        let before = session.snapshot();
+        std::fs::rename(&selected, &original).expect("move original selected directory");
+        symlink(&replacement, &selected).expect("replace selected directory with symlink");
+        assert_eq!(
+            dunce::canonicalize(&selected).expect("resolve swapped workspace"),
+            replacement
+        );
+
+        registry
+            .restart(before.terminal_id)
+            .await
+            .expect_err("swapped workspace must reject restart");
+        let after = session.snapshot();
+
+        assert_eq!(after.status, crate::session::Lifecycle::Running);
+        assert_eq!(after.session_id, before.session_id);
+        assert_eq!(after.pid, before.pid);
+        registry.shutdown().await;
+    }
+
+    async fn wait_for_output(session: &SessionManager, expected: &str) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut answered_cursor_query = false;
+        loop {
+            let output = session
+                .output_snapshot()
+                .chunks
+                .into_iter()
+                .flat_map(|chunk| chunk.data)
+                .collect::<Vec<_>>();
+            if cfg!(windows)
+                && !answered_cursor_query
+                && output.windows(4).any(|window| window == b"\x1b[6n")
+            {
+                session
+                    .write_input(b"\x1b[1;1R")
+                    .expect("answer ConPTY cursor query");
+                answered_cursor_query = true;
+            }
+            if String::from_utf8_lossy(&output).contains(expected) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "PTY output did not contain {expected:?}; output={:?}",
+                String::from_utf8_lossy(&output)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(windows)]
+    fn write_long_running_fixture(directory: &Path) -> PathBuf {
+        let command = directory.join("long-running-agent.cmd");
+        std::fs::write(
+            &command,
+            "@echo off\r\nif \"%~1\"==\"--version\" (\r\n  echo codex 1.2.3\r\n  exit /b 0\r\n)\r\ncd /d \"%TEMP%\"\r\necho WORKSPACE-READY\r\n:loop\r\nping -n 2 127.0.0.1 >nul\r\ngoto loop\r\n",
+        )
+        .expect("write Windows fixture");
+        command
+    }
+
+    #[cfg(unix)]
+    fn write_long_running_fixture(directory: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let command = directory.join("long-running-agent");
+        std::fs::write(
+            &command,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'codex 1.2.3'\n  exit 0\nfi\ncd /\nprintf 'WORKSPACE-READY\\n'\nwhile :; do sleep 1; done\n",
+        )
+        .expect("write Unix fixture");
+        let mut permissions = std::fs::metadata(&command)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&command, permissions).expect("make fixture executable");
+        command
+    }
+
+    #[cfg(windows)]
+    fn write_working_directory_fixture(directory: &Path) -> PathBuf {
+        let command = directory.join("cwd-agent.cmd");
+        std::fs::write(
+            &command,
+            "@echo off\r\nif \"%~1\"==\"--version\" (\r\n  echo codex 1.2.3\r\n  exit /b 0\r\n)\r\ncd\r\n",
+        )
+        .expect("write Windows fixture");
+        command
+    }
+
+    #[cfg(unix)]
+    fn write_working_directory_fixture(directory: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let command = directory.join("cwd-agent");
+        std::fs::write(
+            &command,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'codex 1.2.3'\n  exit 0\nfi\npwd\n",
+        )
+        .expect("write Unix fixture");
+        let mut permissions = std::fs::metadata(&command)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&command, permissions).expect("make fixture executable");
+        command
     }
 }

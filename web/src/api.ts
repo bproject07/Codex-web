@@ -1,3 +1,11 @@
+import type {
+  WorkspaceDirectory,
+  WorkspaceDirectoryListing,
+  WorkspaceFavorite,
+  WorkspaceLibrary,
+  WorkspaceRecent,
+} from "./workspaces";
+
 const TOKEN_STORAGE_KEY = "codex-web-token";
 const SELECTED_TERMINAL_STORAGE_KEY = "codex-web-selected-terminal";
 const CLEAN_TERMINAL_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -64,7 +72,13 @@ export interface SessionSnapshot {
   pid: number | null;
   exitCode: number | null;
   project: string;
+  directoryId: string;
   lastError: string | null;
+}
+
+export interface FilesystemRoots {
+  defaultDirectory: WorkspaceDirectory;
+  roots: WorkspaceDirectory[];
 }
 
 export class ApiError extends Error {
@@ -269,15 +283,97 @@ export async function getAgentCatalog(
   };
 }
 
+export async function getFilesystemRoots(
+  token: string,
+  signal?: AbortSignal,
+): Promise<FilesystemRoots> {
+  const roots = await apiRequest<unknown>("/api/filesystem/roots", token, {
+    signal,
+  });
+  return normalizeFilesystemRoots(roots);
+}
+
+export async function listWorkspaceDirectory(
+  token: string,
+  directoryId?: string | null,
+  signal?: AbortSignal,
+): Promise<WorkspaceDirectoryListing> {
+  const listing = await apiRequest<unknown>("/api/filesystem/list", token, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(directoryId ? { directoryId } : {}),
+    signal,
+  });
+  return normalizeDirectoryListing(listing);
+}
+
+export async function resolveWorkspacePath(
+  token: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<WorkspaceDirectoryListing> {
+  const listing = await apiRequest<unknown>("/api/filesystem/resolve", token, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+    signal,
+  });
+  return normalizeDirectoryListing(listing);
+}
+
+export async function getWorkspaceLibrary(
+  token: string,
+  signal?: AbortSignal,
+): Promise<WorkspaceLibrary> {
+  const library = await apiRequest<unknown>("/api/workspaces", token, {
+    signal,
+  });
+  return normalizeWorkspaceLibrary(library);
+}
+
+export async function addWorkspaceFavorite(
+  token: string,
+  directory: WorkspaceDirectory,
+  signal?: AbortSignal,
+): Promise<WorkspaceFavorite> {
+  const favorite = await apiRequest<unknown>(
+    "/api/workspaces/favorites",
+    token,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ directoryId: directory.id }),
+      signal,
+    },
+  );
+  return normalizeWorkspaceFavorite(favorite);
+}
+
+export async function removeWorkspaceFavorite(
+  token: string,
+  favoriteId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/workspaces/favorites/${encodeURIComponent(favoriteId)}`,
+    token,
+    { method: "DELETE", signal },
+  );
+}
+
 export async function createSession(
   token: string,
   agent: AgentKind,
+  directoryId?: string | null,
 ): Promise<SessionSnapshot> {
   try {
     const session = await apiRequest<SessionSnapshot>("/api/sessions", token, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agent }),
+      body: JSON.stringify({
+        agent,
+        ...(directoryId ? { directoryId } : {}),
+      }),
     });
     return normalizeSessionSnapshot(session, session.terminalId);
   } catch (error) {
@@ -346,7 +442,12 @@ export async function deleteSession(
 
 type LegacySessionSnapshot = Omit<
   SessionSnapshot,
-  "terminalId" | "name" | "agent" | "isPrimary" | "createdAt"
+  | "terminalId"
+  | "name"
+  | "agent"
+  | "isPrimary"
+  | "createdAt"
+  | "directoryId"
 >;
 
 export function normalizeSessionSnapshot(
@@ -376,7 +477,143 @@ export function normalizeSessionSnapshot(
       typeof session.createdAt === "number"
         ? session.createdAt
         : (session.startedAt ?? Date.now()),
+    directoryId:
+      typeof session.directoryId === "string" ? session.directoryId : "",
   };
+}
+
+function normalizeFilesystemRoots(value: unknown): FilesystemRoots {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.roots) ||
+    !isRecord(value.defaultDirectory)
+  ) {
+    throw invalidWorkspaceResponse();
+  }
+
+  return {
+    defaultDirectory: normalizeWorkspaceDirectory(value.defaultDirectory),
+    roots: value.roots.map(normalizeWorkspaceDirectory),
+  };
+}
+
+function normalizeDirectoryListing(value: unknown): WorkspaceDirectoryListing {
+  if (
+    !isRecord(value) ||
+    !isRecord(value.current) ||
+    (value.parentId !== null && typeof value.parentId !== "string") ||
+    !Array.isArray(value.breadcrumbs) ||
+    !Array.isArray(value.directories) ||
+    (value.truncated !== undefined && typeof value.truncated !== "boolean")
+  ) {
+    throw invalidWorkspaceResponse();
+  }
+
+  return {
+    current: normalizeWorkspaceDirectory(value.current),
+    parentId: value.parentId,
+    breadcrumbs: value.breadcrumbs.map(normalizeWorkspaceDirectory),
+    directories: value.directories.map(normalizeWorkspaceDirectory),
+    truncated: value.truncated === true,
+  };
+}
+
+function normalizeWorkspaceLibrary(value: unknown): WorkspaceLibrary {
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    !Array.isArray(value.favorites) ||
+    !Array.isArray(value.recent)
+  ) {
+    throw invalidWorkspaceResponse();
+  }
+
+  return {
+    favorites: value.favorites.map(normalizeWorkspaceFavorite),
+    recent: value.recent.map(normalizeWorkspaceRecent),
+  };
+}
+
+function normalizeWorkspaceFavorite(value: unknown): WorkspaceFavorite {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.directoryId !== "string" ||
+    typeof value.name !== "string" ||
+    typeof value.path !== "string" ||
+    (value.label !== null &&
+      value.label !== undefined &&
+      typeof value.label !== "string") ||
+    (value.preferredAgent !== null &&
+      value.preferredAgent !== undefined &&
+      !isAgentKind(value.preferredAgent))
+  ) {
+    throw invalidWorkspaceResponse();
+  }
+
+  return {
+    id: requireNonEmpty(value.id),
+    directory: {
+      id: requireNonEmpty(value.directoryId),
+      name: requireNonEmpty(value.name),
+      path: requireNonEmpty(value.path),
+    },
+    label: value.label,
+    preferredAgent: value.preferredAgent,
+  };
+}
+
+function normalizeWorkspaceRecent(value: unknown): WorkspaceRecent {
+  if (
+    !isRecord(value) ||
+    typeof value.directoryId !== "string" ||
+    typeof value.name !== "string" ||
+    typeof value.path !== "string" ||
+    !isAgentKind(value.lastAgent) ||
+    typeof value.lastOpenedAt !== "number" ||
+    !Number.isSafeInteger(value.lastOpenedAt) ||
+    value.lastOpenedAt < 0
+  ) {
+    throw invalidWorkspaceResponse();
+  }
+
+  return {
+    directory: {
+      id: requireNonEmpty(value.directoryId),
+      name: requireNonEmpty(value.name),
+      path: requireNonEmpty(value.path),
+    },
+    lastAgent: value.lastAgent,
+    lastOpenedAt: value.lastOpenedAt,
+  };
+}
+
+function normalizeWorkspaceDirectory(value: unknown): WorkspaceDirectory {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.name !== "string" ||
+    typeof value.path !== "string"
+  ) {
+    throw invalidWorkspaceResponse();
+  }
+
+  return {
+    id: requireNonEmpty(value.id),
+    name: requireNonEmpty(value.name),
+    path: requireNonEmpty(value.path),
+  };
+}
+
+function requireNonEmpty(value: string): string {
+  if (!value) {
+    throw invalidWorkspaceResponse();
+  }
+  return value;
+}
+
+function invalidWorkspaceResponse(): ApiError {
+  return new ApiError(502, "The server returned an invalid workspace response.");
 }
 
 export function normalizeAgentCatalog(catalog: unknown): AgentCatalog {

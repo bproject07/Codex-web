@@ -9,6 +9,7 @@ use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 const MAX_PROJECT_PATH_LENGTH: usize = 32_767;
+const MAX_STATE_PATH_LENGTH: usize = 32_767;
 const MAX_COMMAND_LENGTH: usize = 1_024;
 const MAX_TOKEN_LENGTH: usize = 512;
 const MIN_TOKEN_LENGTH: usize = 16;
@@ -55,9 +56,13 @@ pub struct CliArgs {
     #[arg(long, env = "CODEX_WEB_PORT", default_value_t = 8787)]
     pub port: u16,
 
-    /// Fixed working directory in which every agent CLI will run.
+    /// Default working directory for the primary terminal and new sessions.
     #[arg(long = "project", env = "CODEX_WEB_PROJECT_DIR", default_value = ".")]
     pub project_dir: PathBuf,
+
+    /// Directory used for server-side Favorites and Recent workspace state.
+    #[arg(long, env = "CODEX_WEB_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
 
     /// Windows shell used to launch executable CLI entry points; ignored on non-Windows hosts.
     #[arg(
@@ -135,6 +140,7 @@ pub struct Config {
     pub host: IpAddr,
     pub port: u16,
     pub project_dir: PathBuf,
+    pub state_dir: PathBuf,
     pub shell: ShellKind,
     pub command: Option<String>,
     pub primary_agent: AgentKind,
@@ -165,6 +171,13 @@ impl Config {
             &args.project_dir.to_string_lossy(),
             MAX_PROJECT_PATH_LENGTH,
         )?;
+        if let Some(state_dir) = args.state_dir.as_ref() {
+            validate_length(
+                "state directory",
+                &state_dir.to_string_lossy(),
+                MAX_STATE_PATH_LENGTH,
+            )?;
+        }
         if let Some(command) = args.command.as_deref() {
             validate_nonempty_length("command", command, MAX_COMMAND_LENGTH)?;
         }
@@ -217,11 +230,13 @@ impl Config {
         }
 
         let project_dir = validate_project_directory(&args.project_dir)?;
+        let state_dir = resolve_state_directory(args.state_dir)?;
 
         Ok(Self {
             host: args.host,
             port: args.port,
             project_dir,
+            state_dir,
             shell: args.shell,
             command: args.command,
             primary_agent: args.primary_agent,
@@ -237,6 +252,74 @@ impl Config {
             log_level: args.log_level,
         })
     }
+}
+
+fn resolve_state_directory(configured: Option<PathBuf>) -> Result<PathBuf> {
+    if configured
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        bail!("state directory must not be empty");
+    }
+    let path = match configured {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => env::current_dir()
+            .context("failed to resolve the relative state directory")?
+            .join(path),
+        None => default_state_directory()?,
+    };
+
+    validate_length(
+        "resolved state directory",
+        &path.to_string_lossy(),
+        MAX_STATE_PATH_LENGTH,
+    )?;
+    Ok(path)
+}
+
+#[cfg(windows)]
+fn default_state_directory() -> Result<PathBuf> {
+    let base = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|home| home.join("AppData").join("Local"))
+        })
+        .context(
+            "cannot determine the user state directory; set --state-dir or CODEX_WEB_STATE_DIR",
+        )?;
+    Ok(base.join("codex-web-terminal"))
+}
+
+#[cfg(unix)]
+fn default_state_directory() -> Result<PathBuf> {
+    if let Some(state_home) = env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        return Ok(state_home.join("codex-web-terminal"));
+    }
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .context(
+            "cannot determine the user state directory; set --state-dir or CODEX_WEB_STATE_DIR",
+        )?;
+    Ok(home.join(".local").join("state").join("codex-web-terminal"))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn default_state_directory() -> Result<PathBuf> {
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .context(
+            "cannot determine the user state directory; set --state-dir or CODEX_WEB_STATE_DIR",
+        )?;
+    Ok(home.join(".codex-web-terminal"))
 }
 
 fn validate_project_directory(path: &Path) -> Result<PathBuf> {
@@ -299,6 +382,7 @@ mod tests {
             host: "127.0.0.1".parse().expect("valid host"),
             port: 8787,
             project_dir: project_dir.to_path_buf(),
+            state_dir: Some(project_dir.join("state")),
             shell: ShellKind::Powershell,
             command: None,
             primary_agent: AgentKind::Codex,
@@ -324,6 +408,7 @@ mod tests {
             config.project_dir,
             dunce::canonicalize(directory.path()).expect("canonical path")
         );
+        assert_eq!(config.state_dir, directory.path().join("state"));
         assert_eq!(config.port, 8787);
         assert_eq!(config.command, None);
         assert_eq!(config.primary_agent, AgentKind::Codex);
@@ -378,5 +463,18 @@ mod tests {
 
         assert!(config.claude_dangerously_skip_permissions);
         assert!(config.agy_dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn resolves_a_relative_state_directory_without_creating_it() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let mut args = args_for(directory.path());
+        args.state_dir = Some(PathBuf::from("codex-web-state"));
+
+        let config = Config::from_args(args).expect("valid state directory");
+
+        assert!(config.state_dir.is_absolute());
+        assert!(config.state_dir.ends_with("codex-web-state"));
+        assert!(!config.state_dir.exists());
     }
 }

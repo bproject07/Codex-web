@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     config::AgentKind,
+    filesystem::encode_directory_id,
     protocol::validate_resize,
     terminal::{self, TerminalConfig},
 };
@@ -110,6 +111,7 @@ pub struct SessionSnapshot {
     pub pid: Option<u32>,
     pub exit_code: Option<u32>,
     pub project: String,
+    pub directory_id: String,
     pub last_error: Option<String>,
 }
 
@@ -459,6 +461,7 @@ impl SessionManager {
                 .project_dir
                 .to_string_lossy()
                 .into_owned(),
+            directory_id: encode_directory_id(&self.inner.terminal_config.project_dir),
             last_error: record.last_error.clone(),
         }
     }
@@ -518,6 +521,7 @@ impl SessionManager {
             agent = self.inner.terminal_config.agent.label(),
             "restarting agent session"
         );
+        terminal::validate_project_directory(&self.inner.terminal_config)?;
         self.terminate_locked()?;
         self.start_locked()
     }
@@ -569,7 +573,6 @@ impl SessionManager {
 
         tracing::info!(
             command = %resolved.path().display(),
-            project = %self.inner.terminal_config.project_dir.display(),
             agent = self.inner.terminal_config.agent.label(),
             "starting agent in PTY"
         );

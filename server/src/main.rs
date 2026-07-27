@@ -13,8 +13,10 @@ use codex_web_terminal::{
     agents::build_agent_profiles,
     auth::{AuthState, generate_token},
     config::{Config, static_directory},
+    filesystem::DirectoryBrowser,
     registry::SessionRegistry,
     routes::{AppState, build_router},
+    workspaces::WorkspaceStore,
 };
 
 #[tokio::main]
@@ -44,13 +46,36 @@ async fn main() -> Result<()> {
         agent_profiles.new_session,
         agent_profiles.additional,
     );
+    let directories = DirectoryBrowser::new(config.project_dir.clone());
+    let workspaces = WorkspaceStore::open(config.state_dir.clone())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to initialize workspace state in {}",
+                config.state_dir.display()
+            )
+        })?;
 
-    if let Err(error) = sessions.start_primary().await {
-        tracing::error!(
-            %error,
-            agent = config.primary_agent.label(),
-            "primary agent is unavailable; the web server will remain available for diagnostics and restart"
-        );
+    match sessions.start_primary().await {
+        Ok(()) => {
+            let primary = sessions.primary().snapshot();
+            if let Err(error) = workspaces
+                .record_recent(directories.describe(&config.project_dir), primary.agent)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    "primary terminal started but Recent workspace state could not be saved"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                agent = config.primary_agent.label(),
+                "primary agent is unavailable; the web server will remain available for diagnostics and restart"
+            );
+        }
     }
 
     let bind_address = SocketAddr::new(config.host, config.port);
@@ -78,6 +103,8 @@ async fn main() -> Result<()> {
         auth: AuthState::new(token),
         sessions: sessions.clone(),
         agents: agent_catalog,
+        directories,
+        workspaces,
         shutdown: shutdown.clone(),
     };
     let app = build_router(state, static_directory);

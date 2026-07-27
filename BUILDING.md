@@ -16,6 +16,17 @@ The repository contains two applications:
 2. `server/` is a Rust backend that owns the PTYs, serves the frontend, and
    exposes the authenticated HTTP and WebSocket interfaces.
 
+The lightweight workspace launcher is split deliberately:
+
+- `web/src/workspaces/` owns the dependency-free folder-picker UI and state
+  model;
+- `web/src/api.ts` validates its authenticated HTTP DTOs;
+- `server/src/filesystem.rs` owns native path-ID encoding and bounded,
+  directory-only browsing;
+- `server/src/workspaces.rs` owns versioned Favorites/Recent persistence;
+- the session registry receives an already validated native working directory
+  and applies it only to the newly reserved PTY.
+
 The frontend must be built before creating a local application package. A
 packaged application has this layout:
 
@@ -79,6 +90,14 @@ At minimum:
    process lifecycle, WebSocket I/O, resize, replay, or terminal behavior
    changes;
 5. update every affected Markdown file in the same commit.
+
+For workspace browsing, persistence, or selected-directory launch changes,
+the Windows and Linux checks must additionally cover native path-ID round
+trips, directory-only one-level listings, manual absolute-path resolution,
+Favorites/Recent persistence and limits, stale/inaccessible paths,
+the 256-KiB request-body boundary, 32-MiB (33,554,432-byte) state read/write
+boundary, corrupt-state quarantine, and a real fixture PTY whose current
+working directory is the selected folder.
 
 If the local machine cannot run Linux, use GitHub Actions, a Linux VM, or a
 Linux host you control. Do not mark the change complete or describe it as
@@ -242,8 +261,9 @@ Start the packaged build:
 .\scripts\run.ps1 -Project "C:\Projects\my-app"
 ```
 
-The `-Project` directory is the directory in which every managed agent CLI
-session will run.
+The `-Project` directory is the canonicalized default. The primary agent
+starts there; **+ New** may choose another directory readable by the server
+account for that new managed session.
 
 `run.ps1` searches `dist/codex-web.exe` before the release and debug binaries
 under `server/target`. If `dist` contains an older package, rebuild it or run
@@ -396,7 +416,8 @@ Additional backend arguments can follow the project directory:
 `run.sh` searches `dist-linux/codex-web` before the release and debug binaries
 under `server/target`. If `dist-linux` is stale, rebuild it or run the intended
 target binary explicitly. The project may be supplied only as the first
-positional argument.
+positional argument. It sets the default/primary working directory; it does
+not restrict the authenticated folder picker to that tree.
 
 ## Linux: manual build and full validation
 
@@ -509,8 +530,37 @@ has all of these properties:
 - `/api/health` reports `sessionRunning: true`;
 - the terminal shows the real Codex TUI;
 - keyboard input reaches Codex;
+- **+ New** can browse a disposable server directory and start the selected
+  agent there;
+- the created session snapshot reports that directory in both `project` and
+  `directoryId`;
+- the directory appears in **Recent**, can be starred in **Favorites**, and
+  remains after a server restart using the same state directory;
 - reconnecting the browser replays existing terminal output;
 - terminating or restarting the selected session updates its lifecycle state.
+
+Use `--state-dir` or `CODEX_WEB_STATE_DIR` with a disposable directory for
+this check. Give parallel test servers distinct state directories because the
+store has no cross-process locking. Do not write test Favorites/Recent into a
+live operator profile.
+
+The cross-platform registry test in `server/src/registry.rs` uses a synthetic
+command that prints its native current working directory; it proves that the
+selected path is the PTY child CWD rather than only display metadata.
+`server/tests/workspace_api.rs` separately verifies the authenticated endpoint
+contracts. `cargo test --all-targets --locked` includes both.
+
+Repeat the workspace runtime on Windows and Linux with native paths. Verify:
+
+- root enumeration (`C:\`-style logical drives on Windows, `/` on Unix);
+- one-level listing returns directories only and no nested descendants/files;
+- an absolute manual path opens, while a relative path is rejected;
+- a deleted or unreadable shortcut cannot launch a PTY;
+- malformed or future-version state is preserved under a
+  `workspaces.corrupt.<uuid>.json` name and a clean schema loads before the
+  normal primary-startup Recent update;
+- an opaque ID obtained on one operating system is never treated as portable
+  to the other.
 
 ### Optional agent-profile smoke test
 
@@ -578,7 +628,7 @@ The Python utilities in `scripts/` are specialized diagnostics rather than the
 normal unit-test path. They require Python 3, Python Playwright, and a matching
 browser installation. Check each script's help for its platform requirements;
 some older mobile diagnostics are Windows-oriented, while the agent-catalog
-regression owns cross-platform fixtures and cleanup.
+and workspace-picker regressions own cross-platform fixtures and cleanup.
 
 Use them only on a disposable test port and never point them at a live
 production session. The standard cross-platform validation remains:
@@ -586,6 +636,34 @@ production session. The standard cross-platform validation remains:
 - frontend Vitest suite and production build;
 - Rust format, test, Clippy, and release build;
 - a separate native PTY/browser smoke test.
+
+The Vitest suite includes the `web/src/workspaces/` model and dialog plus API
+DTO validation. The Rust suite includes native path encoding, bounded
+directory browsing, workspace persistence, registry selected-CWD tests, and
+`server/tests/workspace_api.rs`. Keep these cases in the normal suites rather
+than making the launcher depend on an optional browser utility.
+
+The workspace-picker regression owns a disposable server, synthetic
+directories, isolated state, a synthetic long-running CLI, and its cleanup. It
+checks bearer protection, directory-only API contracts, opaque IDs,
+Favorite add/persist/delete, the primary default folder and later Recent
+updates, the actual PTY child working directory, focus handoff, direct
+Favorite/Recent starts, and 360×639 plus 360×345 mobile layouts. It refuses
+the reserved live ports `8788`, `8789`, and `8790`:
+
+```powershell
+python -B .\scripts\workspace-picker-regression.py `
+  --server .\server\target\release\codex-web.exe `
+  --port 8803
+```
+
+On Linux:
+
+```bash
+python -B ./scripts/workspace-picker-regression.py \
+  --server ./server/target/release/codex-web \
+  --port 8803
+```
 
 The cross-platform agent-catalog regression starts a disposable server,
 supplies synthetic CLI fixtures, validates the versioned catalog, exercises a
@@ -768,10 +846,28 @@ test -r /dev/ptmx
 ```
 
 The user running `codex-web` must be able to execute the selected CLI and
-access the configured project directory. The catalog deliberately does not
-expose executable paths; inspect resolution on the server with `where.exe`
-(Windows) or `command -v` (Unix). An invalid explicit command is intentionally
-`misconfigured`; it does not fall back to an auto-detected executable.
+access the default and selected working directories. The catalog deliberately
+does not expose executable paths; inspect resolution on the server with
+`where.exe` (Windows) or `command -v` (Unix). An invalid explicit command is
+intentionally `misconfigured`; it does not fall back to an auto-detected
+executable.
+
+### The workspace tests fail only on one operating system
+
+Directory IDs intentionally encode native Windows UTF-16 or Unix path bytes
+and carry a platform prefix. Do not normalize them through UTF-8 strings,
+construct them in frontend tests, or expect IDs from one OS to decode on the
+other. Use IDs returned by that server unchanged. Keep root enumeration and
+case-sensitive/case-insensitive sorting assertions platform-specific.
+
+If persistence tests fail, use an isolated temporary state directory. Check
+same-directory create/rename permission. On Unix, new targets should be `0700`
+for the directory and `0600` for the file; an existing target must already be
+owned by the effective test user and grant no group/other permissions. The
+server must reject rather than chmod an unsafe target. A state file that is
+corrupt, uses a future version, or is larger than 32 MiB should be
+quarantined, not silently rewritten, and a pending write beyond 32 MiB must
+leave the current file intact.
 
 ### The page says the frontend build is missing
 

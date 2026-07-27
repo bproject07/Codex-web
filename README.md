@@ -76,16 +76,18 @@ Desktop or mobile browser
           ▼
 Rust server
   Tokio + Axum
-          │
-          │ managed session registry (maximum 4)
-          ▼
-Up to 4 native PTY sessions
-          │
-          ├── Windows: resolved .exe or .cmd entry point
-          └── Unix: resolved executable launched directly
-                         │
-                         ▼
-               Codex, Claude, or AGY per session
+      ├── authenticated directory browser ── server-account filesystem
+      ├── Favorites / Recent store ───────── workspaces.json
+      └── managed session registry (maximum 4)
+                          │
+                          ▼
+                   Native PTY sessions
+                    ├── Windows: resolved .exe or .cmd
+                    └── Unix: resolved executable
+                          │
+                          ▼
+               Codex, Claude, or AGY
+               in each selected folder
 ```
 
 The server owns up to four independent, web-managed agent PTY sessions. The
@@ -103,7 +105,11 @@ resumes live output.
 - Read-only discovery of Codex, Claude, and AGY with installed version and
   `ready`, `missing`, or `misconfigured` status
 - Up to four authenticated WebSocket clients per terminal session
-- Fixed project directory selected when the server starts
+- A canonicalized default project directory selected when the server starts
+- Per-session working-folder selection from server-side Favorites, Recent,
+  filesystem roots, one-level directory browsing, or a manual absolute path
+- Server-side persistence for up to 100 Favorites and 30 deduplicated Recent
+  folders
 - One 16 MiB bounded raw terminal output buffer per session
 - Up to the newest 2 MiB replayed to each newly attached client
 - Initial PTY size of 120 columns by 35 rows
@@ -115,8 +121,9 @@ resumes live output.
 Clients attached to the same terminal session share its PTY and can type into
 it concurrently. They also share its PTY dimensions, so the most recent valid
 resize from any attached browser wins. The authenticated URL grants full
-read/write control over every managed session, so do not share it with anyone
-who should not have terminal access.
+read/write control over every managed session plus folder browsing and launch
+authority anywhere readable by the server account. Do not share it with
+anyone who should not have that access.
 
 ## Prerequisites
 
@@ -233,16 +240,30 @@ Open that URL. The frontend moves the token into `sessionStorage` and removes it
 from the visible address. The token is not put in `localStorage`.
 
 Use the session tabs in the header to switch between managed terminals and
-**+ New** to create another live agent PTY. The picker reports the detected
-Codex, Claude, and AGY status and installed version. Every open of **+ New**
-forces a fresh server-side check so an older browser tab cannot reuse stale
-availability. A ready agent can be started; a missing or misconfigured agent
+**+ New** to create another live agent PTY. **+ New** first opens **Choose a
+project folder**:
+
+- **Favorites** contains folders explicitly starred in the browser UI.
+- **Recent** contains folders in which a terminal successfully started, newest
+  first.
+- **Browse** shows filesystem roots and one directory level at a time. It
+  never lists files. A full, absolute path on the server can also be opened
+  manually.
+
+After **Use folder**, **New terminal** shows the detected Codex, Claude, and
+AGY status and installed version; choose a ready agent to start it in that
+folder. A Favorite with a remembered preferred agent or a Recent entry with
+its last agent also provides a direct **Start Codex**, **Start Claude**, or
+**Start AGY** shortcut. If that agent is no longer ready, the normal agent
+picker opens instead.
+
+Every open of **+ New** forces a fresh server-side agent check so an older
+browser tab cannot reuse stale availability. A missing or misconfigured agent
 displays manual host-side installation guidance and **Refresh** /
-**Check again** actions. Swipe the tab
-strip on mobile,
-or use a wheel, trackpad, or the overflow arrows on desktop. **Manage** opens
-the detailed session list. Switching tabs does not stop the previously
-displayed session; it continues running and buffering output in the background.
+**Check again** actions. Swipe the tab strip on mobile, or use a wheel,
+trackpad, or the overflow arrows on desktop. **Manage** opens the detailed
+session list. Switching tabs does not stop the previously displayed session;
+it continues running and buffering output in the background.
 
 The generated token changes whenever the server restarts. Supply `--token` or
 `CODEX_WEB_TOKEN` when a stable token is required.
@@ -417,7 +438,8 @@ Supported arguments:
 | --- | --- |
 | `--host` | Bind address; defaults to `127.0.0.1` |
 | `--port` | TCP port; defaults to `8787` |
-| `--project` | Fixed working directory for every agent |
+| `--project` | Default working directory for the primary terminal and new sessions that omit a folder |
+| `--state-dir` | Dedicated directory for server-side Favorites and Recent state; uses the per-user OS default when omitted |
 | `--shell` | Windows-only: `powershell` or `cmd`; ignored on Unix |
 | `--command` | Explicit executable override for the primary terminal |
 | `--primary-agent` | Agent represented by `--command`: `codex`, `claude`, or `agy`; defaults to `codex` |
@@ -490,6 +512,7 @@ CLI arguments override environment variables.
 | `CODEX_WEB_HOST` | `127.0.0.1` |
 | `CODEX_WEB_PORT` | `8787` |
 | `CODEX_WEB_PROJECT_DIR` | Current directory |
+| `CODEX_WEB_STATE_DIR` | Windows: `%LOCALAPPDATA%\codex-web-terminal`; Unix: `$XDG_STATE_HOME/codex-web-terminal` or `$HOME/.local/state/codex-web-terminal` |
 | `CODEX_WEB_TOKEN` | Secure random token generated at startup |
 | `CODEX_WEB_COMMAND` | Unset; derived from `CODEX_WEB_PRIMARY_AGENT` |
 | `CODEX_WEB_PRIMARY_AGENT` | `codex` |
@@ -503,12 +526,74 @@ CLI arguments override environment variables.
 | `CODEX_WEB_SHELL` | `powershell`; Windows-only and ignored on Unix |
 | `CODEX_WEB_LOG_LEVEL` | `info` |
 
-The project directory is canonicalized and checked once at startup. No API or
-frontend message can replace it.
+The default project directory is canonicalized and checked at startup. The
+primary terminal starts there. An authenticated **New** request may instead
+select another absolute directory readable by the server account; that choice
+applies only to the new managed terminal. `--project` is therefore a default,
+not a filesystem allowlist or sandbox.
+
+## Workspace state
+
+Favorites and Recent are host- and operating-system-account-local. They are
+stored by the server in `workspaces.json`, not in browser storage. The state
+directory is selected by `--state-dir` or `CODEX_WEB_STATE_DIR`. When neither
+is set, it is:
+
+```text
+Windows: %LOCALAPPDATA%\codex-web-terminal
+         (with %USERPROFILE%\AppData\Local as a fallback)
+Unix:   $XDG_STATE_HOME/codex-web-terminal
+         or $HOME/.local/state/codex-web-terminal
+```
+
+A relative configured state directory is resolved from the server's startup
+working directory. Writes use a temporary file in the same directory,
+flush it, and atomically replace `workspaces.json`; Unix also syncs the parent
+directory. The target must be a dedicated application subdirectory, not a
+filesystem root, current directory, account/system base directory, or the
+system temporary directory. State directories and files cannot be symlinks
+or Windows reparse points.
+
+On Unix, a newly created state directory uses mode `0700` and new state files
+use `0600`. An existing directory or file must already be owned by the
+effective server user and grant no group/other permissions; the application
+rejects unsafe targets rather than changing their mode. Windows deployments
+rely on operator-managed directory ACLs.
+There is no cross-process locking or merge protocol. Give every concurrently
+running server instance a distinct `--state-dir`; sharing one can lose updates
+through last-writer-wins replacement.
+
+The format is versioned as schema 1, the file is limited to 32 MiB
+(33,554,432 bytes) on both read and write, Favorites to 100 entries, and
+Recent to 30 entries. Recent is deduplicated by native directory and ordered
+newest first. A successful primary startup, new-session launch, or restart
+records the folder and actual agent; launching from an existing Favorite also
+refreshes its preferred agent. Every PTY start revalidates that the stored path
+is still the same canonical, readable directory. A stale or symlink-swapped
+path rejects Restart before the running PTY is terminated. If persistence fails
+after a PTY has started, the live terminal remains successful and the server
+logs a warning. A Favorite mutation whose serialized state would exceed the
+limit fails with HTTP 507 before replacing the current file or in-memory state.
+If an existing file is malformed, larger than the limit, or uses an unsupported
+version, the server renames it to
+`workspaces.corrupt.<uuid>.json`, logs a warning without its contents, and
+loads a clean schema-1 state. Normal successful primary startup may
+immediately add the default folder to Recent. The quarantined file is
+preserved for operator inspection; it is not overwritten.
+
+Saved entries may outlive renamed, removed, or permission-restricted folders.
+Favorites remain visible until explicitly updated or removed. Recent entries
+remain until a successful launch refreshes them or enough newer launches evict
+them; a failed attempt removes neither kind of entry. Browsing, starting, or
+updating a Favorite always resolves and checks the directory again, so stale
+state never bypasses filesystem permissions. The state file contains display
+paths and reversible path IDs, so it can reveal filesystem layout and usage
+history. Protect the live file and its backups, and exclude both from
+screenshots and issue reports.
 
 ## HTTP API
 
-All API endpoints require:
+All HTTP `/api` endpoints require:
 
 ```http
 Authorization: Bearer YOUR_TOKEN
@@ -521,8 +606,14 @@ Endpoints:
 | `GET` | `/api/health` | Aggregate installation, process, session, and client-count health |
 | `GET` | `/api/agents` | Compatibility list of configured, ready profiles available to **New** |
 | `GET` | `/api/agent-catalog` | Read-only platform, status, version, verification, install, and update metadata |
+| `GET` | `/api/filesystem/roots` | List the configured default directory and server filesystem roots |
+| `POST` | `/api/filesystem/list` | List one directory level; body `{"directoryId":"..."}`, `{}`, or empty for the configured default |
+| `POST` | `/api/filesystem/resolve` | Open an absolute server path; body `{"path":"/absolute/server/path"}` |
+| `GET` | `/api/workspaces` | Read schema-1 Favorites and Recent state |
+| `PUT` | `/api/workspaces/favorites` | Create or update a Favorite by directory ID |
+| `DELETE` | `/api/workspaces/favorites/{favoriteId}` | Remove one Favorite record |
 | `GET` | `/api/sessions` | List sanitized metadata for all managed sessions |
-| `POST` | `/api/sessions` | Create a terminal; optional JSON body: `{"agent":"codex"}`, `{"agent":"claude"}`, or `{"agent":"agy"}` |
+| `POST` | `/api/sessions` | Create a terminal; optional body fields are `agent` and `directoryId` only |
 | `GET` | `/api/sessions/{terminalId}` | Get one managed session |
 | `POST` | `/api/sessions/{terminalId}/restart` | Terminate and recreate one agent PTY |
 | `POST` | `/api/sessions/{terminalId}/terminate` | Terminate one agent PTY without removing its entry |
@@ -535,6 +626,80 @@ Endpoints:
 No response contains the authentication token, terminal input, terminal
 output, Codex credentials, or Codex authentication files.
 
+The directory DTO is:
+
+```json
+{"id":"opaque-native-path-id","name":"my-app","path":"/srv/projects/my-app"}
+```
+
+`id` is a versioned, URL-safe encoding of the native absolute path: Windows
+UTF-16 on Windows and native path bytes on Unix. Clients must treat it as
+opaque and return it unchanged. It is not encrypted, signed, or an
+authorization mechanism; the bearer token and server account permissions are
+the security boundary.
+
+`GET /api/filesystem/roots` returns:
+
+```json
+{
+  "defaultDirectory": {"id":"...","name":"my-app","path":"/srv/projects/my-app"},
+  "roots": [{"id":"...","name":"/","path":"/"}]
+}
+```
+
+Both directory-opening endpoints return:
+
+```json
+{
+  "current": {"id":"...","name":"projects","path":"/srv/projects"},
+  "parentId": "...",
+  "breadcrumbs": [{"id":"...","name":"/","path":"/"}],
+  "directories": [{"id":"...","name":"my-app","path":"/srv/projects/my-app"}],
+  "truncated": false
+}
+```
+
+Only immediate child directories are returned, sorted by name; files and
+recursive descendants are omitted. At most 10,000 directories are returned.
+`truncated: true` tells the client to use a more specific manual absolute path
+when a directory contains more.
+
+`GET /api/workspaces` returns:
+
+```json
+{
+  "version": 1,
+  "favorites": [{
+    "id": "favorite-uuid",
+    "directoryId": "...",
+    "name": "my-app",
+    "path": "/srv/projects/my-app",
+    "label": null,
+    "preferredAgent": "codex"
+  }],
+  "recent": [{
+    "directoryId": "...",
+    "name": "my-app",
+    "path": "/srv/projects/my-app",
+    "lastAgent": "codex",
+    "lastOpenedAt": 1785100000000
+  }]
+}
+```
+
+Favorite upsert accepts
+`{"directoryId":"...","label":"optional","preferredAgent":"codex"}`; `label`
+and `preferredAgent` may be omitted. It is a full upsert: omitted optional
+fields are stored as `null`, so they clear previous values for the same
+directory. The favorite URL uses the favorite record's UUID, not its directory
+ID. Labels are trimmed, limited to 120 characters, and cannot contain CR, LF,
+or NUL; an empty label becomes `null`. A new-session body can be
+`{"agent":"claude","directoryId":"..."}`. Empty bodies and bodies with only
+`agent` remain compatible and use the configured default directory. Unknown
+fields, including browser-supplied commands or arguments, are rejected.
+JSON bodies for session creation, directory list/resolve, and Favorite upsert
+are capped at 256 KiB; larger requests return HTTP 413.
+
 `/api/agent-catalog` uses schema version 1 and reports each known agent as
 `ready`, `missing`, or `misconfigured`. The `configuration` field is `auto` or
 `override`, so a broken authoritative override can be repaired instead of
@@ -546,8 +711,9 @@ verification command, update command, official documentation URL, and
 performs detection only. No API endpoint executes that command.
 
 Each session snapshot contains a stable `terminalId`, display `name`, `agent`,
-`isPrimary`, and `createdAt`. The existing `sessionId` identifies the current
-PTY generation and therefore changes when that terminal is restarted.
+`isPrimary`, `createdAt`, the display `project` path, and its opaque
+`directoryId`. The existing `sessionId` identifies the current PTY generation
+and therefore changes when that terminal is restarted.
 
 ## WebSocket protocol
 
@@ -621,16 +787,20 @@ converts the next typed ASCII letter to the matching control character, then
 automatically turns off.
 
 The header's session tabs, **+ New**, and **Manage** controls operate on
-independent live PTYs. The active tab selects which managed session feeds the
-same xterm screen. The tab strip scrolls horizontally when it overflows; it
-does not send `/new` or `/resume` commands into the selected agent's TUI.
+independent live PTYs. **+ New** selects a server folder before the agent. The
+active tab selects which managed session feeds the same xterm screen. The tab
+strip scrolls horizontally when it overflows; it does not send `/new` or
+`/resume` commands into the selected agent's TUI.
 
 ## Security
 
 This process has the same operating-system permissions and environment as the
 user who starts it. Anyone with the authenticated URL can interact with the
 selected agent, approve actions it presents, and potentially cause commands to
-run in the configured project.
+run in any directory readable by that operating-system account. The same token
+authorizes filesystem-root discovery, directory browsing, manual absolute-path
+resolution, Favorites/Recent access, and PTY launch. `--project` is only the
+default working directory; it is not a sandbox or an authorization boundary.
 
 Security measures in this application:
 
@@ -640,7 +810,12 @@ Security measures in this application:
 - constant-time comparison for equal-length tokens
 - failed-authentication throttling and a temporary per-IP block
 - strict WebSocket Origin validation
-- fixed startup-only project path
+- canonicalized default project path and launch-time validation of every
+  selected directory
+- directory-only, non-recursive listings capped at 10,000 entries
+- 256 KiB cap for session-create and workspace JSON request bodies
+- versioned, bounded workspace state with corrupt-file quarantine and atomic
+  replacement
 - four-client-per-session limit
 - 64 KiB WebSocket message limit
 - 4 KiB JSON control-message limit
@@ -754,8 +929,27 @@ Pop-Location
 Tests cover token validation and throttling, config validation, resize and
 control-message parsing, session state transitions, the bounded output buffer,
 Windows `.cmd` invocation with spaces, direct Unix PTY execution, control
-encoding, reconnect state/backoff, UTF-8 input, and mobile Ctrl conversion.
-The automated tests do not require a real Codex process.
+encoding, reconnect state/backoff, UTF-8 input, mobile Ctrl conversion,
+workspace DTO validation, native path-ID round trips, bounded directory-only
+listing, Favorites/Recent persistence and quarantine, and selected-directory
+session creation. The automated tests do not require a real Codex process.
+
+Workspace changes also need a disposable native runtime check on Windows and
+Linux: browse a synthetic directory, launch a fixture PTY in it, verify the
+reported and native working directory, exercise Favorite/Recent persistence
+across a server restart, and confirm that a stale or inaccessible path is
+rejected. Never run that check against a live server or real project tree.
+
+Where Python Playwright is available, the repository's isolated browser/API
+regression covers the selected-CWD, direct-start, focus, and desktop/mobile
+launcher flow:
+
+```text
+python scripts/workspace-picker-regression.py --server PATH_TO_BUILT_SERVER --port 8803
+```
+
+It owns and removes its temporary server, state, paths, and synthetic CLI, and
+refuses the reserved live ports `8788`, `8789`, and `8790`.
 
 ## Troubleshooting
 
@@ -800,6 +994,28 @@ Use the complete URL printed by the current server process. A generated token
 changes after every restart and is stored only in the current tab's
 `sessionStorage`. After five failed attempts from one IP, wait one minute
 before trying again.
+
+### A Favorite or Recent folder no longer opens
+
+Workspace entries are convenience history and are not continuously scanned.
+If a folder was moved, deleted, or made inaccessible, it remains visible but
+the server rejects browsing or launch with `404 Not Found` or `403 Forbidden`.
+Browse to the new location and update or remove the Favorite. A stale entry
+never grants access that the server account does not already have.
+
+### Favorites or Recent unexpectedly start empty
+
+Check the configured state directory and the server warning log. A
+`workspaces.json` that is invalid, uses a future version, or is larger than
+32 MiB is preserved as
+`workspaces.corrupt.<uuid>.json` and replaced in memory by an empty schema-1
+state before the normal primary-startup Recent update. On Unix, confirm the
+effective server user owns the private state directory/file and that neither
+grants group or other permissions (`0700` and `0600` are the normal modes).
+The application rejects an unsafe existing target instead of changing it. Do
+not use a filesystem root, broad account/system directory, symlink, or Windows
+reparse point as the state target. Do not paste the state file into a public
+issue because it contains filesystem paths and usage history.
 
 ### Blank terminal
 
@@ -865,6 +1081,19 @@ when available.
   Codex Web Terminal server process.
 - Agent discovery is local and read-only. The browser cannot install, update,
   authenticate, or repair a CLI; it only shows vetted host-side instructions.
+- The folder picker is intentionally directory-only and non-recursive. It does
+  not browse files, preview content, search the filesystem, or enforce a root
+  allowlist.
+- `--project` selects the primary/default folder but does not confine an
+  authenticated client. Anyone with the bearer token can browse and launch in
+  any directory readable by the server account.
+- Opaque directory IDs preserve native paths across the API; they do not hide
+  paths from an authorized client or provide access control.
+- Favorites and Recent are shared by every browser using the same server and
+  token. They have no per-browser or per-user isolation, and stale entries are
+  checked only when opened, updated, or used to launch.
+- Workspace persistence has no cross-process locking or merge. Concurrent
+  server instances must not share a state directory.
 - Codex Web Terminal cannot retroactively attach to an arbitrary Codex CLI or
   terminal process that was started elsewhere. It does not possess the
   existing process's PTY master handle or input/output pipes.

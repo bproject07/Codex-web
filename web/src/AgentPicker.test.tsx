@@ -66,6 +66,8 @@ describe("AgentPicker", () => {
         loading={false}
         error={null}
         creatingAgent={null}
+        workspacePath={"C:\\Projects\\demo-project"}
+        onChangeWorkspace={vi.fn()}
         onSelect={vi.fn()}
         onRefresh={vi.fn()}
         onClose={vi.fn()}
@@ -75,6 +77,9 @@ describe("AgentPicker", () => {
     expect(html).toContain("the Windows (x86_64) server host");
     expect(html).toContain("not on this browser or phone");
     expect(html).toContain("Installed version 0.145.0");
+    expect(html).toContain("Working folder");
+    expect(html).toContain("C:\\Projects\\demo-project");
+    expect(html).toContain("Change folder");
     expect(html).toContain("Not found");
     expect(html).toContain("Configuration error");
     expect(html).toContain("authoritative command override");

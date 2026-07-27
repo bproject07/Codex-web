@@ -12,6 +12,8 @@ interface AgentPickerProps {
   loading: boolean;
   error: string | null;
   creatingAgent: AgentKind | null;
+  workspacePath?: string;
+  onChangeWorkspace?: () => void;
   onSelect: (agent: AgentKind) => void;
   onRefresh: () => void;
   onClose: () => void;
@@ -39,6 +41,8 @@ export function AgentPicker({
   loading,
   error,
   creatingAgent,
+  workspacePath,
+  onChangeWorkspace,
   onSelect,
   onRefresh,
   onClose,
@@ -228,6 +232,26 @@ export function AgentPicker({
             that runs Codex Web Terminal. Review the official instructions
             before downloading and installing software.
           </p>
+          {workspacePath && (
+            <div className="agent-picker-workspace">
+              <span>
+                <small>Working folder</small>
+                <code title={workspacePath}>{workspacePath}</code>
+              </span>
+              {onChangeWorkspace && (
+                <button
+                  type="button"
+                  disabled={creating}
+                  onClick={() => {
+                    returnFocusRef.current = null;
+                    onChangeWorkspace();
+                  }}
+                >
+                  Change folder
+                </button>
+              )}
+            </div>
+          )}
           <div className="agent-picker-announcement" aria-live="polite">
             {loading
               ? "Checking installed CLI agents…"

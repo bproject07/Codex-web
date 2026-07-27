@@ -22,6 +22,7 @@ const PRIMARY_SESSION: SessionSnapshot = {
   pid: 123,
   exitCode: null,
   project: "C:\\Projects\\my-app",
+  directoryId: "w1.QwA6AFwAUAByAG8AagBlAGMAdABzAFwAbQB5AC0AYQBwAHAA",
   lastError: null,
 };
 
@@ -83,6 +84,7 @@ describe("terminal session API selection", () => {
       name: _name,
       isPrimary: _isPrimary,
       createdAt: _createdAt,
+      directoryId: _directoryId,
       ...legacySession
     } = PRIMARY_SESSION;
     const fetchMock = vi
@@ -98,6 +100,7 @@ describe("terminal session API selection", () => {
         terminalId: "primary",
         name: "Primary",
         isPrimary: true,
+        directoryId: "",
       },
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -122,6 +125,37 @@ describe("terminal session API selection", () => {
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ agent: "claude" }),
+      }),
+    );
+  });
+
+  it("creates a session in the selected opaque directory", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ ...SECONDARY_SESSION, agent: "agy", name: "Agy 2" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createSession(
+        "0123456789abcdef",
+        "agy",
+        "w1.QwA6AFwAUAByAG8AagBlAGMAdABzAFwAZABlAG0AbwA",
+      ),
+    ).resolves.toMatchObject({
+      agent: "agy",
+      name: "Agy 2",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          agent: "agy",
+          directoryId:
+            "w1.QwA6AFwAUAByAG8AagBlAGMAdABzAFwAZABlAG0AbwA",
+        }),
       }),
     );
   });

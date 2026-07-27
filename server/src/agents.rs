@@ -346,6 +346,7 @@ mod tests {
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 8787,
             project_dir: PathBuf::from("."),
+            state_dir: PathBuf::from("."),
             shell: ShellKind::Powershell,
             command: None,
             primary_agent,

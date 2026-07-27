@@ -17,9 +17,13 @@ use crate::{
     agents::{AgentCatalog, AgentCatalogResponse},
     auth::{self, AuthState},
     config::{AgentKind, Config},
+    filesystem::{
+        DirectoryBrowser, DirectoryError, DirectoryListing, FilesystemRoots, decode_directory_id,
+    },
     registry::{MAX_SESSIONS, RegistryError, SessionRegistry},
     session::SessionSnapshot,
     websocket,
+    workspaces::{WorkspaceError, WorkspaceLibrary, WorkspaceStore},
 };
 use uuid::Uuid;
 
@@ -29,6 +33,8 @@ pub struct AppState {
     pub auth: AuthState,
     pub sessions: SessionRegistry,
     pub agents: AgentCatalog,
+    pub directories: DirectoryBrowser,
+    pub workspaces: WorkspaceStore,
     pub shutdown: CancellationToken,
 }
 
@@ -54,15 +60,53 @@ struct ErrorResponse {
 #[serde(rename_all = "camelCase")]
 struct CreateSessionRequest {
     agent: Option<AgentKind>,
+    directory_id: Option<String>,
 }
 
-const MAX_CREATE_SESSION_BODY: usize = 1_024;
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+struct ListDirectoryRequest {
+    directory_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveDirectoryRequest {
+    path: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+struct UpsertFavoriteRequest {
+    directory_id: String,
+    label: Option<String>,
+    preferred_agent: Option<AgentKind>,
+}
+
+const MAX_CREATE_SESSION_BODY: usize = 256 * 1024;
+const MAX_DIRECTORY_ID_BODY: usize = 256 * 1024;
+const MAX_RESOLVE_PATH_BODY: usize = 256 * 1024;
+const MAX_FAVORITE_BODY: usize = 256 * 1024;
 
 pub fn build_router(state: AppState, static_directory: Option<PathBuf>) -> Router {
     let protected_api = Router::new()
         .route("/api/health", get(health))
         .route("/api/agents", get(agents))
         .route("/api/agent-catalog", get(agent_catalog))
+        .route("/api/filesystem/roots", get(filesystem_roots))
+        .route("/api/filesystem/list", post(list_directory))
+        .route("/api/filesystem/resolve", post(resolve_directory))
+        .route("/api/workspaces", get(workspaces))
+        .route(
+            "/api/workspaces/favorites",
+            axum::routing::put(upsert_favorite),
+        )
+        .route(
+            "/api/workspaces/favorites/{id}",
+            axum::routing::delete(delete_favorite),
+        )
         .route("/api/session", get(primary_session))
         .route("/api/session/restart", post(restart_primary_session))
         .route("/api/session/terminate", post(terminate_primary_session))
@@ -124,6 +168,79 @@ async fn agent_catalog(State(state): State<AppState>) -> Json<AgentCatalogRespon
     Json(state.agents.snapshot().await)
 }
 
+async fn filesystem_roots(State(state): State<AppState>) -> Json<FilesystemRoots> {
+    Json(state.directories.roots())
+}
+
+async fn list_directory(State(state): State<AppState>, body: Bytes) -> Response {
+    let request: ListDirectoryRequest = match parse_json_body(
+        &body,
+        MAX_DIRECTORY_ID_BODY,
+        true,
+        "The directory request is too large.",
+        "The directory request is invalid.",
+    ) {
+        Ok(request) => request,
+        Err(error) => return request_parse_error_response(error),
+    };
+    let result = match request.directory_id.as_deref() {
+        Some(directory_id) => state.directories.list_id(directory_id).await,
+        None => state.directories.list_default().await,
+    };
+    directory_listing_response(result)
+}
+
+async fn resolve_directory(State(state): State<AppState>, body: Bytes) -> Response {
+    let request: ResolveDirectoryRequest = match parse_json_body(
+        &body,
+        MAX_RESOLVE_PATH_BODY,
+        false,
+        "The directory path request is too large.",
+        "The directory path request is invalid.",
+    ) {
+        Ok(request) => request,
+        Err(error) => return request_parse_error_response(error),
+    };
+    directory_listing_response(state.directories.resolve_display_path(&request.path).await)
+}
+
+async fn workspaces(State(state): State<AppState>) -> Json<WorkspaceLibrary> {
+    Json(state.workspaces.snapshot().await)
+}
+
+async fn upsert_favorite(State(state): State<AppState>, body: Bytes) -> Response {
+    let request: UpsertFavoriteRequest = match parse_json_body(
+        &body,
+        MAX_FAVORITE_BODY,
+        false,
+        "The favorite request is too large.",
+        "The favorite request is invalid.",
+    ) {
+        Ok(request) => request,
+        Err(error) => return request_parse_error_response(error),
+    };
+    let path = match state.directories.resolve_id(&request.directory_id).await {
+        Ok(path) => path,
+        Err(error) => return directory_error_response(error),
+    };
+    let directory = state.directories.describe(&path);
+    match state
+        .workspaces
+        .upsert_favorite(directory, request.label, request.preferred_agent)
+        .await
+    {
+        Ok(favorite) => Json(favorite).into_response(),
+        Err(error) => workspace_error_response(error),
+    }
+}
+
+async fn delete_favorite(State(state): State<AppState>, Path(favorite_id): Path<Uuid>) -> Response {
+    match state.workspaces.delete_favorite(favorite_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => workspace_error_response(error),
+    }
+}
+
 async fn create_session(State(state): State<AppState>, body: Bytes) -> Response {
     if body.len() > MAX_CREATE_SESSION_BODY {
         return (
@@ -147,8 +264,34 @@ async fn create_session(State(state): State<AppState>, body: Bytes) -> Response 
         }
     };
     let requested_agent = request.agent;
-    match state.sessions.create(requested_agent).await {
-        Ok(session) => (StatusCode::CREATED, Json(session)).into_response(),
+    let selected_project = match request.directory_id.as_deref() {
+        Some(directory_id) => match state.directories.resolve_id(directory_id).await {
+            Ok(path) => Some(path),
+            Err(error) => return directory_error_response(error),
+        },
+        None => None,
+    };
+    let recent_project = selected_project
+        .clone()
+        .unwrap_or_else(|| state.config.project_dir.clone());
+    match state
+        .sessions
+        .create_in(requested_agent, selected_project)
+        .await
+    {
+        Ok(session) => {
+            let recent_directory = state.directories.describe(&recent_project);
+            if let Err(error) = state
+                .workspaces
+                .record_recent(recent_directory, session.agent)
+                .await
+            {
+                // The PTY is already live. Persistence must not turn a successful
+                // launch into an apparent failure or terminate the process.
+                tracing::warn!(%error, "terminal started but Recent workspace state could not be saved");
+            }
+            (StatusCode::CREATED, Json(session)).into_response()
+        }
         Err(RegistryError::LimitReached) => (
             StatusCode::CONFLICT,
             Json(ErrorResponse {
@@ -183,11 +326,95 @@ async fn create_session(State(state): State<AppState>, body: Bytes) -> Response 
     }
 }
 
+fn parse_json_body<T: serde::de::DeserializeOwned + Default>(
+    body: &[u8],
+    maximum_bytes: usize,
+    allow_empty: bool,
+    too_large_message: &'static str,
+    invalid_message: &'static str,
+) -> Result<T, (StatusCode, &'static str)> {
+    if body.len() > maximum_bytes {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, too_large_message));
+    }
+    if body.iter().all(u8::is_ascii_whitespace) {
+        if allow_empty {
+            return Ok(T::default());
+        }
+        return Err((StatusCode::BAD_REQUEST, invalid_message));
+    }
+    serde_json::from_slice(body).map_err(|_| (StatusCode::BAD_REQUEST, invalid_message))
+}
+
+fn request_parse_error_response(error: (StatusCode, &'static str)) -> Response {
+    (error.0, Json(ErrorResponse { error: error.1 })).into_response()
+}
+
 fn parse_create_session_request(body: &[u8]) -> Result<CreateSessionRequest, ()> {
     if body.iter().all(u8::is_ascii_whitespace) {
         return Ok(CreateSessionRequest::default());
     }
     serde_json::from_slice(body).map_err(|_| ())
+}
+
+fn directory_listing_response(result: Result<DirectoryListing, DirectoryError>) -> Response {
+    match result {
+        Ok(listing) => Json(listing).into_response(),
+        Err(error) => directory_error_response(error),
+    }
+}
+
+fn directory_error_response(error: DirectoryError) -> Response {
+    let (status, message) = match error {
+        DirectoryError::InvalidId | DirectoryError::InvalidPath => (
+            StatusCode::BAD_REQUEST,
+            "The directory selection is invalid.",
+        ),
+        DirectoryError::NotFound => (StatusCode::NOT_FOUND, "The directory was not found."),
+        DirectoryError::NotDirectory => (
+            StatusCode::BAD_REQUEST,
+            "The selected path is not a directory.",
+        ),
+        DirectoryError::Inaccessible => (
+            StatusCode::FORBIDDEN,
+            "The directory cannot be read by the server.",
+        ),
+        DirectoryError::Io(_) | DirectoryError::Join(_) => {
+            tracing::error!(%error, "directory request failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The directory could not be read. Check the server log.",
+            )
+        }
+    };
+    (status, Json(ErrorResponse { error: message })).into_response()
+}
+
+fn workspace_error_response(error: WorkspaceError) -> Response {
+    let (status, message) = match error {
+        WorkspaceError::InvalidLabel => (StatusCode::BAD_REQUEST, "The favorite label is invalid."),
+        WorkspaceError::StateTooLarge => (
+            StatusCode::INSUFFICIENT_STORAGE,
+            "The workspace state exceeds the server storage limit.",
+        ),
+        WorkspaceError::FavoriteLimitReached => (
+            StatusCode::CONFLICT,
+            "The maximum number of favorites has been reached.",
+        ),
+        WorkspaceError::FavoriteNotFound => (StatusCode::NOT_FOUND, "The favorite was not found."),
+        WorkspaceError::UnsupportedVersion(_)
+        | WorkspaceError::InvalidState(_)
+        | WorkspaceError::UnsafeStateLocation(_)
+        | WorkspaceError::Io(_)
+        | WorkspaceError::Json(_)
+        | WorkspaceError::Join(_) => {
+            tracing::error!(%error, "workspace state request failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The workspace state could not be saved. Check the server log.",
+            )
+        }
+    };
+    (status, Json(ErrorResponse { error: message })).into_response()
 }
 
 async fn session_by_id(State(state): State<AppState>, Path(terminal_id): Path<Uuid>) -> Response {
@@ -208,7 +435,25 @@ async fn restart_session(State(state): State<AppState>, Path(terminal_id): Path<
 
 async fn restart_by_id(state: &AppState, terminal_id: Uuid) -> Response {
     match state.sessions.restart(terminal_id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            if let Some(snapshot) = state
+                .sessions
+                .get(terminal_id)
+                .map(|session| session.snapshot())
+                && let Ok(path) = decode_directory_id(&snapshot.directory_id)
+                && let Err(error) = state
+                    .workspaces
+                    .record_recent(state.directories.describe(&path), snapshot.agent)
+                    .await
+            {
+                tracing::warn!(
+                    %error,
+                    %terminal_id,
+                    "terminal restarted but Recent workspace state could not be saved"
+                );
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(RegistryError::NotFound) => session_not_found(),
         Err(error) => {
             tracing::error!(%error, %terminal_id, "session restart request failed");
@@ -336,6 +581,7 @@ mod tests {
         let request = parse_create_session_request(b" \r\n").expect("legacy empty request");
 
         assert_eq!(request.agent, None);
+        assert_eq!(request.directory_id, None);
     }
 
     #[test]
@@ -344,9 +590,90 @@ mod tests {
             parse_create_session_request(br#"{"agent":"claude"}"#).expect("valid request");
 
         assert_eq!(request.agent, Some(AgentKind::Claude));
+        assert_eq!(request.directory_id, None);
         assert!(
             parse_create_session_request(br#"{"agent":"claude","command":"malicious"}"#).is_err()
         );
         assert!(parse_create_session_request(br#"{"agent":"unknown"}"#).is_err());
+    }
+
+    #[test]
+    fn create_session_accepts_only_agent_and_opaque_directory_id() {
+        let request =
+            parse_create_session_request(br#"{"agent":"agy","directoryId":"u1.L3Byb2plY3Rz"}"#)
+                .expect("valid request");
+
+        assert_eq!(request.agent, Some(AgentKind::Agy));
+        assert_eq!(request.directory_id.as_deref(), Some("u1.L3Byb2plY3Rz"));
+        assert!(
+            parse_create_session_request(
+                br#"{"directoryId":"u1.L3Byb2plY3Rz","arguments":["--unsafe"]}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn oversized_workspace_state_has_a_distinct_http_error() {
+        let response = workspace_error_response(WorkspaceError::StateTooLarge);
+
+        assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn maximum_windows_directory_ids_fit_every_request_contract() {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+
+        let mut path_units = vec![b'C' as u16, b':' as u16, b'\\' as u16];
+        while path_units.len() + 2 <= 32_767 {
+            path_units.extend([b'a' as u16, b'\\' as u16]);
+        }
+        if path_units.len() < 32_767 {
+            path_units.push(b'a' as u16);
+        }
+        let path = PathBuf::from(OsString::from_wide(&path_units));
+        let directory_id = crate::filesystem::encode_directory_id(&path);
+
+        let session_body = serde_json::to_vec(&serde_json::json!({ "directoryId": directory_id }))
+            .expect("session JSON");
+        assert!(session_body.len() <= MAX_CREATE_SESSION_BODY);
+        assert_eq!(
+            parse_create_session_request(&session_body)
+                .expect("maximum session request")
+                .directory_id
+                .as_deref(),
+            Some(directory_id.as_str())
+        );
+
+        let list_body = serde_json::to_vec(&serde_json::json!({
+            "directoryId": directory_id
+        }))
+        .expect("list JSON");
+        let list: ListDirectoryRequest = parse_json_body(
+            &list_body,
+            MAX_DIRECTORY_ID_BODY,
+            false,
+            "too large",
+            "invalid",
+        )
+        .expect("maximum list request");
+        assert_eq!(list.directory_id.as_deref(), Some(directory_id.as_str()));
+
+        let favorite_body = serde_json::to_vec(&serde_json::json!({
+            "directoryId": directory_id,
+            "label": "Long path",
+            "preferredAgent": "codex"
+        }))
+        .expect("favorite JSON");
+        let favorite: UpsertFavoriteRequest = parse_json_body(
+            &favorite_body,
+            MAX_FAVORITE_BODY,
+            false,
+            "too large",
+            "invalid",
+        )
+        .expect("maximum favorite request");
+        assert_eq!(favorite.directory_id.as_str(), directory_id.as_str());
     }
 }

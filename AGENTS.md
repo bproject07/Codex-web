@@ -18,8 +18,11 @@ The most important properties are:
 - tokens and terminal content never enter structured tracing;
 - Windows and Unix command launch remain independently correct;
 - a browser disconnect never terminates a managed PTY;
-- production changes do not silently replace or restart a live server.
-- agent discovery is read-only and never installs or updates host software.
+- production changes do not silently replace or restart a live server;
+- agent discovery is read-only and never installs or updates host software;
+- workspace browsing returns directories only and never reads file content;
+- each selected working directory is validated by the server before PTY
+  launch.
 
 ## Repository map
 
@@ -51,7 +54,8 @@ The most important properties are:
 │   ├── desktop-slash-regression.py
 │   ├── mobile-codex-smoke.py  Browser/mobile smoke test
 │   ├── mobile-resize-regression.py
-│   └── session-tabs-regression.py
+│   ├── session-tabs-regression.py
+│   └── workspace-picker-regression.py  Auth/CWD/persistence/mobile regression
 ├── server/
 │   ├── Cargo.toml
 │   ├── Cargo.lock
@@ -59,15 +63,18 @@ The most important properties are:
 │   │   ├── agents.rs          Agent discovery and install-guidance catalog
 │   │   ├── auth.rs            Token validation, throttling, Origin checks
 │   │   ├── config.rs          CLI/environment parsing and static asset lookup
+│   │   ├── filesystem.rs      Native path IDs and bounded directory browsing
 │   │   ├── main.rs            Startup, listener, URLs, graceful Ctrl+C path
 │   │   ├── protocol.rs        Browser control-message limits and parsing
 │   │   ├── registry.rs        Up to four managed terminal entries
 │   │   ├── routes.rs          Protected HTTP API and static serving
 │   │   ├── session.rs         PTY lifecycle, replay buffer, process management
 │   │   ├── terminal.rs        Command resolution and platform-specific PTY launch
-│   │   └── websocket.rs       Authenticated attach, replay, input, live output
+│   │   ├── websocket.rs       Authenticated attach, replay, input, live output
+│   │   └── workspaces.rs      Persistent Favorites and Recent workspace state
 │   └── tests/
-│       └── server_contract.rs
+│       ├── server_contract.rs
+│       └── workspace_api.rs   Auth, browsing, persistence, and selected-CWD API
 └── web/
     ├── package.json
     ├── package-lock.json
@@ -77,6 +84,7 @@ The most important properties are:
         ├── App.tsx            Main UI, sessions, settings, lifecycle actions
         ├── api.ts             Token/session storage and HTTP API client
         ├── sessions/          Header session tabs and navigation helpers
+        ├── workspaces/        Folder picker, model, DTOs, and unit tests
         ├── terminal/
         │   ├── TerminalView.tsx
         │   ├── androidImeGuard.ts
@@ -188,6 +196,49 @@ preflight, PTY startup, or process termination requires:
 - Deleting a non-primary session terminates it and removes its entry.
 - A browser close or network interruption must not stop the PTY.
 
+## Workspace invariants
+
+- `--project` / `CODEX_WEB_PROJECT_DIR` selects the canonicalized default
+  directory for the primary terminal and for API requests that omit
+  `directoryId`. It is not a filesystem sandbox.
+- An authenticated browser may browse and launch in any absolute directory
+  readable by the operating-system account running the server.
+- Directory listings are non-recursive, contain directories only, are sorted,
+  and return at most 10,000 entries with `truncated: true` when more exist.
+- Session-create, directory list/resolve, and Favorite-upsert JSON bodies are
+  independently capped at 256 KiB.
+- The manual path endpoint accepts only an absolute server-side directory
+  path. Never reinterpret it as a client-device path.
+- A directory ID preserves native Windows UTF-16 or Unix path bytes for API
+  round trips. It is an opaque transport encoding, not authorization,
+  encryption, signing, or a security boundary.
+- Decode and canonicalize a selected ID again immediately before use. Reject
+  missing, non-directory, inaccessible, relative, or wrong-platform values.
+- A browser may select only a directory and an allowlisted agent. It must
+  never supply an executable, argument list, shell expression, or environment
+  mutation through workspace or session APIs.
+- Favorites and Recent are server-side state, not browser-local authority.
+  They may become stale and must not bypass launch-time filesystem checks.
+- Favorites are bounded to 100. Recent is deduplicated by native directory,
+  newest first, and bounded to 30.
+- Successful primary startup, new-session creation, and restart update Recent
+  and the matching favorite's preferred agent. Failure to persist that
+  convenience state must not turn an already-running PTY into an API failure.
+- Workspace state is versioned and limited to 32 MiB (33,554,432 bytes) on
+  both read and write. Invalid, unsupported, or oversized state must be
+  quarantined rather than overwritten; an oversized pending write must be
+  rejected before replacing either the file or in-memory state.
+- Persist with a same-directory atomic replacement. A state directory must be
+  a dedicated real directory, never a filesystem root, broad account/system
+  directory, symlink, or Windows reparse point; the state file must be a
+  regular non-link file.
+- On Unix, create the dedicated state directory with mode `0700` and state
+  files with `0600`. Existing targets must already be owned by the effective
+  user and grant no group/other permissions. Reject unsafe existing targets;
+  never silently `chmod` operator-managed paths.
+- Persistence has an in-process mutex but no cross-process lock or merge.
+  Concurrent server instances must use distinct state directories.
+
 The server retains up to 16 MiB of raw output per session. A newly attached
 browser receives at most the newest 2 MiB. WebSocket replay ordering and
 sequence checks exist to prevent replay/live gaps. Preserve those properties
@@ -220,6 +271,16 @@ when changing batching or reconnect behavior.
 For mobile changes, run unit tests and the relevant Python browser regression
 where the required browser tooling is available.
 
+Changes to folder selection, native path encoding, Favorites/Recent, or
+per-session working directories also require on both Windows and Linux:
+
+- frontend workspace model/picker and API-client tests;
+- Rust filesystem, workspace-store, registry, and authenticated API tests;
+- a disposable runtime check that browses a synthetic directory, launches a
+  PTY there, and verifies its native working directory;
+- persistence/reopen coverage, including a stale path and corrupt-state
+  quarantine where the affected code changed.
+
 ## Authentication and security invariants
 
 - HTTP API uses `Authorization: Bearer`.
@@ -228,7 +289,16 @@ where the required browser tooling is available.
 - WebSocket Origin validation must remain enabled.
 - Authentication comparison remains constant-time for equal-length tokens.
 - Repeated failures remain throttled per address.
-- The project directory remains startup-only and canonicalized.
+- The default project directory is canonicalized at startup. Workspace APIs
+  may select other readable absolute directories after bearer authentication;
+  `--project` is not an access-control boundary.
+- All filesystem and workspace endpoints remain bearer-protected.
+- Do not describe opaque directory IDs as a security mechanism. Authorization
+  comes from the bearer token and the server account's operating-system
+  permissions.
+- Workspace state contains filesystem paths, reversible path IDs, and usage
+  history. Keep it and its backups out of logs, diagnostics, screenshots,
+  fixtures derived from real systems, and public issue reports.
 - Do not add public-tunnel or router-port-forward automation.
 - Do not log request URLs because the first URL contains the token.
 - Do not log terminal input, output, or Codex credentials.
@@ -386,6 +456,9 @@ A change is complete only when:
    commands, versions, behavior, supported platforms, and package layout.
    Changes to agent discovery, catalog metadata, install guidance, or launch
    arguments are documented and validated on both Windows and Linux.
+   Changes to workspace browsing or persistence also document `--project` as a
+   default rather than a sandbox, bearer-token authority, state locations,
+   limits, and stale-entry behavior.
 6. No secrets, generated artifacts, or unrelated changes are staged.
 7. Live services created for testing are stopped unless the user asked to keep
    them running.

@@ -1,9 +1,11 @@
 pub mod agents;
 pub mod auth;
 pub mod config;
+pub mod filesystem;
 pub mod protocol;
 pub mod registry;
 pub mod routes;
 pub mod session;
 pub mod terminal;
 pub mod websocket;
+pub mod workspaces;

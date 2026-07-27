@@ -31,7 +31,10 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::config::{AgentKind, ShellKind};
+use crate::{
+    config::{AgentKind, ShellKind},
+    filesystem::validate_canonical_readable_directory,
+};
 
 pub const INITIAL_COLS: u16 = 120;
 pub const INITIAL_ROWS: u16 = 35;
@@ -117,9 +120,19 @@ pub fn inspect_command(config: &TerminalConfig, explicit_override: bool) -> Comm
 }
 
 pub fn preflight(config: &TerminalConfig) -> Result<ResolvedCommand> {
+    validate_project_directory(config)?;
     let resolved = resolve_command(&config.command, config.agent)?;
     probe_command_version(&resolved, &config.project_dir, config.agent)?;
     Ok(resolved)
+}
+
+pub fn validate_project_directory(config: &TerminalConfig) -> Result<()> {
+    validate_canonical_readable_directory(&config.project_dir).with_context(|| {
+        format!(
+            "configured project directory is no longer the same readable directory: {}",
+            config.project_dir.display()
+        )
+    })
 }
 
 pub fn spawn_resolved(
@@ -137,6 +150,7 @@ pub fn spawn_resolved(
         .context("failed to create a native pseudo-terminal")?;
 
     let command = pty_command(config, resolved);
+    validate_project_directory(config)?;
     let child = pair.slave.spawn_command(command).with_context(|| {
         format!(
             "failed to start {} in the pseudo-terminal",

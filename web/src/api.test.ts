@@ -30,6 +30,7 @@ describe("terminal session helpers", () => {
       name: "Primary",
       isPrimary: true,
       createdAt: 123,
+      directoryId: "",
     });
   });
 });

@@ -3,18 +3,25 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import {
+  addWorkspaceFavorite,
   clearSelectedTerminalId,
   clearSessionToken,
   consumeTokenFromUrl,
   createSession,
   deleteSession,
   getAgentCatalog,
+  getFilesystemRoots,
+  getWorkspaceLibrary,
   listSessions,
+  listWorkspaceDirectory,
   readSelectedTerminalId,
+  removeWorkspaceFavorite,
+  resolveWorkspacePath,
   restartSession,
   terminateSession,
   writeSelectedTerminalId,
@@ -39,6 +46,13 @@ import {
 } from "./terminal/settings";
 import { SessionTabs } from "./sessions/SessionTabs";
 import { shouldRouteDesktopSlash } from "./terminal/desktopSlash";
+import {
+  WorkspacePicker,
+  type WorkspaceAgent,
+  type WorkspaceBrowserAdapter,
+  type WorkspaceDirectory,
+  type WorkspacePickerTransition,
+} from "./workspaces";
 
 const STATUS_LABELS: Record<ConnectionStatus | "codex_exited", string> = {
   connecting: "Connecting",
@@ -75,6 +89,9 @@ export function App() {
   const [reconnectNonce, setReconnectNonce] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
+  const [launchDirectory, setLaunchDirectory] =
+    useState<WorkspaceDirectory | null>(null);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [agentCatalog, setAgentCatalog] = useState<AgentCatalog | null>(null);
   const [agentCatalogLoading, setAgentCatalogLoading] = useState(false);
@@ -97,6 +114,31 @@ export function App() {
   const suppressTerminalFocusOnceRef = useRef(false);
 
   selectedTerminalIdRef.current = selectedTerminalId;
+
+  const workspaceAdapter = useMemo<WorkspaceBrowserAdapter>(
+    () => ({
+      loadLibrary: ({ signal } = {}) => getWorkspaceLibrary(token, signal),
+      listRoots: async ({ signal } = {}) => {
+        const roots = await getFilesystemRoots(token, signal);
+        return {
+          current: null,
+          parentId: null,
+          breadcrumbs: [],
+          directories: roots.roots,
+          truncated: false,
+        };
+      },
+      listDirectory: (directoryId, { signal } = {}) =>
+        listWorkspaceDirectory(token, directoryId, signal),
+      resolvePath: (path, { signal } = {}) =>
+        resolveWorkspacePath(token, path, signal),
+      addFavorite: (directory, { signal } = {}) =>
+        addWorkspaceFavorite(token, directory, signal),
+      removeFavorite: (favoriteId, { signal } = {}) =>
+        removeWorkspaceFavorite(token, favoriteId, signal),
+    }),
+    [token],
+  );
 
   const effectiveStatus =
     connectionStatus === "connected" &&
@@ -122,6 +164,7 @@ export function App() {
       !selectedTerminalId ||
       settingsOpen ||
       sessionsOpen ||
+      workspacePickerOpen ||
       agentPickerOpen ||
       window.matchMedia("(pointer: coarse)").matches
     ) {
@@ -138,6 +181,7 @@ export function App() {
     selectedTerminalId,
     sessionsOpen,
     settingsOpen,
+    workspacePickerOpen,
     agentPickerOpen,
     token,
   ]);
@@ -162,7 +206,11 @@ export function App() {
           defaultPrevented: event.defaultPrevented,
           isComposing: event.isComposing,
           coarsePointer: window.matchMedia("(pointer: coarse)").matches,
-          dialogOpen: settingsOpen || sessionsOpen || agentPickerOpen,
+          dialogOpen:
+            settingsOpen ||
+            sessionsOpen ||
+            workspacePickerOpen ||
+            agentPickerOpen,
           editableTarget,
           terminalAvailable:
             Boolean(token && selectedTerminalId) &&
@@ -209,6 +257,7 @@ export function App() {
     selectedTerminalId,
     sessionsOpen,
     settingsOpen,
+    workspacePickerOpen,
     agentPickerOpen,
     token,
   ]);
@@ -701,6 +750,26 @@ export function App() {
     focusTerminalForFinePointer();
   };
 
+  const closeWorkspacePicker = () => {
+    if (busy) {
+      return;
+    }
+    suppressTerminalFocusOnceRef.current = true;
+    setWorkspacePickerOpen(false);
+    setLaunchDirectory(null);
+  };
+
+  const chooseLaunchDirectory = (
+    directory: WorkspaceDirectory,
+    transition: WorkspacePickerTransition,
+  ) => {
+    transition.suppressFocusReturn();
+    setLaunchDirectory(directory);
+    setWorkspacePickerOpen(false);
+    setAgentPickerOpen(true);
+    setAgentCatalogError(null);
+  };
+
   const attachSession = (nextSession: SessionSnapshot) => {
     selectedTerminalIdRef.current = nextSession.terminalId;
     setSelectedTerminalId(nextSession.terminalId);
@@ -712,7 +781,17 @@ export function App() {
     closeSessions();
   };
 
-  const handleCreateSession = async (agent: AgentKind) => {
+  const handleCreateSession = async (
+    agent: AgentKind,
+    directory = launchDirectory,
+  ) => {
+    if (!directory) {
+      setAgentCatalogError("Choose a project folder before starting an agent.");
+      setWorkspacePickerOpen(true);
+      setAgentPickerOpen(false);
+      return;
+    }
+
     setCreatingAgent(agent);
     setBusy(true);
     setMessage(null);
@@ -720,14 +799,16 @@ export function App() {
     sessionsRequestEpochRef.current += 1;
     setSessionsLoading(false);
     try {
-      const created = await createSession(token, agent);
+      const created = await createSession(token, agent, directory.id);
       setSessions((current) => [
         ...current.filter(
           (candidate) => candidate.terminalId !== created.terminalId,
         ),
         created,
       ]);
+      setWorkspacePickerOpen(false);
       setAgentPickerOpen(false);
+      setLaunchDirectory(null);
       attachSession(created);
       void refreshSessions(created.terminalId);
     } catch (error) {
@@ -736,10 +817,40 @@ export function App() {
           ? error.message
           : "Could not create a terminal session.",
       );
+      setWorkspacePickerOpen(false);
+      setAgentPickerOpen(true);
       void refreshSessions();
     } finally {
       setCreatingAgent(null);
       setBusy(false);
+    }
+  };
+
+  const handleWorkspaceStart = (
+    directory: WorkspaceDirectory,
+    agent: WorkspaceAgent,
+    transition: WorkspacePickerTransition,
+  ) => {
+    transition.suppressFocusReturn();
+    setLaunchDirectory(directory);
+    const catalogEntry = agentCatalog?.agents.find(
+      (candidate) => candidate.kind === agent,
+    );
+
+    if (catalogEntry?.state === "ready") {
+      void handleCreateSession(agent, directory);
+      return;
+    }
+
+    setWorkspacePickerOpen(false);
+    setAgentPickerOpen(true);
+    setAgentCatalogError(
+      catalogEntry
+        ? `${agentLabel(agent)} is not ready on the server. Choose another installed agent or follow its setup instructions.`
+        : "Choose an installed agent for this folder.",
+    );
+    if (!agentCatalog && !agentCatalogLoading) {
+      void refreshAgentCatalog(true);
     }
   };
 
@@ -894,11 +1005,15 @@ export function App() {
             onCreate={() => {
               setSessionsOpen(false);
               setSettingsOpen(false);
-              setAgentPickerOpen(true);
+              setAgentPickerOpen(false);
+              setLaunchDirectory(null);
+              setWorkspacePickerOpen(true);
               setAgentCatalogError(null);
               void refreshAgentCatalog(true);
             }}
             onManage={() => {
+              setWorkspacePickerOpen(false);
+              setLaunchDirectory(null);
               setAgentPickerOpen(false);
               setSettingsOpen(false);
               setSessionsOpen(true);
@@ -960,6 +1075,8 @@ export function App() {
             type="button"
             title="Open terminal settings"
             onClick={() => {
+              setWorkspacePickerOpen(false);
+              setLaunchDirectory(null);
               setAgentPickerOpen(false);
               setSessionsOpen(false);
               setSettingsOpen(true);
@@ -1028,14 +1145,40 @@ export function App() {
           loading={agentCatalogLoading}
           error={agentCatalogError}
           creatingAgent={creatingAgent}
+          workspacePath={launchDirectory?.path}
+          onChangeWorkspace={() => {
+            setAgentPickerOpen(false);
+            setWorkspacePickerOpen(true);
+            setAgentCatalogError(null);
+          }}
           onSelect={(agent) => void handleCreateSession(agent)}
           onRefresh={() => void refreshAgentCatalog(true)}
           onClose={() => {
             suppressTerminalFocusOnceRef.current = true;
             setAgentPickerOpen(false);
+            setLaunchDirectory(null);
             setAgentCatalogError(null);
           }}
         />
+      )}
+
+      {workspacePickerOpen && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onMouseDown={closeWorkspacePicker}
+        >
+          <WorkspacePicker
+            adapter={workspaceAdapter}
+            initialDirectoryId={
+              launchDirectory?.id || session?.directoryId || null
+            }
+            disabled={busy}
+            onChoose={chooseLaunchDirectory}
+            onStart={handleWorkspaceStart}
+            onCancel={closeWorkspacePicker}
+          />
+        </div>
       )}
 
       {settingsOpen && (
@@ -1054,7 +1197,9 @@ export function App() {
             clearSelectedTerminalId();
             setSettingsOpen(false);
             setSessionsOpen(false);
+            setWorkspacePickerOpen(false);
             setAgentPickerOpen(false);
+            setLaunchDirectory(null);
             setSessions([]);
             setSelectedTerminalId("");
             setSession(null);
