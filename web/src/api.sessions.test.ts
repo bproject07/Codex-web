@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
+  createSession,
   getSession,
+  listAgents,
   listSessions,
   type SessionSnapshot,
 } from "./api";
@@ -9,6 +11,7 @@ import {
 const PRIMARY_SESSION: SessionSnapshot = {
   terminalId: "11111111-1111-4111-8111-111111111111",
   name: "Terminal 1",
+  agent: "codex",
   isPrimary: true,
   createdAt: 1_000,
   sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -98,5 +101,37 @@ describe("terminal session API selection", () => {
       },
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("creates a session with an allowlisted agent id", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ ...SECONDARY_SESSION, agent: "claude", name: "Claude 2" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createSession("0123456789abcdef", "claude"),
+    ).resolves.toMatchObject({
+      agent: "claude",
+      name: "Claude 2",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ agent: "claude" }),
+      }),
+    );
+  });
+
+  it("falls back to Codex when the agent endpoint is unavailable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ error: "route not found" }, 404)),
+    );
+
+    await expect(listAgents("0123456789abcdef")).resolves.toEqual(["codex"]);
   });
 });

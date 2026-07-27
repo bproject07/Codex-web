@@ -12,10 +12,10 @@ Codex Web Terminal is remote terminal access. It runs with the permissions and
 environment of the operating-system user that starts it. A browser holding the
 authentication token can:
 
-- type into the selected Codex terminal;
+- type into the selected agent terminal;
 - create, attach to, restart, or terminate managed sessions;
 - respond to approval prompts;
-- cause Codex to read or modify files allowed to the server user.
+- cause an agent to read or modify files allowed to the server user.
 
 Treat the authenticated URL as a credential.
 
@@ -30,16 +30,31 @@ Safe defaults:
 
 ## Runtime prerequisites
 
-Before starting the server as the intended operating-system user:
+Before starting the server, verify the primary CLI as the same
+operating-system user that will run `codex-web`:
 
 ```text
 codex --version
 codex login
 ```
 
-The server does not copy or manage Codex authentication. The spawned process
-inherits the current user's environment and uses that user's existing Codex
-configuration.
+Claude Code and AGY are optional. When installed, verify them with:
+
+```text
+claude --version
+agy --version
+```
+
+The server performs the same read-only version probes during agent discovery.
+It disables each provider's documented automatic updater only for that probe,
+removes parent-agent nesting markers, enforces a three-second deadline, and
+publishes only a strictly validated semantic version. On Windows the process
+is created suspended, assigned to a kill-on-close Job Object, and then resumed;
+on Unix it runs in a dedicated process group. Descendants therefore cannot
+outlive a failed or completed probe. Normal interactive agent sessions keep
+their usual updater behavior. The server does not copy or manage agent
+authentication. Spawned processes inherit the current user's environment and
+use that user's existing CLI configuration and credentials.
 
 Choose the project directory deliberately. It is fixed when the server starts
 and is inherited by every managed terminal:
@@ -50,6 +65,45 @@ and is inherited by every managed terminal:
 
 The backend canonicalizes this path, verifies that it is a readable directory,
 and does not allow the browser to replace it.
+
+### Installing or updating an agent CLI
+
+Installation and updates happen on the **server host**, not on the phone,
+laptop, or browser used to view the terminal. The **New** dialog reports each
+agent as `ready`, `missing`, or `misconfigured`, displays its installed version
+when available, and provides a platform-specific manual command. After running
+that command in a trusted host terminal, select **Refresh** or **Check again**
+to repeat detection.
+
+Official native installation commands:
+
+| CLI | Windows PowerShell | Linux/macOS |
+| --- | --- | --- |
+| Codex | `powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 \| iex"` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` |
+| Claude Code | `irm https://claude.ai/install.ps1 \| iex` | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| AGY | `irm https://antigravity.google/cli/install.ps1 \| iex` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` |
+
+Official update commands:
+
+| CLI | Native installation | Package-manager note |
+| --- | --- | --- |
+| Codex | `codex update` | For an npm installation: `npm install --global @openai/codex@latest` |
+| Claude Code | `claude update` | WinGet: `winget upgrade Anthropic.ClaudeCode`; Homebrew: `brew upgrade claude-code` |
+| AGY | Re-run the platform install command; it installs or upgrades | AGY also checks for background updates unless `AGY_CLI_DISABLE_AUTO_UPDATE=true` |
+
+Verify the current upstream instructions before executing a downloaded script:
+[Codex CLI](https://learn.chatgpt.com/docs/codex/cli),
+[Claude Code](https://code.claude.com/docs/en/setup), and
+[Antigravity CLI](https://antigravity.google/docs/cli/install).
+
+There is deliberately no silent browser-side Install button and no install
+API. A browser session has full terminal input authority already; allowing it
+to install or replace host executables would create an additional supply-chain
+and privilege boundary. Downloaded scripts may change, invoke package
+managers, modify `PATH`, prompt for authentication, or require local policy
+review. The operator must review and run them explicitly. **Refresh** and
+**Check again** perform only fixed executable discovery and bounded
+`--version` probes.
 
 ## First local start on Windows
 
@@ -143,8 +197,15 @@ not stop the server or change the server-side token.
 | `--host` | `127.0.0.1` | Address on which the HTTP server listens |
 | `--port` | `8787` | TCP port |
 | `--project` | current directory | Fixed working directory for every managed PTY |
-| `--command` | `codex` | Executable for the primary terminal |
-| `--new-session-command` | `--command` | Optional executable for terminals created with **New** |
+| `--command` | derived | Explicit primary executable override; otherwise follows `--primary-agent` |
+| `--primary-agent` | `codex` | Agent represented by `--command`: `codex`, `claude`, or `agy` |
+| `--new-session-command` | resolved primary command | Optional executable used when **New** starts the primary agent |
+| `--codex-command` | unset | Explicit Codex CLI executable override |
+| `--claude-command` | unset | Explicit Claude Code executable override |
+| `--claude-dangerously-skip-permissions` | off | Start Claude with permission checks bypassed |
+| `--agy-command` | unset | Explicit AGY executable override |
+| `--agy-dangerously-skip-permissions` | off | Start AGY with tool permission requests auto-approved |
+| `--no-agent-auto-detect` | off | Disable discovery of optional agent CLIs |
 | `--shell` | `powershell` | Windows wrapper (`powershell` or `cmd`); ignored on Unix |
 | `--token` | generated | Explicit authentication token |
 | `--no-open-browser` | off | Prevent automatic browser launch |
@@ -157,7 +218,14 @@ CODEX_WEB_HOST
 CODEX_WEB_PORT
 CODEX_WEB_PROJECT_DIR
 CODEX_WEB_COMMAND
+CODEX_WEB_PRIMARY_AGENT
 CODEX_WEB_NEW_SESSION_COMMAND
+CODEX_WEB_CODEX_COMMAND
+CODEX_WEB_CLAUDE_COMMAND
+CODEX_WEB_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS
+CODEX_WEB_AGY_COMMAND
+CODEX_WEB_AGY_DANGEROUSLY_SKIP_PERMISSIONS
+CODEX_WEB_NO_AGENT_AUTO_DETECT
 CODEX_WEB_SHELL
 CODEX_WEB_TOKEN
 CODEX_WEB_LOG_LEVEL
@@ -171,32 +239,87 @@ not pass pipes, redirections, command substitutions, or chained commands.
 If the primary terminal is launched by a trusted wrapper that resumes one
 specific Codex thread, also set `--new-session-command codex`. The primary
 terminal will use the resume wrapper, while the **New** button will start an
-independent Codex CLI process.
+independent Codex CLI process when the primary Codex card is selected. Other
+agent cards use their own override or default command.
+
+### Agent discovery and explicit profiles
+
+By default, the server probes the executable implied by `--primary-agent` and
+auto-detects `codex`, `claude`, and `agy` from `PATH` and their documented
+per-user locations. It runs a fixed `--version` probe with bounded output and a
+timeout. A ready optional agent is offered in **New**. Missing and
+misconfigured agents remain visible in the catalog with manual installation
+or repair guidance, but cannot create sessions.
+
+An explicit `--command`, `--codex-command`, `--claude-command`, or
+`--agy-command` is authoritative. If it does not resolve or its `--version`
+probe fails, the profile is `misconfigured`; the server does not silently fall
+back to another binary. `--no-agent-auto-detect` (or
+`CODEX_WEB_NO_AGENT_AUTO_DETECT=true`) restricts optional profiles to explicit
+configuration. The primary profile is still validated.
+
+The browser cannot provide executable paths, arguments, URLs, or shell syntax.
+For a service whose `PATH` differs from an interactive shell, configure
+trusted absolute paths:
+
+```powershell
+.\scripts\run.ps1 `
+  -Project "C:\Projects\my-app" `
+  -CodexCommand "$env:APPDATA\npm\codex.cmd" `
+  -ClaudeCommand "$HOME\.local\bin\claude.exe" `
+  -AgyCommand "$env:LOCALAPPDATA\agy\bin\agy.exe"
+```
+
+Each managed terminal is a fresh agent-session boundary. The launcher removes
+only the inherited nesting markers `CODEX_THREAD_ID` and `CLAUDECODE` before
+version checks and PTY startup; authentication and provider environment
+variables remain untouched.
+
+To deliberately auto-approve every tool action for both optional profiles:
+
+```powershell
+.\scripts\run.ps1 `
+  -Project "C:\Projects\my-app" `
+  -ClaudeCommand "$HOME\.local\bin\claude.exe" `
+  -ClaudeDangerouslySkipPermissions `
+  -AgyCommand "$env:LOCALAPPDATA\agy\bin\agy.exe" `
+  -AgyDangerouslySkipPermissions
+```
+
+The equivalent direct launches are
+`claude --dangerously-skip-permissions` and
+`agy --dangerously-skip-permissions`. These modes remove the normal approval
+barrier for file changes, commands, network access, and other supported tools.
+Use them only when the operating-system account, project directory, network,
+credentials, and reachable services are intentionally placed inside the
+agent's trust boundary. The switches are off by default.
 
 ## Windows command resolution
 
-For a command such as `codex`, Windows searches `PATH` in this preference:
+For a command such as `codex`, `claude`, or `agy`, Windows searches `PATH` and
+the documented per-user locations in this extension preference:
 
-1. `codex.exe`
-2. `codex.cmd`
+1. `<command>.exe`
+2. `<command>.cmd`
 3. an exact extension already supplied by the caller
 
 `.cmd` entry points are invoked through `cmd.exe /d /s /c call`.
 Executable entry points normally use PowerShell unless `--shell cmd` is
-selected. `codex.ps1` is intentionally not selected automatically because a
+selected. `.ps1` shims are intentionally not selected automatically because a
 PowerShell execution policy can block npm-generated `.ps1` shims.
 
 ## Linux and Unix command resolution
 
-Unix searches the configured `PATH` for the exact executable name. An absolute
+Unix searches the configured `PATH` for the exact executable name and checks
+the documented per-user locations during auto-detection. A trusted absolute
 path can also be supplied:
 
 ```bash
 --command /usr/bin/codex
 ```
 
-After `codex --version` succeeds, the resolved executable is started directly
-inside the Unix PTY without a shell wrapper.
+After the selected CLI's `--version` succeeds, the resolved executable is
+started directly inside the Unix PTY without a shell wrapper.
 
 ## Access over Tailscale
 
@@ -288,7 +411,7 @@ revocation without rotating the server token are future work described in
 
 The header status combines the HTTP session lifecycle and the browser
 WebSocket state. A healthy attached session should reach **Connected**.
-Reconnect attempts use increasing delays and do not restart Codex.
+Reconnect attempts use increasing delays and do not restart the selected agent.
 
 ### Sessions
 
@@ -305,23 +428,51 @@ highlighted and each tab includes a lifecycle-status dot.
 - Attaching does not stop the previously displayed session.
 - **Refresh** reloads sanitized session metadata.
 - **Remove** terminates and deletes a non-primary managed session.
-- The primary `Terminal 1` entry cannot be removed.
+- The primary `<agent> 1` entry (for example `Codex 1`) cannot be removed.
 
 ### New
 
-**+ New** creates another independent Codex PTY. The server allows at most four
-managed sessions. Each has its own process, lifecycle, output replay buffer,
-and connected-client count.
+**+ New** opens **New terminal**. The dialog identifies the server operating
+system and architecture and makes clear that the CLI runs on the server host,
+not in the viewing browser or phone.
+
+Each agent card reports:
+
+- **Ready** and `Installed version …` when the fixed version probe succeeds;
+- **Not found** when no candidate executable resolves;
+- **Configuration error** when an explicit override or resolved executable
+  fails validation.
+
+Only a ready card provides **Start Codex**, **Start Claude**, or **Start AGY**.
+A missing or misconfigured card shows a selectable provider command, **Copy**,
+**Official docs**, the required shell, the `--version` verification command,
+and **Check again**. Opening **New** always requests a fresh catalog so a tab
+cannot keep stale availability from an earlier server generation. The header
+**Refresh** and per-card **Check again** make the same
+`/api/agent-catalog?refresh=true` request; it never executes the displayed
+command. Creation errors remain in the open dialog. A successful create closes
+it and attaches the terminal.
+
+On a phone, scroll vertically inside the agent-card list. Each card keeps its
+own **Start** action; later cards and their buttons remain reachable without
+scrolling the underlying terminal page.
+
+The server allows at most four managed sessions. Each has its own process,
+lifecycle, output replay buffer, and connected-client count.
+
+When a dangerous-mode switch is active, the card warns that approvals are
+disabled and the agent may edit files and run commands without asking for
+confirmation.
 
 ### Connect / Reconnect
 
 This button closes and recreates only the browser WebSocket attachment. It is
 safe to use after a network interruption or stale screen. It does not restart
-or terminate the underlying Codex process.
+or terminate the underlying agent process.
 
 ### Restart
 
-**Restart Codex** terminates and recreates the selected PTY. Its stable
+**Restart** terminates and recreates the selected agent's PTY. Its stable
 `terminalId` remains, but its `sessionId`, PID, and PTY generation change.
 Output from the previous generation is not treated as current live output.
 On Linux, termination targets the direct PTY child and cannot guarantee cleanup
@@ -359,7 +510,7 @@ mobile toolbar. **Copy diagnostics** captures mobile viewport measurements
 after terminal focus; it does not include the authentication token, keyboard
 input, or terminal text.
 
-**Terminate Codex** stops the selected process without deleting its managed
+**Terminate _agent_** stops the selected process without deleting its managed
 entry. **Forget token** removes the token from the current browser tab.
 
 ## Reconnect and replay behavior
@@ -376,7 +527,7 @@ browser receives at most the newest 2 MiB and then:
 xterm also keeps client-side scrollback, 10,000 lines by default. The server
 buffer contains raw ANSI bytes rather than a rendered screen model. If the
 oldest ANSI state has been discarded, a very old replay can look imperfect;
-causing Codex to redraw or restarting the selected session repairs it.
+causing the selected agent to redraw or restarting that session repairs it.
 
 ## Health and diagnostics
 
@@ -406,11 +557,52 @@ Important distinction:
 
 - `codexInstalled: true` means the most recent preflight for at least one
   registered session successfully resolved the command and ran
-  `codex --version`; it is not a continuously refreshed installation probe.
+  the configured agent's `--version`; it is not a continuously refreshed
+  installation probe. The field name is retained for API compatibility.
 - `sessionRunning: true` means at least one PTY process is actually running.
 
 The frontend can still load while a PTY is failed so diagnostics and restart
 controls remain available.
+
+Inspect the complete agent catalog:
+
+```bash
+curl \
+  -H "Authorization: Bearer $CODEX_WEB_TOKEN" \
+  "http://127.0.0.1:8787/api/agent-catalog?refresh=true"
+```
+
+Schema version 1 includes `server.os`, `server.arch`, `server.shell`, and one
+entry per cataloged agent. All three agents are cataloged by default; optional
+agents without explicit overrides are omitted when auto-detection is disabled:
+
+```json
+{
+  "kind": "claude",
+  "state": "ready",
+  "configuration": "auto",
+  "version": "2.x",
+  "dangerouslySkipPermissions": false,
+  "install": {
+    "command": "platform-specific manual command",
+    "shell": "powershell",
+    "verifyCommand": "claude --version",
+    "updateCommand": "claude update",
+    "docsUrl": "https://code.claude.com/docs/en/setup",
+    "requiresServerAccess": true
+  }
+}
+```
+
+`version` is `null` when the CLI is not ready. `missing` means no supported
+candidate resolved. `misconfigured` means an explicit override or candidate
+was found but failed validation. `configuration: "override"` means the
+command value is authoritative and never falls back to another executable.
+Repairing that exact file or its permissions can be followed immediately by
+**Check again**. Changing or removing the startup override value requires
+updating the server configuration and restarting the server; running a generic
+installer alone does not replace an override. The legacy `/api/agents`
+endpoint lists only ready kinds and exists for older frontends.
 
 List sessions:
 
@@ -555,7 +747,7 @@ Resolve the exact service, PID, and port first.
 
 ## Upgrade procedure
 
-Server restarts terminate all managed PTYs. Save or finish important Codex work
+Server restarts terminate all managed PTYs. Save or finish important agent work
 before upgrading.
 
 Recommended sequence:
@@ -582,8 +774,21 @@ and known limitations.
 ### The URL opens but the terminal is blank
 
 Check the session snapshot and server log. The HTTP server intentionally
-remains available after PTY startup fails. Confirm `codex --version` as the
-same OS user and check `sessionRunning`.
+remains available after PTY startup fails. Confirm the selected agent's
+`--version` command as the same OS user, inspect `/api/agent-catalog`, and
+check `sessionRunning`.
+
+### An agent is not installed or has a configuration error
+
+Use the **New terminal** card's shell, command, and verification instructions
+on the server host. **Not found** means no supported executable resolved.
+**Configuration error** commonly means an explicit path is wrong, the file is
+not executable, or `--version` failed. Explicit overrides never fall back.
+
+After correcting the host installation, select **Refresh** or **Check again**.
+If startup flags or service environment variables changed, restart the server
+first; understand that restarting destroys its in-memory PTYs. Do not paste
+the displayed install command into the browser developer console.
 
 ### Authentication fails
 
@@ -620,16 +825,21 @@ Check:
 ```bash
 command -v codex
 codex --version
+command -v claude
+claude --version
+command -v agy
+agy --version
 test -r /dev/ptmx
 ```
 
-Also verify executable permission on the resolved command and read access to
-the project directory.
+Check only the CLIs you intend to use. Also verify executable permission on the
+catalog's resolved command and read access to the project directory.
 
 ### Windows reports a PowerShell policy error
 
-Use `where.exe codex`. Prefer the discovered `codex.exe` or `codex.cmd` entry
-point. The application deliberately avoids automatic `codex.ps1` selection.
+Use `where.exe codex`, `where.exe claude`, or `where.exe agy`. Prefer a
+discovered `.exe` or `.cmd` entry point. The application deliberately avoids
+automatic `.ps1` selection.
 
 ### Mobile viewport or keyboard behavior is unusual
 
@@ -642,7 +852,9 @@ exclude terminal content and credentials.
 
 Before exposing the service to another device:
 
-- [ ] Codex CLI is authenticated for the service user.
+- [ ] The primary CLI is ready and authenticated for the service user.
+- [ ] Optional agent status/version and manual commands match the server OS.
+- [ ] Dangerous permission-bypass flags are off unless explicitly required.
 - [ ] The project directory is correct and no broader than intended.
 - [ ] The build and tests passed on the target platform.
 - [ ] The package contains the matching executable and `web` assets.

@@ -31,6 +31,10 @@ import {
   TERMINAL_THEMES,
   type TerminalSettings,
 } from "./settings";
+import {
+  installAndroidImeGuard,
+  shouldEnableAndroidImeGuard,
+} from "./androidImeGuard";
 
 export interface TerminalViewHandle {
   send: (data: string) => void;
@@ -52,6 +56,10 @@ export interface TerminalDiagnostics {
   bufferLength: number;
   replayCount: number;
   atomicMobileResizeCommits: number;
+  androidImeGuardEnabled: boolean;
+  androidImeDuplicateInputsSuppressed: number;
+  androidDuplicateEntersSuppressed: number;
+  androidSoftEntersTranslated: number;
   ptyCols: number | null;
   ptyRows: number | null;
 }
@@ -196,6 +204,10 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     } | null>(null);
     const mobileResizeCaptureRef = useRef<MobileResizeCapture | null>(null);
     const atomicMobileResizeCommitsRef = useRef(0);
+    const androidImeGuardEnabledRef = useRef(false);
+    const androidImeDuplicateInputsSuppressedRef = useRef(0);
+    const androidDuplicateEntersSuppressedRef = useRef(0);
+    const androidSoftEntersTranslatedRef = useRef(0);
     const freezeFrameRef = useRef<HTMLDivElement | null>(null);
     const freezeFrameTimerRef = useRef<number | null>(null);
     const replayCountRef = useRef(0);
@@ -463,6 +475,13 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
             replayCount: replayCountRef.current,
             atomicMobileResizeCommits:
               atomicMobileResizeCommitsRef.current,
+            androidImeGuardEnabled: androidImeGuardEnabledRef.current,
+            androidImeDuplicateInputsSuppressed:
+              androidImeDuplicateInputsSuppressedRef.current,
+            androidDuplicateEntersSuppressed:
+              androidDuplicateEntersSuppressedRef.current,
+            androidSoftEntersTranslated:
+              androidSoftEntersTranslatedRef.current,
             ptyCols: lastSentSizeRef.current?.cols ?? null,
             ptyRows: lastSentSizeRef.current?.rows ?? null,
           };
@@ -496,7 +515,31 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       terminalRef.current = terminal;
       fitAddonRef.current = fitAddon;
 
+      const textarea = terminal.textarea;
+      const androidImeGuardEnabled = shouldEnableAndroidImeGuard(
+        navigator.userAgent,
+      );
+      androidImeGuardEnabledRef.current = androidImeGuardEnabled;
+      const androidImeGuard = textarea
+        ? installAndroidImeGuard(container, textarea, {
+            enabled: androidImeGuardEnabled,
+            onTerminalInput: (data) => {
+              terminal.input(data, true);
+            },
+            onDuplicateInputSuppressed: () => {
+              androidImeDuplicateInputsSuppressedRef.current += 1;
+            },
+            onDuplicateEnterSuppressed: () => {
+              androidDuplicateEntersSuppressedRef.current += 1;
+            },
+            onSoftEnterTranslated: () => {
+              androidSoftEntersTranslatedRef.current += 1;
+            },
+          })
+        : null;
+
       const inputDisposable = terminal.onData((data) => {
+        androidImeGuard?.observeTerminalData(data);
         if (ctrlModeRef.current) {
           const converted = applyCtrlToInput(data);
           if (converted.consumed) {
@@ -517,6 +560,8 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       }
 
       return () => {
+        androidImeGuard?.dispose();
+        androidImeGuardEnabledRef.current = false;
         inputDisposable.dispose();
         resizeObserver.disconnect();
         if (fitFrameRef.current !== null) {

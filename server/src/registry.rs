@@ -10,6 +10,7 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
+    config::AgentKind,
     session::{SessionManager, SessionSnapshot},
     terminal::TerminalConfig,
 };
@@ -21,6 +22,7 @@ pub enum RegistryError {
     LimitReached,
     NotFound,
     PrimaryCannotBeDeleted,
+    AgentUnavailable,
     ShuttingDown,
     OperationFailed(anyhow::Error),
 }
@@ -33,6 +35,7 @@ impl fmt::Display for RegistryError {
             Self::PrimaryCannotBeDeleted => {
                 write!(formatter, "the primary terminal session cannot be deleted")
             }
+            Self::AgentUnavailable => write!(formatter, "the requested agent is not configured"),
             Self::ShuttingDown => write!(formatter, "the server is shutting down"),
             Self::OperationFailed(error) => write!(formatter, "{error}"),
         }
@@ -54,7 +57,8 @@ pub struct SessionRegistry {
 }
 
 struct RegistryInner {
-    new_session_config: TerminalConfig,
+    agent_configs: HashMap<AgentKind, TerminalConfig>,
+    default_new_agent: AgentKind,
     state: Mutex<RegistryState>,
     shutting_down: AtomicBool,
 }
@@ -74,15 +78,30 @@ impl SessionRegistry {
         primary_config: TerminalConfig,
         new_session_config: TerminalConfig,
     ) -> Self {
+        Self::with_agent_configs(primary_config, new_session_config, Vec::new())
+    }
+
+    pub fn with_agent_configs(
+        primary_config: TerminalConfig,
+        new_session_config: TerminalConfig,
+        additional_agent_configs: Vec<TerminalConfig>,
+    ) -> Self {
         let primary_id = Uuid::new_v4();
-        let primary =
-            SessionManager::new_managed(primary_config, primary_id, "Terminal 1".to_owned(), true);
+        let primary_name = format!("{} 1", primary_config.agent.label());
+        let primary = SessionManager::new_managed(primary_config, primary_id, primary_name, true);
+        let default_new_agent = new_session_config.agent;
+        let mut agent_configs = HashMap::new();
+        agent_configs.insert(default_new_agent, new_session_config);
+        for config in additional_agent_configs {
+            agent_configs.insert(config.agent, config);
+        }
         let mut sessions = HashMap::new();
         sessions.insert(primary_id, primary);
 
         Self {
             inner: Arc::new(RegistryInner {
-                new_session_config,
+                agent_configs,
+                default_new_agent,
                 state: Mutex::new(RegistryState {
                     primary_id,
                     next_terminal_number: 2,
@@ -128,12 +147,17 @@ impl SessionRegistry {
         snapshots
     }
 
-    pub async fn create(&self) -> Result<SessionSnapshot, RegistryError> {
-        let session = self.reserve_session()?;
-        session
-            .start()
-            .await
-            .map_err(RegistryError::OperationFailed)?;
+    pub async fn create(
+        &self,
+        requested_agent: Option<AgentKind>,
+    ) -> Result<SessionSnapshot, RegistryError> {
+        let session = self.reserve_session(requested_agent)?;
+        let terminal_id = session.snapshot().terminal_id;
+        if let Err(error) = session.start().await {
+            session.shutdown().await;
+            lock(&self.inner.state).sessions.remove(&terminal_id);
+            return Err(RegistryError::OperationFailed(error));
+        }
         Ok(session.snapshot())
     }
 
@@ -207,7 +231,17 @@ impl SessionRegistry {
         lock(&self.inner.state).sessions.len()
     }
 
-    fn reserve_session(&self) -> Result<SessionManager, RegistryError> {
+    pub fn available_agents(&self) -> Vec<AgentKind> {
+        AgentKind::ALL
+            .into_iter()
+            .filter(|agent| self.inner.agent_configs.contains_key(agent))
+            .collect()
+    }
+
+    fn reserve_session(
+        &self,
+        requested_agent: Option<AgentKind>,
+    ) -> Result<SessionManager, RegistryError> {
         let mut state = lock(&self.inner.state);
         if self.inner.shutting_down.load(Ordering::SeqCst) {
             return Err(RegistryError::ShuttingDown);
@@ -217,14 +251,16 @@ impl SessionRegistry {
         }
 
         let terminal_id = Uuid::new_v4();
-        let name = format!("Terminal {}", state.next_terminal_number);
+        let agent = requested_agent.unwrap_or(self.inner.default_new_agent);
+        let terminal_config = self
+            .inner
+            .agent_configs
+            .get(&agent)
+            .cloned()
+            .ok_or(RegistryError::AgentUnavailable)?;
+        let name = format!("{} {}", agent.label(), state.next_terminal_number);
         state.next_terminal_number = state.next_terminal_number.saturating_add(1);
-        let session = SessionManager::new_managed(
-            self.inner.new_session_config.clone(),
-            terminal_id,
-            name,
-            false,
-        );
+        let session = SessionManager::new_managed(terminal_config, terminal_id, name, false);
         state.sessions.insert(terminal_id, session.clone());
         Ok(session)
     }
@@ -251,6 +287,8 @@ mod tests {
         TerminalConfig {
             project_dir: PathBuf::from("."),
             command: "codex".to_owned(),
+            arguments: Vec::new(),
+            agent: AgentKind::Codex,
             shell: ShellKind::Powershell,
         }
     }
@@ -262,7 +300,8 @@ mod tests {
         let second = registry.primary().snapshot();
 
         assert_eq!(first.terminal_id, second.terminal_id);
-        assert_eq!(first.name, "Terminal 1");
+        assert_eq!(first.name, "Codex 1");
+        assert_eq!(first.agent, AgentKind::Codex);
         assert!(first.is_primary);
         assert_eq!(first.session_id, None);
         assert_eq!(registry.list().len(), 1);
@@ -276,10 +315,45 @@ mod tests {
         let registry = SessionRegistry::with_new_session_config(primary_config, new_session_config);
 
         let primary = registry.primary();
-        let created = registry.reserve_session().expect("reserved session");
+        let created = registry.reserve_session(None).expect("reserved session");
 
         assert_eq!(primary.configured_command(), "resume-current");
         assert_eq!(created.configured_command(), "codex");
+        assert_eq!(created.configured_agent(), AgentKind::Codex);
+    }
+
+    #[test]
+    fn reserves_only_configured_agent_profiles() {
+        let primary_config = terminal_config();
+        let new_session_config = terminal_config();
+        let mut claude_config = terminal_config();
+        claude_config.command = "claude".to_owned();
+        claude_config.arguments = vec!["--dangerously-skip-permissions".to_owned()];
+        claude_config.agent = AgentKind::Claude;
+        let registry = SessionRegistry::with_agent_configs(
+            primary_config,
+            new_session_config,
+            vec![claude_config],
+        );
+
+        assert_eq!(
+            registry.available_agents(),
+            vec![AgentKind::Codex, AgentKind::Claude]
+        );
+        let claude = registry
+            .reserve_session(Some(AgentKind::Claude))
+            .expect("configured Claude session");
+        assert_eq!(claude.configured_command(), "claude");
+        assert_eq!(
+            claude.configured_arguments(),
+            ["--dangerously-skip-permissions"]
+        );
+        assert_eq!(claude.configured_agent(), AgentKind::Claude);
+        assert_eq!(claude.snapshot().name, "Claude 2");
+        assert!(matches!(
+            registry.reserve_session(Some(AgentKind::Agy)),
+            Err(RegistryError::AgentUnavailable)
+        ));
     }
 
     #[test]
@@ -287,7 +361,9 @@ mod tests {
         let registry = SessionRegistry::new(terminal_config());
 
         for _ in 1..MAX_SESSIONS {
-            registry.reserve_session().expect("session within limit");
+            registry
+                .reserve_session(None)
+                .expect("session within limit");
         }
 
         let snapshots = registry.list();
@@ -301,7 +377,7 @@ mod tests {
             MAX_SESSIONS
         );
         assert!(matches!(
-            registry.reserve_session(),
+            registry.reserve_session(None),
             Err(RegistryError::LimitReached)
         ));
     }
@@ -321,7 +397,7 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_terminal_cancels_its_connections() {
         let registry = SessionRegistry::new(terminal_config());
-        let session = registry.reserve_session().expect("reserved session");
+        let session = registry.reserve_session(None).expect("reserved session");
         let terminal_id = session.snapshot().terminal_id;
         let shutdown_signal = session.shutdown_signal();
 
@@ -332,5 +408,25 @@ mod tests {
 
         assert!(shutdown_signal.is_cancelled());
         assert!(registry.get(terminal_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_create_rolls_back_the_reserved_terminal() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        let mut config = terminal_config();
+        config.project_dir = directory.path().to_path_buf();
+        config.command = directory
+            .path()
+            .join("missing-agent-command")
+            .to_string_lossy()
+            .into_owned();
+        let registry = SessionRegistry::new(config);
+
+        assert!(matches!(
+            registry.create(None).await,
+            Err(RegistryError::OperationFailed(_))
+        ));
+        assert_eq!(registry.session_count(), 1);
+        assert_eq!(registry.list().len(), 1);
     }
 }

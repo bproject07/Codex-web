@@ -2,19 +2,21 @@ use std::{path::PathBuf, sync::Arc};
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path, State},
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::{
+    agents::{AgentCatalog, AgentCatalogResponse},
     auth::{self, AuthState},
-    config::Config,
+    config::{AgentKind, Config},
     registry::{MAX_SESSIONS, RegistryError, SessionRegistry},
     session::SessionSnapshot,
     websocket,
@@ -26,6 +28,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub auth: AuthState,
     pub sessions: SessionRegistry,
+    pub agents: AgentCatalog,
     pub shutdown: CancellationToken,
 }
 
@@ -46,9 +49,20 @@ struct ErrorResponse {
     error: &'static str,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+struct CreateSessionRequest {
+    agent: Option<AgentKind>,
+}
+
+const MAX_CREATE_SESSION_BODY: usize = 1_024;
+
 pub fn build_router(state: AppState, static_directory: Option<PathBuf>) -> Router {
     let protected_api = Router::new()
         .route("/api/health", get(health))
+        .route("/api/agents", get(agents))
+        .route("/api/agent-catalog", get(agent_catalog))
         .route("/api/session", get(primary_session))
         .route("/api/session/restart", post(restart_primary_session))
         .route("/api/session/terminate", post(terminate_primary_session))
@@ -102,8 +116,38 @@ async fn sessions(State(state): State<AppState>) -> Json<Vec<SessionSnapshot>> {
     Json(state.sessions.list())
 }
 
-async fn create_session(State(state): State<AppState>) -> Response {
-    match state.sessions.create().await {
+async fn agents(State(state): State<AppState>) -> Json<Vec<AgentKind>> {
+    Json(state.agents.ready_agents().await)
+}
+
+async fn agent_catalog(State(state): State<AppState>) -> Json<AgentCatalogResponse> {
+    Json(state.agents.snapshot().await)
+}
+
+async fn create_session(State(state): State<AppState>, body: Bytes) -> Response {
+    if body.len() > MAX_CREATE_SESSION_BODY {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ErrorResponse {
+                error: "The terminal session request is too large.",
+            }),
+        )
+            .into_response();
+    }
+    let request = match parse_create_session_request(&body) {
+        Ok(request) => request,
+        Err(()) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "The terminal session request is invalid.",
+                }),
+            )
+                .into_response();
+        }
+    };
+    let requested_agent = request.agent;
+    match state.sessions.create(requested_agent).await {
         Ok(session) => (StatusCode::CREATED, Json(session)).into_response(),
         Err(RegistryError::LimitReached) => (
             StatusCode::CONFLICT,
@@ -119,17 +163,31 @@ async fn create_session(State(state): State<AppState>) -> Response {
             }),
         )
             .into_response(),
+        Err(RegistryError::AgentUnavailable) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "The requested terminal agent is not configured.",
+            }),
+        )
+            .into_response(),
         Err(error) => {
             tracing::error!(%error, "terminal session create request failed");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorResponse {
-                    error: "Codex could not be started. Check the session list and server log.",
+                    error: "The terminal agent could not be started. Check the session list and server log.",
                 }),
             )
                 .into_response()
         }
     }
+}
+
+fn parse_create_session_request(body: &[u8]) -> Result<CreateSessionRequest, ()> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(CreateSessionRequest::default());
+    }
+    serde_json::from_slice(body).map_err(|_| ())
 }
 
 async fn session_by_id(State(state): State<AppState>, Path(terminal_id): Path<Uuid>) -> Response {
@@ -157,7 +215,7 @@ async fn restart_by_id(state: &AppState, terminal_id: Uuid) -> Response {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorResponse {
-                    error: "Codex could not be restarted. Check the session status and server log.",
+                    error: "The terminal agent could not be restarted. Check the session status and server log.",
                 }),
             )
                 .into_response()
@@ -186,7 +244,7 @@ async fn terminate_by_id(state: &AppState, terminal_id: Uuid) -> Response {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: "Codex could not be terminated. Check the server log.",
+                    error: "The terminal agent could not be terminated. Check the server log.",
                 }),
             )
                 .into_response()
@@ -267,4 +325,28 @@ async fn security_headers(request: axum::extract::Request, next: Next) -> Respon
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_create_session_body_remains_backward_compatible() {
+        let request = parse_create_session_request(b" \r\n").expect("legacy empty request");
+
+        assert_eq!(request.agent, None);
+    }
+
+    #[test]
+    fn create_session_body_accepts_only_the_agent_field() {
+        let request =
+            parse_create_session_request(br#"{"agent":"claude"}"#).expect("valid request");
+
+        assert_eq!(request.agent, Some(AgentKind::Claude));
+        assert!(
+            parse_create_session_request(br#"{"agent":"claude","command":"malicious"}"#).is_err()
+        );
+        assert!(parse_create_session_request(br#"{"agent":"unknown"}"#).is_err());
+    }
 }

@@ -1,5 +1,6 @@
 import {
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
   useRef,
@@ -11,14 +12,19 @@ import {
   consumeTokenFromUrl,
   createSession,
   deleteSession,
+  getAgentCatalog,
   listSessions,
   readSelectedTerminalId,
   restartSession,
   terminateSession,
   writeSelectedTerminalId,
   writeSessionToken,
+  type AgentCatalog,
+  type AgentKind,
   type SessionSnapshot,
 } from "./api";
+import { agentLabel } from "./agents";
+import { AgentPicker } from "./AgentPicker";
 import {
   TerminalView,
   type TerminalViewHandle,
@@ -40,7 +46,7 @@ const STATUS_LABELS: Record<ConnectionStatus | "codex_exited", string> = {
   reconnecting: "Reconnecting",
   disconnected: "Disconnected",
   authentication_failed: "Authentication failed",
-  codex_exited: "Codex exited",
+  codex_exited: "Agent exited",
 };
 
 const COMPACT_STATUS_LABELS: Record<
@@ -69,6 +75,13 @@ export function App() {
   const [reconnectNonce, setReconnectNonce] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  const [agentCatalog, setAgentCatalog] = useState<AgentCatalog | null>(null);
+  const [agentCatalogLoading, setAgentCatalogLoading] = useState(false);
+  const [agentCatalogError, setAgentCatalogError] = useState<string | null>(
+    null,
+  );
+  const [creatingAgent, setCreatingAgent] = useState<AgentKind | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -80,6 +93,8 @@ export function App() {
   const terminalRef = useRef<TerminalViewHandle>(null);
   const selectedTerminalIdRef = useRef(selectedTerminalId);
   const sessionsRequestEpochRef = useRef(0);
+  const agentCatalogRequestEpochRef = useRef(0);
+  const suppressTerminalFocusOnceRef = useRef(false);
 
   selectedTerminalIdRef.current = selectedTerminalId;
 
@@ -89,18 +104,25 @@ export function App() {
     ["exited", "failed", "terminated"].includes(session.status)
       ? "codex_exited"
       : connectionStatus;
+  const selectedAgentLabel = session ? agentLabel(session.agent) : "Agent";
 
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
 
   useEffect(() => {
+    if (suppressTerminalFocusOnceRef.current && !agentPickerOpen) {
+      suppressTerminalFocusOnceRef.current = false;
+      return;
+    }
+
     if (
       !token ||
       connectionStatus !== "connected" ||
       !selectedTerminalId ||
       settingsOpen ||
       sessionsOpen ||
+      agentPickerOpen ||
       window.matchMedia("(pointer: coarse)").matches
     ) {
       return;
@@ -116,6 +138,7 @@ export function App() {
     selectedTerminalId,
     sessionsOpen,
     settingsOpen,
+    agentPickerOpen,
     token,
   ]);
 
@@ -139,7 +162,7 @@ export function App() {
           defaultPrevented: event.defaultPrevented,
           isComposing: event.isComposing,
           coarsePointer: window.matchMedia("(pointer: coarse)").matches,
-          dialogOpen: settingsOpen || sessionsOpen,
+          dialogOpen: settingsOpen || sessionsOpen || agentPickerOpen,
           editableTarget,
           terminalAvailable:
             Boolean(token && selectedTerminalId) &&
@@ -186,6 +209,7 @@ export function App() {
     selectedTerminalId,
     sessionsOpen,
     settingsOpen,
+    agentPickerOpen,
     token,
   ]);
 
@@ -297,6 +321,65 @@ export function App() {
       }
     };
   }, [applySessionList, token]);
+
+  const refreshAgentCatalog = useCallback(
+    async (force = false, signal?: AbortSignal) => {
+      if (!token) {
+        return;
+      }
+
+      const requestEpoch = ++agentCatalogRequestEpochRef.current;
+      setAgentCatalogLoading(true);
+      setAgentCatalogError(null);
+      try {
+        const nextCatalog = await getAgentCatalog(token, {
+          refresh: force,
+          signal,
+        });
+        if (
+          !signal?.aborted &&
+          agentCatalogRequestEpochRef.current === requestEpoch
+        ) {
+          setAgentCatalog(nextCatalog);
+        }
+      } catch (error) {
+        if (
+          !signal?.aborted &&
+          agentCatalogRequestEpochRef.current === requestEpoch
+        ) {
+          setAgentCatalogError(
+            error instanceof Error
+              ? error.message
+              : "Could not check installed CLI agents.",
+          );
+        }
+      } finally {
+        if (
+          !signal?.aborted &&
+          agentCatalogRequestEpochRef.current === requestEpoch
+        ) {
+          setAgentCatalogLoading(false);
+        }
+      }
+    },
+    [token],
+  );
+
+  useEffect(() => {
+    if (!token) {
+      agentCatalogRequestEpochRef.current += 1;
+      setAgentCatalog(null);
+      setAgentCatalogLoading(false);
+      setAgentCatalogError(null);
+      return;
+    }
+
+    const abortController = new AbortController();
+    void refreshAgentCatalog(false, abortController.signal);
+    return () => {
+      abortController.abort();
+    };
+  }, [refreshAgentCatalog, token]);
 
   useEffect(() => {
     const viewport = window.visualViewport;
@@ -561,7 +644,11 @@ export function App() {
       setMessage("No terminal session is selected.");
       return;
     }
-    if (!window.confirm("Restart Codex? The current Codex process will be terminated.")) {
+    if (
+      !window.confirm(
+        `Restart ${selectedAgentLabel}? The current process will be terminated.`,
+      )
+    ) {
       return;
     }
     setBusy(true);
@@ -585,7 +672,7 @@ export function App() {
       setMessage("No terminal session is selected.");
       return;
     }
-    if (!window.confirm("Terminate the active Codex process?")) {
+    if (!window.confirm(`Terminate the active ${selectedAgentLabel} process?`)) {
       return;
     }
     setBusy(true);
@@ -625,27 +712,33 @@ export function App() {
     closeSessions();
   };
 
-  const handleCreateSession = async () => {
+  const handleCreateSession = async (agent: AgentKind) => {
+    setCreatingAgent(agent);
     setBusy(true);
     setMessage(null);
+    setAgentCatalogError(null);
     sessionsRequestEpochRef.current += 1;
     setSessionsLoading(false);
     try {
-      const created = await createSession(token);
+      const created = await createSession(token, agent);
       setSessions((current) => [
         ...current.filter(
           (candidate) => candidate.terminalId !== created.terminalId,
         ),
         created,
       ]);
+      setAgentPickerOpen(false);
       attachSession(created);
       void refreshSessions(created.terminalId);
     } catch (error) {
-      setMessage(
-        error instanceof Error ? error.message : "Could not create a terminal session.",
+      setAgentCatalogError(
+        error instanceof Error
+          ? error.message
+          : "Could not create a terminal session.",
       );
       void refreshSessions();
     } finally {
+      setCreatingAgent(null);
       setBusy(false);
     }
   };
@@ -656,7 +749,7 @@ export function App() {
     }
     if (
       !window.confirm(
-        `Remove "${target.name}"? Its Codex process will be terminated.`,
+        `Remove "${target.name}"? Its ${agentLabel(target.agent)} process will be terminated.`,
       )
     ) {
       return;
@@ -782,6 +875,11 @@ export function App() {
           <h1>
             Codex Web Terminal
             <span className="community-label">Unofficial</span>
+            {session && (
+              <span className={`active-agent active-agent--${session.agent}`}>
+                {selectedAgentLabel}
+              </span>
+            )}
           </h1>
           <div className="project-path" title={session?.project}>
             <span>Project:</span> {session?.project ?? "Loading…"}
@@ -793,8 +891,16 @@ export function App() {
             selectedTerminalId={selectedTerminalId}
             busy={busy}
             onSelect={attachSession}
-            onCreate={() => void handleCreateSession()}
+            onCreate={() => {
+              setSessionsOpen(false);
+              setSettingsOpen(false);
+              setAgentPickerOpen(true);
+              setAgentCatalogError(null);
+              void refreshAgentCatalog(true);
+            }}
             onManage={() => {
+              setAgentPickerOpen(false);
+              setSettingsOpen(false);
               setSessionsOpen(true);
               void refreshSessions();
             }}
@@ -824,11 +930,13 @@ export function App() {
           </button>
           <button
             type="button"
-            title="Restart Codex"
+            title={`Restart ${selectedAgentLabel}`}
             disabled={busy}
             onClick={() => void handleRestart()}
           >
-            <span className="action-label action-label--full">Restart Codex</span>
+            <span className="action-label action-label--full">
+              Restart {selectedAgentLabel}
+            </span>
             <span className="action-label action-label--compact">Restart</span>
           </button>
           <button
@@ -851,7 +959,11 @@ export function App() {
           <button
             type="button"
             title="Open terminal settings"
-            onClick={() => setSettingsOpen(true)}
+            onClick={() => {
+              setAgentPickerOpen(false);
+              setSessionsOpen(false);
+              setSettingsOpen(true);
+            }}
           >
             <span className="action-label action-label--full">Settings</span>
             <span className="action-label action-label--compact">Setup</span>
@@ -910,10 +1022,27 @@ export function App() {
         />
       )}
 
+      {agentPickerOpen && (
+        <AgentPicker
+          catalog={agentCatalog}
+          loading={agentCatalogLoading}
+          error={agentCatalogError}
+          creatingAgent={creatingAgent}
+          onSelect={(agent) => void handleCreateSession(agent)}
+          onRefresh={() => void refreshAgentCatalog(true)}
+          onClose={() => {
+            suppressTerminalFocusOnceRef.current = true;
+            setAgentPickerOpen(false);
+            setAgentCatalogError(null);
+          }}
+        />
+      )}
+
       {settingsOpen && (
         <SettingsPanel
           settings={settings}
           busy={busy}
+          agentLabel={selectedAgentLabel}
           onChange={updateSettings}
           onClose={() => {
             setSettingsOpen(false);
@@ -925,6 +1054,7 @@ export function App() {
             clearSelectedTerminalId();
             setSettingsOpen(false);
             setSessionsOpen(false);
+            setAgentPickerOpen(false);
             setSessions([]);
             setSelectedTerminalId("");
             setSession(null);
@@ -984,26 +1114,27 @@ function SessionsPanel({
   onRefresh,
   onClose,
 }: SessionsPanelProps) {
+  const panelRef = useRef<HTMLElement>(null);
+
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <section
+        ref={panelRef}
         className="sessions-panel"
         role="dialog"
         aria-modal="true"
         aria-labelledby="sessions-title"
         aria-busy={loading}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            onClose();
-          }
-        }}
+        tabIndex={-1}
+        onKeyDown={(event) =>
+          handleModalKeyDown(event, panelRef.current, onClose)
+        }
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="sessions-title-row">
           <div>
             <h2 id="sessions-title">Terminal sessions</h2>
-            <p>Attach without stopping the other Codex terminals.</p>
+            <p>Attach without stopping the other agent terminals.</p>
           </div>
           <div className="sessions-title-actions">
             <button
@@ -1041,6 +1172,11 @@ function SessionsPanel({
                 <div className="session-card-main">
                   <div className="session-name-row">
                     <h3 title={candidate.name}>{candidate.name}</h3>
+                    <span
+                      className={`session-badge session-agent-badge session-agent-badge--${candidate.agent}`}
+                    >
+                      {agentLabel(candidate.agent)}
+                    </span>
                     {candidate.isPrimary && (
                       <span className="session-badge">Primary</span>
                     )}
@@ -1133,7 +1269,7 @@ function AuthenticationScreen({ onToken }: { onToken: (token: string) => void })
         </h1>
         <p>Enter the authentication token printed once in the server console.</p>
         <p className="auth-disclaimer">
-          Independent community wrapper. Codex CLI is installed separately.
+          Independent community wrapper. Agent CLIs are installed separately.
         </p>
         <label htmlFor="token">Authentication token</label>
         <input
@@ -1156,6 +1292,7 @@ function AuthenticationScreen({ onToken }: { onToken: (token: string) => void })
 interface SettingsPanelProps {
   settings: TerminalSettings;
   busy: boolean;
+  agentLabel: string;
   onChange: (patch: Partial<TerminalSettings>) => void;
   onClose: () => void;
   onTerminate: () => void;
@@ -1169,6 +1306,7 @@ interface SettingsPanelProps {
 function SettingsPanel({
   settings,
   busy,
+  agentLabel,
   onChange,
   onClose,
   onTerminate,
@@ -1179,19 +1317,30 @@ function SettingsPanel({
   onCopyViewportDiagnostics,
 }: SettingsPanelProps) {
   const viewportDiagnosticsReady = Boolean(viewportDiagnostics);
+  const panelRef = useRef<HTMLElement>(null);
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <section
+        ref={panelRef}
         className="settings-panel"
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
+        tabIndex={-1}
+        onKeyDown={(event) =>
+          handleModalKeyDown(event, panelRef.current, onClose)
+        }
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="settings-title-row">
           <h2 id="settings-title">Terminal settings</h2>
-          <button type="button" onClick={onClose} aria-label="Close settings">
+          <button
+            type="button"
+            autoFocus
+            onClick={onClose}
+            aria-label="Close settings"
+          >
             ×
           </button>
         </div>
@@ -1288,7 +1437,7 @@ function SettingsPanel({
 
         <div className="settings-danger">
           <button type="button" disabled={busy} onClick={onTerminate}>
-            Terminate Codex
+            Terminate {agentLabel}
           </button>
           <button type="button" onClick={onForgetToken}>
             Forget token
@@ -1297,4 +1446,43 @@ function SettingsPanel({
       </section>
     </div>
   );
+}
+
+function handleModalKeyDown(
+  event: ReactKeyboardEvent<HTMLElement>,
+  panel: HTMLElement | null,
+  onClose: () => void,
+) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    onClose();
+    return;
+  }
+  if (event.key !== "Tab" || !panel) {
+    return;
+  }
+
+  const focusable = Array.from(
+    panel.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter(
+    (element) =>
+      !element.hasAttribute("hidden") && element.getClientRects().length > 0,
+  );
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (!first || !last) {
+    event.preventDefault();
+    panel.focus({ preventScroll: true });
+    return;
+  }
+
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  }
 }

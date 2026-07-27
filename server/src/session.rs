@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    config::AgentKind,
     protocol::validate_resize,
     terminal::{self, TerminalConfig},
 };
@@ -98,6 +99,7 @@ impl SessionStateMachine {
 pub struct SessionSnapshot {
     pub terminal_id: Uuid,
     pub name: String,
+    pub agent: AgentKind,
     pub is_primary: bool,
     pub created_at: u64,
     pub session_id: Option<Uuid>,
@@ -275,7 +277,7 @@ struct SessionInner {
     output_sender: watch::Sender<u64>,
     event_sender: broadcast::Sender<()>,
     client_slots: Arc<Semaphore>,
-    codex_installed: AtomicBool,
+    command_available: AtomicBool,
     shutting_down: AtomicBool,
     shutdown_signal: CancellationToken,
 }
@@ -341,7 +343,7 @@ impl SessionManager {
                 output_sender,
                 event_sender,
                 client_slots: Arc::new(Semaphore::new(MAX_CONNECTED_CLIENTS)),
-                codex_installed: AtomicBool::new(false),
+                command_available: AtomicBool::new(false),
                 shutting_down: AtomicBool::new(false),
                 shutdown_signal: CancellationToken::new(),
             }),
@@ -351,6 +353,16 @@ impl SessionManager {
     #[cfg(test)]
     pub(crate) fn configured_command(&self) -> &str {
         &self.inner.terminal_config.command
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configured_arguments(&self) -> &[String] {
+        &self.inner.terminal_config.arguments
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configured_agent(&self) -> AgentKind {
+        self.inner.terminal_config.agent
     }
 
     pub async fn start(&self) -> Result<()> {
@@ -381,7 +393,7 @@ impl SessionManager {
 
         self.inner.shutdown_signal.cancel();
         if let Err(error) = self.terminate().await {
-            tracing::error!(%error, "failed to terminate Codex during shutdown");
+            tracing::error!(%error, agent = self.inner.terminal_config.agent.label(), "failed to terminate agent during shutdown");
         }
     }
 
@@ -389,7 +401,10 @@ impl SessionManager {
         let input_sender = {
             let record = lock(&self.inner.record);
             let Some(active) = record.active.as_ref() else {
-                bail!("Codex is not running");
+                bail!(
+                    "{} is not running",
+                    self.inner.terminal_config.agent.label()
+                );
             };
             active.input_sender.clone()
         };
@@ -405,7 +420,10 @@ impl SessionManager {
         validate_resize(cols, rows)?;
         let record = lock(&self.inner.record);
         let Some(active) = record.active.as_ref() else {
-            bail!("Codex is not running");
+            bail!(
+                "{} is not running",
+                self.inner.terminal_config.agent.label()
+            );
         };
 
         active
@@ -425,6 +443,7 @@ impl SessionManager {
         SessionSnapshot {
             terminal_id: self.inner.terminal_id,
             name: self.inner.name.clone(),
+            agent: self.inner.terminal_config.agent,
             is_primary: self.inner.is_primary,
             created_at: self.inner.created_at,
             session_id: record.session_id,
@@ -481,7 +500,7 @@ impl SessionManager {
     }
 
     pub fn codex_installed(&self) -> bool {
-        self.inner.codex_installed.load(Ordering::Relaxed)
+        self.inner.command_available.load(Ordering::Relaxed)
     }
 
     pub fn is_running(&self) -> bool {
@@ -495,7 +514,10 @@ impl SessionManager {
 
     fn restart_blocking(&self) -> Result<()> {
         let _operation = lock(&self.inner.operation);
-        tracing::info!("restarting Codex session");
+        tracing::info!(
+            agent = self.inner.terminal_config.agent.label(),
+            "restarting agent session"
+        );
         self.terminate_locked()?;
         self.start_locked()
     }
@@ -513,7 +535,10 @@ impl SessionManager {
         {
             let record = lock(&self.inner.record);
             if record.active.is_some() {
-                bail!("Codex is already running");
+                bail!(
+                    "{} is already running",
+                    self.inner.terminal_config.agent.label()
+                );
             }
         }
 
@@ -532,11 +557,11 @@ impl SessionManager {
 
         let resolved = match terminal::preflight(&self.inner.terminal_config) {
             Ok(resolved) => {
-                self.inner.codex_installed.store(true, Ordering::Relaxed);
+                self.inner.command_available.store(true, Ordering::Relaxed);
                 resolved
             }
             Err(error) => {
-                self.inner.codex_installed.store(false, Ordering::Relaxed);
+                self.inner.command_available.store(false, Ordering::Relaxed);
                 self.mark_start_failed(session_id, &error);
                 return Err(error);
             }
@@ -545,7 +570,8 @@ impl SessionManager {
         tracing::info!(
             command = %resolved.path().display(),
             project = %self.inner.terminal_config.project_dir.display(),
-            "starting Codex in PTY"
+            agent = self.inner.terminal_config.agent.label(),
+            "starting agent in PTY"
         );
 
         let spawned = match terminal::spawn_resolved(&self.inner.terminal_config, &resolved) {
@@ -569,7 +595,7 @@ impl SessionManager {
         {
             let mut record = lock(&self.inner.record);
             if record.session_id != Some(session_id) {
-                bail!("session changed while Codex was starting");
+                bail!("session changed while the agent was starting");
             }
             record.active = Some(ActiveProcess {
                 session_id,
@@ -583,9 +609,9 @@ impl SessionManager {
         self.notify_event();
 
         if let Some(pid) = pid {
-            tracing::info!(pid, %session_id, "Codex PTY process started");
+            tracing::info!(pid, %session_id, agent = self.inner.terminal_config.agent.label(), "agent PTY process started");
         } else {
-            tracing::info!(%session_id, "Codex PTY process started");
+            tracing::info!(%session_id, agent = self.inner.terminal_config.agent.label(), "agent PTY process started");
         }
 
         self.spawn_writer_thread(session_id, writer, input_receiver);
@@ -612,7 +638,7 @@ impl SessionManager {
         };
 
         let session_id = active.session_id;
-        tracing::info!(%session_id, "terminating Codex PTY process");
+        tracing::info!(%session_id, agent = self.inner.terminal_config.agent.label(), "terminating agent PTY process");
         let (acknowledgement, acknowledgement_receiver) = sync_channel(1);
         let request_result = active
             .termination_sender
@@ -621,9 +647,9 @@ impl SessionManager {
             Ok(()) => match acknowledgement_receiver.recv_timeout(Duration::from_secs(5)) {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(message)) => Err(anyhow::anyhow!(message))
-                    .context("failed to terminate the Codex PTY process"),
+                    .context("failed to terminate the agent PTY process"),
                 Err(RecvTimeoutError::Timeout) => Err(anyhow::anyhow!(
-                    "timed out while terminating the Codex PTY process"
+                    "timed out while terminating the agent PTY process"
                 )),
                 Err(RecvTimeoutError::Disconnected) => Ok(()),
             },
@@ -652,7 +678,7 @@ impl SessionManager {
         }
         drop(record);
         self.notify_event();
-        tracing::error!(%error, %session_id, "failed to start Codex PTY session");
+        tracing::error!(%error, %session_id, agent = self.inner.terminal_config.agent.label(), "failed to start agent PTY session");
     }
 
     fn spawn_writer_thread(
@@ -663,7 +689,7 @@ impl SessionManager {
     ) {
         let manager = self.clone();
         std::thread::Builder::new()
-            .name("codex-pty-writer".to_owned())
+            .name("agent-pty-writer".to_owned())
             .spawn(move || writer_loop(manager, session_id, writer, receiver))
             .expect("failed to create PTY writer thread");
     }
@@ -671,7 +697,7 @@ impl SessionManager {
     fn spawn_reader_thread(&self, session_id: Uuid, reader: Box<dyn Read + Send>) {
         let manager = self.clone();
         std::thread::Builder::new()
-            .name("codex-pty-reader".to_owned())
+            .name("agent-pty-reader".to_owned())
             .spawn(move || reader_loop(manager, session_id, reader))
             .expect("failed to create PTY reader thread");
     }
@@ -685,7 +711,7 @@ impl SessionManager {
     ) {
         let manager = self.clone();
         std::thread::Builder::new()
-            .name("codex-pty-waiter".to_owned())
+            .name("agent-pty-waiter".to_owned())
             .spawn(move || child_wait_loop(manager, session_id, pid, child, termination_receiver))
             .expect("failed to create PTY waiter thread");
     }
@@ -731,16 +757,16 @@ impl SessionManager {
         };
         let _ = record.machine.transition(target);
         if let Some(error) = wait_error.as_ref() {
-            record.last_error = Some("The Codex process wait operation failed.".to_owned());
-            tracing::error!(%error, %session_id, "failed while waiting for Codex process");
+            record.last_error = Some("The agent process wait operation failed.".to_owned());
+            tracing::error!(%error, %session_id, "failed while waiting for agent process");
         }
         drop(record);
 
         self.notify_event();
         if let Some(exit_code) = exit_code {
-            tracing::info!(%session_id, exit_code, "Codex process exited");
+            tracing::info!(%session_id, exit_code, agent = self.inner.terminal_config.agent.label(), "agent process exited");
         } else {
-            tracing::info!(%session_id, "Codex process exited without an exit code");
+            tracing::info!(%session_id, agent = self.inner.terminal_config.agent.label(), "agent process exited without an exit code");
         }
     }
 

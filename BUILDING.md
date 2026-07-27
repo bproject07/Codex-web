@@ -88,6 +88,11 @@ Documentation must describe the current source and verified behavior. Check
 CLI flags, environment variables, dependency versions, build commands,
 package contents, UI labels, platform support, and known limitations instead
 of copying potentially stale text from an earlier release.
+Agent install locations and install/update commands must be checked against the
+current official OpenAI, Anthropic, and Google documentation. Validate the
+catalog metadata and manual **Refresh** / **Check again** workflow on both
+Windows and Linux; never substitute a successful mock probe for the real
+platform checks.
 
 ## Source checkout
 
@@ -123,16 +128,18 @@ Both Windows and Linux builds require:
   requires Rust 1.88 or newer)
 - enough space for `web/node_modules` and `server/target`
 
-Codex CLI is not needed to compile or run the automated unit tests. It is
-required for a real application session and for the final runtime smoke test.
+Codex, Claude, and AGY are not needed to compile or run the automated unit
+tests. At least the selected primary CLI is required for a real application
+session and the final runtime smoke test. Testing all three profiles requires
+all three CLIs on the runtime host.
 
 | Component | Build machine | Packaged runtime host |
 | --- | --- | --- |
 | Git | Needed to clone/update | Not required |
-| Node.js and npm | Needed for the frontend build | Needed when the installed Codex CLI itself uses Node |
+| Node.js and npm | Needed for the frontend build | Needed only when an installed CLI distribution requires Node |
 | Rust and Cargo | Needed for backend build/tests | Not required |
 | Native C linker/toolchain | Needed for the Rust build | Not required |
-| Codex CLI and login | Needed only for a real smoke test | Required |
+| Agent CLI and login | Needed only for a real smoke test | Primary required; others optional and auto-detected |
 | Browser | Needed only for browser tests | Required on the viewing device |
 
 Verify the toolchain:
@@ -144,6 +151,8 @@ npm --version
 rustc --version
 cargo --version
 codex --version
+claude --version
+agy --version
 ```
 
 The frontend dependency graph is locked by `web/package-lock.json`. Use
@@ -233,7 +242,7 @@ Start the packaged build:
 .\scripts\run.ps1 -Project "C:\Projects\my-app"
 ```
 
-The `-Project` directory is the directory in which every managed Codex CLI
+The `-Project` directory is the directory in which every managed agent CLI
 session will run.
 
 `run.ps1` searches `dist/codex-web.exe` before the release and debug binaries
@@ -311,7 +320,7 @@ Install the equivalent of:
 - Node.js `^20.19.0` or `>=22.12.0` with npm
 - stable Rust and Cargo
 - Python 3 only if running the optional browser/mobile regression utilities
-- Codex CLI for a real runtime session
+- the selected Codex, Claude, or AGY CLI for a real runtime session
 
 On Arch Linux, the required native build tools are normally provided by
 `base-devel`. Rust can be installed with rustup or the distribution packages.
@@ -503,6 +512,50 @@ has all of these properties:
 - reconnecting the browser replays existing terminal output;
 - terminating or restarting the selected session updates its lifecycle state.
 
+### Optional agent-profile smoke test
+
+Agent discovery is enabled by default. Verify the intended entry points first:
+
+```bash
+codex --version
+claude --version
+agy --version
+```
+
+Start a disposable loopback server without command overrides:
+
+```bash
+./dist-linux/codex-web \
+  --project "$PWD" \
+  --host 127.0.0.1 \
+  --port 8790 \
+  --no-open-browser
+```
+
+Check `GET /api/agent-catalog` and the **New** picker. Every installed CLI must
+be `ready` with a nonempty installed version. A deliberately unavailable CLI
+must remain visible as `missing`, show the correct official command for the
+server OS, and become ready after a host-side installation followed by
+**Refresh** or **Check again**. The check must not execute an installer,
+updater, package manager, login flow, or shell expression.
+
+Repeat with explicit `--command`, `--codex-command`, `--claude-command`, and `--agy-command`
+paths. A deliberately invalid explicit path must be `misconfigured` and must
+not fall back to a PATH entry. Repeat with `--no-agent-auto-detect`: the
+primary profile is still resolved and validated, while optional profiles
+require explicit overrides.
+
+For an explicit dangerous-mode launch test, add
+`--claude-dangerously-skip-permissions` and
+`--agy-dangerously-skip-permissions`. These switches pass the fixed upstream
+`--dangerously-skip-permissions` argument directly to the respective process
+and must remain off for normal validation.
+
+Run this matrix on both Windows and Linux. Validate real native PTY startup for
+each installed agent, not only catalog JSON or mocked commands. If an upstream
+install location, verification command, update command, or CLI flag changes,
+update the implementation and all affected Markdown in the same commit.
+
 ### Backend without Codex
 
 To isolate the PTY layer on Linux, use Bash as the command:
@@ -523,8 +576,9 @@ creating a Codex conversation.
 
 The Python utilities in `scripts/` are specialized diagnostics rather than the
 normal unit-test path. They require Python 3, Python Playwright, and a matching
-browser installation. Their current fixture paths and process cleanup are
-Windows-oriented.
+browser installation. Check each script's help for its platform requirements;
+some older mobile diagnostics are Windows-oriented, while the agent-catalog
+regression owns cross-platform fixtures and cleanup.
 
 Use them only on a disposable test port and never point them at a live
 production session. The standard cross-platform validation remains:
@@ -532,6 +586,26 @@ production session. The standard cross-platform validation remains:
 - frontend Vitest suite and production build;
 - Rust format, test, Clippy, and release build;
 - a separate native PTY/browser smoke test.
+
+The cross-platform agent-catalog regression starts a disposable server,
+supplies synthetic CLI fixtures, validates the versioned catalog, exercises a
+CLI-unavailable-to-ready refresh transition, starts the newly ready agent, and
+checks the responsive picker at desktop and 360×639 mobile sizes. It refuses
+the reserved live ports `8788`, `8789`, and `8790`:
+
+```powershell
+python .\scripts\agent-catalog-regression.py `
+  --server .\dist\codex-web.exe `
+  --port 8797
+```
+
+On Linux, use the packaged Linux executable:
+
+```bash
+python ./scripts/agent-catalog-regression.py \
+  --server ./dist-linux/codex-web \
+  --port 8797
+```
 
 The session-tab regression creates four synthetic PTYs and checks desktop
 wheel/arrows, mobile swipe, active-tab switching, responsive header height,
@@ -557,6 +631,18 @@ python .\scripts\desktop-slash-regression.py `
 ```
 
 Omit `--system-firefox` to run only the Playwright Chromium and Firefox checks.
+
+The Android IME regression loads an already-running frontend with a Chrome 150
+Samsung-sized mobile context. It replaces the HTTP API and WebSocket with
+synthetic in-browser routes, so no generated keystroke can reach a PTY. It
+checks duplicate `keyCode 229`, composition commits, deferred composition
+Enter, soft-keyboard line breaks, and intentionally repeated input. The script
+refuses to run against the live port `8789`:
+
+```powershell
+python -B .\scripts\android-ime-input-regression.py `
+  --url http://127.0.0.1:8790/
+```
 
 ## Updating dependencies intentionally
 
@@ -667,19 +753,25 @@ Install stable Rust, then:
 rustup component add rustfmt clippy
 ```
 
-### Linux compilation succeeds but a session fails
+### Linux compilation succeeds but an agent session fails
 
 Check:
 
 ```bash
 command -v codex
 codex --version
-ls -l "$(command -v codex)"
+command -v claude
+claude --version
+command -v agy
+agy --version
 test -r /dev/ptmx
 ```
 
-The user running `codex-web` must be able to execute Codex and access the
-configured project directory.
+The user running `codex-web` must be able to execute the selected CLI and
+access the configured project directory. The catalog deliberately does not
+expose executable paths; inspect resolution on the server with `where.exe`
+(Windows) or `command -v` (Unix). An invalid explicit command is intentionally
+`misconfigured`; it does not fall back to an auto-detected executable.
 
 ### The page says the frontend build is missing
 

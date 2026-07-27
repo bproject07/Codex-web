@@ -10,6 +10,10 @@ Examples:
   ./scripts/run.sh "/home/user/projects/my-app"
   ./scripts/run.sh "/home/user/projects/my-app" --host 127.0.0.1 --port 8787
   ./scripts/run.sh "/home/user/projects/my-app" --host 100.x.y.z --no-open-browser
+  ./scripts/run.sh "/home/user/projects/my-app" --primary-agent claude
+  ./scripts/run.sh "/home/user/projects/my-app" --no-agent-auto-detect \
+    --claude-command "$HOME/.local/bin/claude" \
+    --agy-command "$HOME/.local/bin/agy"
 EOF
 }
 

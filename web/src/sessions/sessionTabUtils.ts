@@ -1,6 +1,10 @@
-export function compactSessionName(name: string, index: number): string {
+export function compactSessionName(
+  name: string,
+  index: number,
+  prefix = "T",
+): string {
   const terminalNumber = name.match(/(?:terminal\s*)?(\d+)$/i)?.[1];
-  return terminalNumber ? `T${terminalNumber}` : `T${index + 1}`;
+  return terminalNumber ? `${prefix}${terminalNumber}` : `${prefix}${index + 1}`;
 }
 
 export function horizontalWheelDelta(

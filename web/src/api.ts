@@ -12,9 +12,48 @@ export type SessionLifecycle =
   | "exited"
   | "failed";
 
+export type AgentKind = "codex" | "claude" | "agy";
+
+export type AgentDiscoveryState = "ready" | "missing" | "misconfigured";
+export type AgentConfiguration = "auto" | "override";
+
+export interface AgentInstallGuide {
+  command: string;
+  shell: string;
+  verifyCommand: string;
+  updateCommand: string;
+  docsUrl: string;
+  requiresServerAccess: true;
+}
+
+export interface AgentCatalogEntry {
+  kind: AgentKind;
+  state: AgentDiscoveryState;
+  configuration: AgentConfiguration;
+  version: string | null;
+  dangerouslySkipPermissions: boolean;
+  install: AgentInstallGuide;
+}
+
+export interface AgentCatalog {
+  schemaVersion: 1;
+  server: {
+    os: string;
+    arch: string;
+    shell: string;
+  };
+  agents: AgentCatalogEntry[];
+}
+
+export interface AgentCatalogOptions {
+  refresh?: boolean;
+  signal?: AbortSignal;
+}
+
 export interface SessionSnapshot {
   terminalId: string;
   name: string;
+  agent: AgentKind;
   isPrimary: boolean;
   createdAt: number;
   sessionId: string | null;
@@ -35,6 +74,16 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
     this.status = status;
+  }
+}
+
+class ApiPayloadError extends Error {
+  readonly contentType: string;
+
+  constructor(contentType: string) {
+    super("The server returned an invalid API response.");
+    this.name = "ApiPayloadError";
+    this.contentType = contentType.toLowerCase();
   }
 }
 
@@ -127,9 +176,12 @@ export async function listSessions(
   signal?: AbortSignal,
 ): Promise<SessionSnapshot[]> {
   try {
-    return await apiRequest<SessionSnapshot[]>("/api/sessions", token, {
+    const sessions = await apiRequest<SessionSnapshot[]>("/api/sessions", token, {
       signal,
     });
+    return sessions.map((session) =>
+      normalizeSessionSnapshot(session, session.terminalId),
+    );
   } catch (error) {
     if (!endpointIsUnavailable(error)) {
       throw error;
@@ -155,11 +207,79 @@ export async function getSession(
   return session;
 }
 
-export async function createSession(token: string): Promise<SessionSnapshot> {
+export async function listAgents(
+  token: string,
+  signal?: AbortSignal,
+): Promise<AgentKind[]> {
   try {
-    return await apiRequest<SessionSnapshot>("/api/sessions", token, {
+    const agents = await apiRequest<unknown>("/api/agents", token, { signal });
+    if (!Array.isArray(agents)) {
+      throw new ApiError(502, "The server returned an invalid agent list.");
+    }
+    return agents.filter(isAgentKind);
+  } catch (error) {
+    if (endpointIsUnavailable(error)) {
+      return ["codex"];
+    }
+    throw error;
+  }
+}
+
+export async function getAgentCatalog(
+  token: string,
+  options: AgentCatalogOptions = {},
+): Promise<AgentCatalog> {
+  const query = options.refresh ? "?refresh=true" : "";
+  try {
+    const catalog = await apiRequest<unknown>(
+      `/api/agent-catalog${query}`,
+      token,
+      { signal: options.signal },
+    );
+    return normalizeAgentCatalog(catalog);
+  } catch (error) {
+    if (!endpointIsUnavailable(error)) {
+      throw error;
+    }
+  }
+
+  const legacyAgents = await listAgents(token, options.signal);
+  return {
+    schemaVersion: 1,
+    server: {
+      os: "unknown",
+      arch: "unknown",
+      shell: "server shell",
+    },
+    agents: legacyAgents.map((kind) => ({
+      kind,
+      state: "ready",
+      configuration: "auto",
+      version: null,
+      dangerouslySkipPermissions: false,
+      install: {
+        command: "",
+        shell: "server shell",
+        verifyCommand: `${kind === "agy" ? "agy" : kind} --version`,
+        updateCommand: "",
+        docsUrl: "",
+        requiresServerAccess: true,
+      },
+    })),
+  };
+}
+
+export async function createSession(
+  token: string,
+  agent: AgentKind,
+): Promise<SessionSnapshot> {
+  try {
+    const session = await apiRequest<SessionSnapshot>("/api/sessions", token, {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent }),
     });
+    return normalizeSessionSnapshot(session, session.terminalId);
   } catch (error) {
     if (endpointIsUnavailable(error)) {
       throw new ApiError(
@@ -226,7 +346,7 @@ export async function deleteSession(
 
 type LegacySessionSnapshot = Omit<
   SessionSnapshot,
-  "terminalId" | "name" | "isPrimary" | "createdAt"
+  "terminalId" | "name" | "agent" | "isPrimary" | "createdAt"
 >;
 
 export function normalizeSessionSnapshot(
@@ -240,6 +360,10 @@ export function normalizeSessionSnapshot(
   return {
     ...session,
     terminalId,
+    agent:
+      session.agent === "claude" || session.agent === "agy"
+        ? session.agent
+        : "codex",
     name:
       typeof session.name === "string" && session.name.trim()
         ? session.name
@@ -255,10 +379,105 @@ export function normalizeSessionSnapshot(
   };
 }
 
+export function normalizeAgentCatalog(catalog: unknown): AgentCatalog {
+  if (!isRecord(catalog) || catalog.schemaVersion !== 1) {
+    throw new ApiError(502, "The server returned an invalid agent catalog.");
+  }
+
+  const server = catalog.server;
+  if (
+    !isRecord(server) ||
+    typeof server.os !== "string" ||
+    typeof server.arch !== "string" ||
+    typeof server.shell !== "string" ||
+    !Array.isArray(catalog.agents)
+  ) {
+    throw new ApiError(502, "The server returned an invalid agent catalog.");
+  }
+
+  const agents = catalog.agents.map(normalizeAgentCatalogEntry);
+  return {
+    schemaVersion: 1,
+    server: {
+      os: server.os,
+      arch: server.arch,
+      shell: server.shell,
+    },
+    agents,
+  };
+}
+
+function normalizeAgentCatalogEntry(entry: unknown): AgentCatalogEntry {
+  if (
+    !isRecord(entry) ||
+    !isAgentKind(entry.kind) ||
+    !isAgentDiscoveryState(entry.state) ||
+    (entry.configuration !== "auto" && entry.configuration !== "override") ||
+    (entry.version !== null && typeof entry.version !== "string") ||
+    typeof entry.dangerouslySkipPermissions !== "boolean" ||
+    !isRecord(entry.install)
+  ) {
+    throw new ApiError(502, "The server returned an invalid agent catalog.");
+  }
+
+  const install = entry.install;
+  if (
+    typeof install.command !== "string" ||
+    typeof install.shell !== "string" ||
+    typeof install.verifyCommand !== "string" ||
+    typeof install.updateCommand !== "string" ||
+    typeof install.docsUrl !== "string" ||
+    install.requiresServerAccess !== true
+  ) {
+    throw new ApiError(502, "The server returned an invalid agent catalog.");
+  }
+
+  return {
+    kind: entry.kind,
+    state: entry.state,
+    configuration: entry.configuration,
+    version: entry.version,
+    dangerouslySkipPermissions: entry.dangerouslySkipPermissions,
+    install: {
+      command: install.command,
+      shell: install.shell,
+      verifyCommand: install.verifyCommand,
+      updateCommand: install.updateCommand,
+      docsUrl: normalizeHttpsUrl(install.docsUrl),
+      requiresServerAccess: true,
+    },
+  };
+}
+
+function isAgentKind(value: unknown): value is AgentKind {
+  return value === "codex" || value === "claude" || value === "agy";
+}
+
+function isAgentDiscoveryState(value: unknown): value is AgentDiscoveryState {
+  return value === "ready" || value === "missing" || value === "misconfigured";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function normalizeHttpsUrl(value: string): string {
+  if (!value) {
+    return "";
+  }
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
 function endpointIsUnavailable(error: unknown): boolean {
   return (
     (error instanceof ApiError && (error.status === 404 || error.status === 405)) ||
-    error instanceof SyntaxError
+    (error instanceof ApiPayloadError &&
+      error.contentType.includes("text/html"))
   );
 }
 
@@ -295,5 +514,9 @@ async function apiRequest<T>(
     return undefined as T;
   }
 
-  return (await response.json()) as T;
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new ApiPayloadError(response.headers.get("Content-Type") ?? "");
+  }
 }

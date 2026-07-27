@@ -9,6 +9,7 @@ describe("session tab labels", () => {
   it("uses the terminal number when the name contains one", () => {
     expect(compactSessionName("Terminal 4", 0)).toBe("T4");
     expect(compactSessionName("Workspace 12", 0)).toBe("T12");
+    expect(compactSessionName("Claude 4", 0, "Cl")).toBe("Cl4");
   });
 
   it("falls back to the ordered position", () => {

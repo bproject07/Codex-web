@@ -3,7 +3,7 @@ name = "codex-web-terminal"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Run the real Codex CLI in a native PTY and control it from a browser"
+description = "Run Codex, Claude, and AGY CLIs in native PTYs from a browser"
 license = "MIT"
 
 [[bin]]
@@ -31,6 +31,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2.5"
 uuid = { version = "1.17", features = ["serde", "v4"] }
 webbrowser = "1.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3.20"

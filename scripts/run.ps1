@@ -13,7 +13,24 @@ param(
     [string] $Shell = "powershell",
 
     [ValidateNotNullOrEmpty()]
-    [string] $Command = "codex",
+    [string] $Command,
+
+    [ValidateSet("codex", "claude", "agy")]
+    [string] $PrimaryAgent = "codex",
+
+    [string] $NewSessionCommand,
+
+    [string] $CodexCommand,
+
+    [string] $ClaudeCommand,
+
+    [switch] $ClaudeDangerouslySkipPermissions,
+
+    [string] $AgyCommand,
+
+    [switch] $AgyDangerouslySkipPermissions,
+
+    [switch] $NoAgentAutoDetect,
 
     [string] $Token,
 
@@ -55,9 +72,33 @@ $arguments = @(
     "--host", $ListenHost,
     "--port", $Port.ToString(),
     "--shell", $Shell,
-    "--command", $Command
+    "--primary-agent", $PrimaryAgent
 )
 
+if ($Command) {
+    $arguments += @("--command", $Command)
+}
+if ($NewSessionCommand) {
+    $arguments += @("--new-session-command", $NewSessionCommand)
+}
+if ($CodexCommand) {
+    $arguments += @("--codex-command", $CodexCommand)
+}
+if ($ClaudeCommand) {
+    $arguments += @("--claude-command", $ClaudeCommand)
+}
+if ($ClaudeDangerouslySkipPermissions) {
+    $arguments += "--claude-dangerously-skip-permissions"
+}
+if ($AgyCommand) {
+    $arguments += @("--agy-command", $AgyCommand)
+}
+if ($AgyDangerouslySkipPermissions) {
+    $arguments += "--agy-dangerously-skip-permissions"
+}
+if ($NoAgentAutoDetect) {
+    $arguments += "--no-agent-auto-detect"
+}
 if ($Token) {
     $arguments += @("--token", $Token)
 }

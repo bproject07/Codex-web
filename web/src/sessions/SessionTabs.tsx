@@ -7,6 +7,7 @@ import {
 } from "react";
 
 import type { SessionSnapshot } from "../api";
+import { AGENT_SHORT_LABELS } from "../agents";
 import {
   compactSessionName,
   horizontalWheelDelta,
@@ -176,7 +177,11 @@ export function SessionTabs({
                 {candidate.name}
               </span>
               <span className="session-tab-label session-tab-label--compact">
-                {compactSessionName(candidate.name, index)}
+                {compactSessionName(
+                  candidate.name,
+                  index,
+                  AGENT_SHORT_LABELS[candidate.agent],
+                )}
               </span>
               {candidate.isPrimary && (
                 <span className="session-tab-primary" title="Primary terminal">
@@ -202,8 +207,8 @@ export function SessionTabs({
       <button
         type="button"
         className="header-action--new session-new-button"
-        title="Start a new Codex terminal"
-        aria-label="Start a new Codex terminal"
+        title="Choose an agent for a new terminal"
+        aria-label="Choose an agent for a new terminal"
         disabled={busy}
         onClick={onCreate}
       >

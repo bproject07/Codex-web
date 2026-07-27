@@ -250,7 +250,7 @@ async fn handle_client_message(
                         return send_protocol_error(
                             sender,
                             "restart_failed",
-                            "Codex could not be restarted. Check the server log.",
+                            "The terminal agent could not be restarted. Check the server log.",
                         )
                         .await;
                     }
@@ -382,12 +382,17 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::{config::ShellKind, terminal::TerminalConfig};
+    use crate::{
+        config::{AgentKind, ShellKind},
+        terminal::TerminalConfig,
+    };
 
     fn registry() -> SessionRegistry {
         SessionRegistry::new(TerminalConfig {
             project_dir: PathBuf::from("."),
             command: "codex".to_owned(),
+            arguments: Vec::new(),
+            agent: AgentKind::Codex,
             shell: ShellKind::Powershell,
         })
     }

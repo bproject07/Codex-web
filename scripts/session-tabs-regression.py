@@ -152,7 +152,7 @@ def run_desktop(browser: Browser, port: int) -> dict[str, Any]:
     assert after_wheel["scrollLeft"] > before["scrollLeft"]
     assert result["leftArrowVisible"]
     assert result["rightArrowVisible"]
-    assert "Terminal 3" in (selected_name or "")
+    assert "Codex 3" in (selected_name or "")
     assert before["create"]["right"] <= 1280
     assert before["manage"]["right"] <= 1280
 

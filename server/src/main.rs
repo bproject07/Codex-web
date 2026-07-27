@@ -10,11 +10,11 @@ use tracing_subscriber::EnvFilter;
 use url::Url;
 
 use codex_web_terminal::{
+    agents::build_agent_profiles,
     auth::{AuthState, generate_token},
     config::{Config, static_directory},
     registry::SessionRegistry,
     routes::{AppState, build_router},
-    terminal::TerminalConfig,
 };
 
 #[tokio::main]
@@ -37,28 +37,19 @@ async fn main() -> Result<()> {
         );
     }
 
-    let primary_terminal_config = TerminalConfig {
-        project_dir: config.project_dir.clone(),
-        command: config.command.clone(),
-        shell: config.shell,
-    };
-    let new_session_terminal_config = TerminalConfig {
-        project_dir: config.project_dir.clone(),
-        command: config
-            .new_session_command
-            .clone()
-            .unwrap_or_else(|| config.command.clone()),
-        shell: config.shell,
-    };
-    let sessions = SessionRegistry::with_new_session_config(
-        primary_terminal_config,
-        new_session_terminal_config,
+    let agent_profiles = build_agent_profiles(&config);
+    let agent_catalog = agent_profiles.catalog.clone();
+    let sessions = SessionRegistry::with_agent_configs(
+        agent_profiles.primary,
+        agent_profiles.new_session,
+        agent_profiles.additional,
     );
 
     if let Err(error) = sessions.start_primary().await {
         tracing::error!(
             %error,
-            "Codex is unavailable; the web server will remain available for diagnostics and restart"
+            agent = config.primary_agent.label(),
+            "primary agent is unavailable; the web server will remain available for diagnostics and restart"
         );
     }
 
@@ -86,6 +77,7 @@ async fn main() -> Result<()> {
         config: Arc::new(config.clone()),
         auth: AuthState::new(token),
         sessions: sessions.clone(),
+        agents: agent_catalog,
         shutdown: shutdown.clone(),
     };
     let app = build_router(state, static_directory);

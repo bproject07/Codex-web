@@ -6,9 +6,9 @@ Read it before editing. Human-facing build and runtime details live in
 
 ## Mission
 
-Codex Web Terminal exposes the real Codex CLI PTY through an authenticated web
-interface. It must preserve terminal semantics rather than reimplement the
-Codex UI.
+Codex Web Terminal exposes real Codex CLI, Claude Code, and Google Antigravity
+CLI (`agy`) PTYs through an authenticated web interface. It must preserve
+terminal semantics rather than reimplement any agent UI.
 
 The most important properties are:
 
@@ -19,6 +19,7 @@ The most important properties are:
 - Windows and Unix command launch remain independently correct;
 - a browser disconnect never terminates a managed PTY;
 - production changes do not silently replace or restart a live server.
+- agent discovery is read-only and never installs or updates host software.
 
 ## Repository map
 
@@ -45,6 +46,8 @@ The most important properties are:
 │   ├── build.sh               Linux production package
 │   ├── run.sh                 Linux launcher
 │   ├── fixtures/              Deterministic, synthetic demo PTY
+│   ├── agent-catalog-regression.py
+│   ├── android-ime-input-regression.py
 │   ├── desktop-slash-regression.py
 │   ├── mobile-codex-smoke.py  Browser/mobile smoke test
 │   ├── mobile-resize-regression.py
@@ -53,6 +56,7 @@ The most important properties are:
 │   ├── Cargo.toml
 │   ├── Cargo.lock
 │   ├── src/
+│   │   ├── agents.rs          Agent discovery and install-guidance catalog
 │   │   ├── auth.rs            Token validation, throttling, Origin checks
 │   │   ├── config.rs          CLI/environment parsing and static asset lookup
 │   │   ├── main.rs            Startup, listener, URLs, graceful Ctrl+C path
@@ -69,11 +73,13 @@ The most important properties are:
     ├── package-lock.json
     ├── vite.config.ts
     └── src/
+        ├── AgentPicker.tsx    Responsive agent discovery/start dialog
         ├── App.tsx            Main UI, sessions, settings, lifecycle actions
         ├── api.ts             Token/session storage and HTTP API client
         ├── sessions/          Header session tabs and navigation helpers
         ├── terminal/
         │   ├── TerminalView.tsx
+        │   ├── androidImeGuard.ts
         │   ├── MobileToolbar.tsx
         │   ├── mobileKeys.ts
         │   ├── mobileResize.ts
@@ -126,6 +132,31 @@ Unix:
 
 Do not unify these paths through a generic shell command string. The command
 configuration intentionally rejects arbitrary shell expressions.
+Optional Claude and AGY dangerous-mode switches append only the fixed upstream
+`--dangerously-skip-permissions` argument. Unix and Windows `cmd` launches keep
+it as a distinct process argument. The Windows PowerShell wrapper must encode
+each fixed argument as an independently single-quoted literal with embedded
+quotes escaped. Never accept executable arguments from the browser API.
+
+Agent auto-detection is also a platform boundary:
+
+- it probes fixed executable names and documented per-user locations;
+- it runs `--version` directly with bounded output and a timeout;
+- an explicit command override is authoritative and must not silently fall
+  back to another executable;
+- `--no-agent-auto-detect` disables optional discovery without changing
+  explicit profiles or validation of the primary profile;
+- a missing or misconfigured CLI remains visible as catalog metadata, but is
+  never offered as a runnable session profile;
+- detection, **Refresh**, and **Check again** are read-only; they do not run an
+  installer, updater, login flow, package manager, shell expression, or
+  privileged command.
+
+Installation guidance returned by the backend must be static, platform-specific
+metadata from an allowlist. The browser may display or copy that guidance, but
+must never supply a command or URL for the host to execute. Installation and
+updates happen manually on the machine running `codex-web`, under its operating
+system account.
 
 Any change to command discovery, `ShellKind`, `ResolvedCodex`, `pty_command`,
 preflight, PTY startup, or process termination requires:
@@ -142,12 +173,14 @@ preflight, PTY startup, or process termination requires:
 - `sessionId` identifies one PTY generation and changes on restart.
 - Output from an old generation must never be appended to the active buffer.
 - A browser attach changes only the displayed session.
-- A managed Codex child must not inherit the server's `CODEX_THREAD_ID`; each
-  new terminal must start independently even when the server was launched from
-  inside another Codex session.
+- Managed children and version probes must not inherit the parent-session
+  markers `CODEX_THREAD_ID` or `CLAUDECODE`; each terminal must start
+  independently even when the server was launched from another agent session.
+  Do not remove provider credentials or unrelated environment variables.
 - When `--new-session-command` is configured, the primary terminal uses
-  `--command` and every terminal created with **New** uses the distinct new
-  session command. Both commands follow the same platform resolution and
+  `--command`; **New** uses the distinct new-session command only when the
+  primary agent is selected. Other agent cards use their own explicit override
+  or default command. All commands follow the same platform resolution and
   preflight rules.
 - Reconnect changes only the WebSocket attachment.
 - Restart terminates and recreates the selected PTY.
@@ -199,6 +232,8 @@ where the required browser tooling is available.
 - Do not add public-tunnel or router-port-forward automation.
 - Do not log request URLs because the first URL contains the token.
 - Do not log terminal input, output, or Codex credentials.
+- Do not add silent browser-triggered CLI installation or update. Installing a
+  host executable is a separate, security-sensitive operator action.
 - Startup stdout intentionally prints the authenticated URL; document that
   redirected stdout or a service journal will retain this credential.
 - Any remote-access documentation must prefer loopback or Tailscale and explain
@@ -264,6 +299,12 @@ Documentation must reflect the current source and the latest verified
 Windows/Linux behavior in the same commit. Recheck commands, versions,
 platform claims, package layouts, UI labels, and limitations; do not copy
 stale information forward.
+
+Agent installation and update commands are time-sensitive external facts.
+Before changing them, verify the current official OpenAI, Anthropic, and Google
+documentation. Never infer a package name, download URL, checksum, or
+permission flag from memory. Keep manual-install guidance separate from
+read-only auto-detection.
 
 Search for stale platform-specific text:
 
@@ -343,6 +384,8 @@ A change is complete only when:
    changed.
 5. Documentation contains current, verified information and matches the actual
    commands, versions, behavior, supported platforms, and package layout.
+   Changes to agent discovery, catalog metadata, install guidance, or launch
+   arguments are documented and validated on both Windows and Linux.
 6. No secrets, generated artifacts, or unrelated changes are staged.
 7. Live services created for testing are stopped unless the user asked to keep
    them running.

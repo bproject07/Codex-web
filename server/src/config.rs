@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
+use serde::{Deserialize, Serialize};
 
 const MAX_PROJECT_PATH_LENGTH: usize = 32_767;
 const MAX_COMMAND_LENGTH: usize = 1_024;
@@ -19,11 +20,31 @@ pub enum ShellKind {
     Cmd,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentKind {
+    Codex,
+    Claude,
+    Agy,
+}
+
+impl AgentKind {
+    pub const ALL: [Self; 3] = [Self::Codex, Self::Claude, Self::Agy];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+            Self::Agy => "AGY",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "codex-web",
     version,
-    about = "Expose the real Codex CLI terminal through a local web interface"
+    about = "Expose real Codex, Claude, and AGY CLI terminals through a local web interface"
 )]
 pub struct CliArgs {
     /// Address to bind. Use 0.0.0.0 only on a trusted network.
@@ -34,11 +55,11 @@ pub struct CliArgs {
     #[arg(long, env = "CODEX_WEB_PORT", default_value_t = 8787)]
     pub port: u16,
 
-    /// Fixed working directory in which Codex will run.
+    /// Fixed working directory in which every agent CLI will run.
     #[arg(long = "project", env = "CODEX_WEB_PROJECT_DIR", default_value = ".")]
     pub project_dir: PathBuf,
 
-    /// Windows shell used to launch an executable Codex entry point; ignored on non-Windows hosts.
+    /// Windows shell used to launch executable CLI entry points; ignored on non-Windows hosts.
     #[arg(
         long,
         env = "CODEX_WEB_SHELL",
@@ -47,13 +68,54 @@ pub struct CliArgs {
     )]
     pub shell: ShellKind,
 
-    /// Codex executable name or path. Shell expressions are not accepted.
-    #[arg(long, env = "CODEX_WEB_COMMAND", default_value = "codex")]
-    pub command: String,
+    /// Primary agent executable name or path. Defaults to the selected agent command.
+    #[arg(long, env = "CODEX_WEB_COMMAND")]
+    pub command: Option<String>,
+
+    /// Agent represented by --command and the primary terminal.
+    #[arg(
+        long,
+        env = "CODEX_WEB_PRIMARY_AGENT",
+        value_enum,
+        default_value = "codex"
+    )]
+    pub primary_agent: AgentKind,
 
     /// Executable used only for terminals created with New. Defaults to --command.
     #[arg(long, env = "CODEX_WEB_NEW_SESSION_COMMAND")]
     pub new_session_command: Option<String>,
+
+    /// Authoritative Codex CLI executable override for the Codex profile.
+    #[arg(long, env = "CODEX_WEB_CODEX_COMMAND")]
+    pub codex_command: Option<String>,
+
+    /// Authoritative Claude CLI executable override for the Claude profile.
+    #[arg(long, env = "CODEX_WEB_CLAUDE_COMMAND")]
+    pub claude_command: Option<String>,
+
+    /// Start Claude with all permission checks bypassed.
+    #[arg(
+        long,
+        env = "CODEX_WEB_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS",
+        default_value_t = false
+    )]
+    pub claude_dangerously_skip_permissions: bool,
+
+    /// Authoritative Google Antigravity CLI executable override for the AGY profile.
+    #[arg(long, env = "CODEX_WEB_AGY_COMMAND")]
+    pub agy_command: Option<String>,
+
+    /// Disable discovery of agent CLIs that do not have an explicit command override.
+    #[arg(long, env = "CODEX_WEB_NO_AGENT_AUTO_DETECT", default_value_t = false)]
+    pub no_agent_auto_detect: bool,
+
+    /// Start AGY with all tool permission requests auto-approved.
+    #[arg(
+        long,
+        env = "CODEX_WEB_AGY_DANGEROUSLY_SKIP_PERMISSIONS",
+        default_value_t = false
+    )]
+    pub agy_dangerously_skip_permissions: bool,
 
     /// Authentication token. A secure ephemeral token is generated when omitted.
     #[arg(long, env = "CODEX_WEB_TOKEN", hide_env_values = true)]
@@ -74,8 +136,15 @@ pub struct Config {
     pub port: u16,
     pub project_dir: PathBuf,
     pub shell: ShellKind,
-    pub command: String,
+    pub command: Option<String>,
+    pub primary_agent: AgentKind,
     pub new_session_command: Option<String>,
+    pub codex_command: Option<String>,
+    pub claude_command: Option<String>,
+    pub claude_dangerously_skip_permissions: bool,
+    pub agy_command: Option<String>,
+    pub no_agent_auto_detect: bool,
+    pub agy_dangerously_skip_permissions: bool,
     pub token: Option<String>,
     pub no_open_browser: bool,
     pub log_level: String,
@@ -96,15 +165,41 @@ impl Config {
             &args.project_dir.to_string_lossy(),
             MAX_PROJECT_PATH_LENGTH,
         )?;
-        validate_nonempty_length("command", &args.command, MAX_COMMAND_LENGTH)?;
+        if let Some(command) = args.command.as_deref() {
+            validate_nonempty_length("command", command, MAX_COMMAND_LENGTH)?;
+        }
         if let Some(command) = args.new_session_command.as_deref() {
             validate_nonempty_length("new session command", command, MAX_COMMAND_LENGTH)?;
         }
+        if let Some(command) = args.codex_command.as_deref() {
+            validate_nonempty_length("Codex command", command, MAX_COMMAND_LENGTH)?;
+        }
+        if let Some(command) = args.claude_command.as_deref() {
+            validate_nonempty_length("Claude command", command, MAX_COMMAND_LENGTH)?;
+        }
+        if let Some(command) = args.agy_command.as_deref() {
+            validate_nonempty_length("AGY command", command, MAX_COMMAND_LENGTH)?;
+        }
         validate_nonempty_length("log level", &args.log_level, MAX_LOG_LEVEL_LENGTH)?;
 
-        if args.command.chars().any(|character| character == '\0')
+        if args
+            .command
+            .as_deref()
+            .is_some_and(|command| command.chars().any(|character| character == '\0'))
             || args
                 .new_session_command
+                .as_deref()
+                .is_some_and(|command| command.chars().any(|character| character == '\0'))
+            || args
+                .codex_command
+                .as_deref()
+                .is_some_and(|command| command.chars().any(|character| character == '\0'))
+            || args
+                .claude_command
+                .as_deref()
+                .is_some_and(|command| command.chars().any(|character| character == '\0'))
+            || args
+                .agy_command
                 .as_deref()
                 .is_some_and(|command| command.chars().any(|character| character == '\0'))
         {
@@ -129,7 +224,14 @@ impl Config {
             project_dir,
             shell: args.shell,
             command: args.command,
+            primary_agent: args.primary_agent,
             new_session_command: args.new_session_command,
+            codex_command: args.codex_command,
+            claude_command: args.claude_command,
+            claude_dangerously_skip_permissions: args.claude_dangerously_skip_permissions,
+            agy_command: args.agy_command,
+            no_agent_auto_detect: args.no_agent_auto_detect,
+            agy_dangerously_skip_permissions: args.agy_dangerously_skip_permissions,
             token: args.token,
             no_open_browser: args.no_open_browser,
             log_level: args.log_level,
@@ -198,8 +300,15 @@ mod tests {
             port: 8787,
             project_dir: project_dir.to_path_buf(),
             shell: ShellKind::Powershell,
-            command: "codex".to_owned(),
+            command: None,
+            primary_agent: AgentKind::Codex,
             new_session_command: None,
+            codex_command: None,
+            claude_command: None,
+            claude_dangerously_skip_permissions: false,
+            agy_command: None,
+            no_agent_auto_detect: false,
+            agy_dangerously_skip_permissions: false,
             token: Some("0123456789abcdef".to_owned()),
             no_open_browser: true,
             log_level: "info".to_owned(),
@@ -216,8 +325,11 @@ mod tests {
             dunce::canonicalize(directory.path()).expect("canonical path")
         );
         assert_eq!(config.port, 8787);
-        assert_eq!(config.command, "codex");
+        assert_eq!(config.command, None);
+        assert_eq!(config.primary_agent, AgentKind::Codex);
         assert_eq!(config.new_session_command, None);
+        assert!(!config.claude_dangerously_skip_permissions);
+        assert!(!config.agy_dangerously_skip_permissions);
     }
 
     #[test]
@@ -244,12 +356,27 @@ mod tests {
     fn accepts_a_distinct_new_session_command() {
         let directory = tempfile::tempdir().expect("temp directory");
         let mut args = args_for(directory.path());
-        args.command = "resume-current".to_owned();
+        args.command = Some("resume-current".to_owned());
         args.new_session_command = Some("codex".to_owned());
 
         let config = Config::from_args(args).expect("valid commands");
 
-        assert_eq!(config.command, "resume-current");
+        assert_eq!(config.command.as_deref(), Some("resume-current"));
         assert_eq!(config.new_session_command.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn accepts_explicit_dangerous_permission_flags() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let mut args = args_for(directory.path());
+        args.claude_command = Some("claude".to_owned());
+        args.claude_dangerously_skip_permissions = true;
+        args.agy_command = Some("agy".to_owned());
+        args.agy_dangerously_skip_permissions = true;
+
+        let config = Config::from_args(args).expect("valid agent permission flags");
+
+        assert!(config.claude_dangerously_skip_permissions);
+        assert!(config.agy_dangerously_skip_permissions);
     }
 }
