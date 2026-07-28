@@ -68,6 +68,7 @@ export interface AgentCatalogOptions {
 
 export interface HealthSnapshot {
   status: "ok";
+  serverVersion: string | null;
   codexInstalled: boolean;
   sessionRunning: boolean;
   connectedClients: number;
@@ -102,11 +103,13 @@ export interface FilesystemRoots {
 
 export class ApiError extends Error {
   readonly status: number;
+  readonly contentType: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, contentType = "") {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.contentType = contentType.toLowerCase();
   }
 }
 
@@ -126,8 +129,7 @@ export function consumeTokenFromUrl(): string {
 
   if (urlToken && urlToken.length <= 512) {
     writeSessionToken(urlToken);
-    url.searchParams.delete("token");
-    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    removeTokenFromAddress(url, false);
     return urlToken;
   }
 
@@ -156,6 +158,22 @@ export function clearSessionToken(): void {
     window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
   } catch {
     // Nothing else is required when storage is unavailable.
+  }
+  removeTokenFromAddress(new URL(window.location.href), true);
+}
+
+function removeTokenFromAddress(url: URL, navigateOnFailure: boolean): void {
+  if (!url.searchParams.has("token")) {
+    return;
+  }
+  url.searchParams.delete("token");
+  const cleanAddress = `${url.pathname}${url.search}${url.hash}`;
+  try {
+    window.history.replaceState(null, "", cleanAddress);
+  } catch {
+    if (navigateOnFailure) {
+      window.location.replace(cleanAddress);
+    }
   }
 }
 
@@ -226,6 +244,13 @@ export async function getHealth(
 
   return {
     status: "ok",
+    serverVersion:
+      typeof health.serverVersion === "string" &&
+      health.serverVersion.length > 0 &&
+      health.serverVersion.length <= 128 &&
+      /^[0-9A-Za-z][0-9A-Za-z.+_-]*$/.test(health.serverVersion)
+        ? health.serverVersion
+        : null,
     codexInstalled: health.codexInstalled,
     sessionRunning: health.sessionRunning,
     connectedClients: health.connectedClients,
@@ -430,7 +455,7 @@ export async function createSession(
     if (endpointIsUnavailable(error)) {
       throw new ApiError(
         404,
-        "Multiple sessions require the updated Codex Web Terminal server.",
+        "Creating another session is unavailable. The browser UI and server may be from different releases, or an older server may still be using this port. Restart with the executable and web folder from the same release, then reload.",
       );
     }
     throw error;
@@ -811,11 +836,23 @@ function normalizeHttpsUrl(value: string): string {
 }
 
 function endpointIsUnavailable(error: unknown): boolean {
-  return (
-    (error instanceof ApiError && (error.status === 404 || error.status === 405)) ||
-    (error instanceof ApiPayloadError &&
-      error.contentType.includes("text/html"))
+  if (error instanceof ApiPayloadError) {
+    return error.contentType.includes("text/html");
+  }
+  if (!(error instanceof ApiError)) {
+    return false;
+  }
+  if (error.status === 405) {
+    return true;
+  }
+  if (error.status !== 404) {
+    return false;
+  }
+
+  const genericRouteError = /^(?:route\s+)?not found$/i.test(
+    error.message.trim(),
   );
+  return !error.contentType.includes("application/json") || genericRouteError;
 }
 
 export async function apiRequest<T>(
@@ -836,6 +873,7 @@ export async function apiRequest<T>(
 
   if (!response.ok) {
     let message = `Request failed with HTTP ${response.status}`;
+    const contentType = response.headers.get("Content-Type") ?? "";
     try {
       const body = (await response.json()) as { error?: string };
       if (body.error) {
@@ -844,7 +882,7 @@ export async function apiRequest<T>(
     } catch {
       // Keep the status-based message for empty and non-JSON error responses.
     }
-    throw new ApiError(response.status, message);
+    throw new ApiError(response.status, message, contentType);
   }
 
   if (response.status === 204) {

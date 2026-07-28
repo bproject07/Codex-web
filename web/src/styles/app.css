@@ -407,6 +407,20 @@ button:disabled {
   display: none;
 }
 
+.header-update-badge {
+  display: inline-grid;
+  width: 1rem;
+  height: 1rem;
+  margin-left: 0.2rem;
+  place-items: center;
+  border-radius: 999px;
+  background: #5a9cff;
+  color: #07111f;
+  font-size: 0.7rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
 .status-dot {
   width: 0.48rem;
   height: 0.48rem;
@@ -1947,6 +1961,134 @@ button:disabled {
   height: 1.1rem;
 }
 
+.update-settings {
+  display: grid;
+  gap: 0.75rem;
+  border-top: 1px solid #343942;
+  padding-top: 1rem;
+}
+
+.update-settings__heading,
+.update-settings__status,
+.update-settings__actions,
+.update-settings__progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.update-settings__heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.2rem;
+}
+
+.update-settings__heading strong,
+.update-settings__status strong {
+  color: #dbe2ec;
+  font-size: 0.82rem;
+}
+
+.update-settings__heading span,
+.update-settings__status span,
+.update-settings__actions time {
+  color: #929cab;
+  font-size: 0.72rem;
+}
+
+.update-settings__heading .update-settings__badge {
+  flex: none;
+  border: 1px solid #477fc3;
+  border-radius: 999px;
+  padding: 0.18rem 0.45rem;
+  background: #142d4c;
+  color: #a9d2ff;
+  font-size: 0.68rem;
+  font-weight: 750;
+}
+
+.update-settings__status strong {
+  flex: none;
+  color: #8fbfff;
+}
+
+.update-settings__progress progress {
+  width: 100%;
+  height: 0.55rem;
+  accent-color: #5a9cff;
+}
+
+.update-settings__progress span {
+  min-width: 2.5rem;
+  color: #b9c9dc;
+  font: 0.7rem "Cascadia Mono", Consolas, monospace;
+  text-align: right;
+}
+
+.update-settings__error,
+.update-settings__reason,
+.update-settings__confirmation p {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.update-settings__error {
+  color: #ffabab;
+}
+
+.update-settings__reason {
+  color: #aeb6c2;
+}
+
+.update-settings__release {
+  width: fit-content;
+  color: #8fbfff;
+  font-size: 0.75rem;
+}
+
+.update-settings__confirmation {
+  display: grid;
+  gap: 0.65rem;
+  border: 1px solid #6d5934;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  background: #2d2618;
+}
+
+.update-settings__confirmation p {
+  color: #ffe0a3;
+}
+
+.update-settings__confirmation .checkbox-row {
+  align-items: flex-start;
+  color: #e5e8ec;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.update-settings__confirmation .checkbox-row input {
+  flex: none;
+  margin-top: 0.08rem;
+}
+
+.update-settings__apply {
+  width: 100%;
+  border-color: #4e7db8;
+  background: #193a60;
+  color: #e5f2ff;
+}
+
+.update-settings__actions {
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.update-settings__actions time {
+  text-align: right;
+}
+
 .diagnostics-settings {
   display: flex;
   flex-wrap: wrap;
@@ -2195,6 +2337,27 @@ button:disabled {
   .workspace-picker,
   .peer-composer {
     padding: 0;
+  }
+
+  .header-update-badge {
+    width: 0.9rem;
+    height: 0.9rem;
+    margin-left: 0.1rem;
+    font-size: 0.62rem;
+  }
+
+  .update-settings__status,
+  .update-settings__actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .update-settings__actions button {
+    width: 100%;
+  }
+
+  .update-settings__actions time {
+    text-align: left;
   }
 
   .peer-composer__header {

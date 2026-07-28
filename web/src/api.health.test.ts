@@ -3,6 +3,7 @@ import { ApiError, getHealth } from "./api";
 
 const HEALTH = {
   status: "ok",
+  serverVersion: "0.2.0",
   codexInstalled: true,
   sessionRunning: true,
   connectedClients: 1,
@@ -53,4 +54,14 @@ describe("health API", () => {
       });
     },
   );
+
+  it("keeps capacity checks compatible when an older server omits its version", async () => {
+    const { serverVersion: _serverVersion, ...legacyHealth } = HEALTH;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(legacyHealth)));
+
+    await expect(getHealth("0123456789abcdef")).resolves.toEqual({
+      ...legacyHealth,
+      serverVersion: null,
+    });
+  });
 });

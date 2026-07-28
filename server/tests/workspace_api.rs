@@ -13,11 +13,12 @@ use axum::{
 use codex_web_terminal::{
     agents::build_agent_profiles,
     auth::AuthState,
-    config::{AgentKind, Config, DEFAULT_MAX_SESSIONS, ShellKind},
+    config::{AgentKind, Config, DEFAULT_MAX_SESSIONS, ShellKind, UpdatePolicy},
     filesystem::{DirectoryBrowser, encode_directory_id},
     peer::PeerBroker,
     registry::SessionRegistry,
     routes::{AppState, build_router},
+    updater::UpdateManager,
     workspaces::WorkspaceStore,
 };
 use serde_json::{Value, json};
@@ -40,6 +41,30 @@ async fn health_reports_the_configured_session_capacity() {
 
     assert_eq!(health["sessionCount"], 1);
     assert_eq!(health["maxSessions"], 7);
+    assert_eq!(health["serverVersion"], env!("CARGO_PKG_VERSION"));
+}
+
+#[tokio::test]
+async fn update_status_is_authenticated_and_reports_disabled_policy() {
+    let fixture = tempfile::tempdir().expect("temporary project");
+    let app = test_router(fixture.path()).await;
+
+    let unauthorized = app
+        .clone()
+        .oneshot(request("GET", "/api/update", None, false))
+        .await
+        .expect("unauthorized response");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let status = json_response(
+        app.oneshot(request("GET", "/api/update", None, true))
+            .await
+            .expect("update status response"),
+    )
+    .await;
+    assert_eq!(status["state"], "disabled");
+    assert_eq!(status["currentVersion"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(status["installSupported"], false);
 }
 
 #[tokio::test]
@@ -567,6 +592,7 @@ async fn test_router_with_options(
         token: None,
         no_open_browser: true,
         log_level: "info".to_owned(),
+        update_policy: UpdatePolicy::Off,
     });
     let profiles = build_agent_profiles(&config);
     let peers = PeerBroker::new(
@@ -580,6 +606,12 @@ async fn test_router_with_options(
         peers.clone(),
         max_sessions,
     );
+    let updates = UpdateManager::new(
+        state_dir.clone(),
+        UpdatePolicy::Off,
+        tokio::sync::mpsc::channel(1).0,
+    )
+    .expect("update manager");
     let state = AppState {
         config,
         auth: AuthState::new(TOKEN.to_owned()),
@@ -590,7 +622,9 @@ async fn test_router_with_options(
         workspaces: WorkspaceStore::open(state_dir)
             .await
             .expect("workspace store"),
+        updates,
         shutdown: CancellationToken::new(),
+        readiness_nonce: None,
     };
     (build_router(state, None), sessions, peers)
 }

@@ -83,10 +83,9 @@ pending write over the same limit is rejected before replacement.
 
 ## Supported versions
 
-Until the first stable tagged release is published, security fixes target the
-latest commit on `main`. After releases begin, the latest published release
-and the latest commit on `main` are supported; older releases, unofficial
-archives, and locally modified builds are not.
+Security fixes target the latest published release and the latest commit on
+`main`. Older releases, unofficial archives, and locally modified builds are
+not supported.
 
 Official release archives appear only on the repository's GitHub Releases
 page. Verify the matching `SHA256SUMS.txt` entry and GitHub artifact
@@ -104,6 +103,70 @@ Authenticode-signed yet and may show an unknown-publisher warning. A checksum
 protects transfer integrity and an attestation binds the archive to the
 repository workflow; neither makes an unreviewed version safe or grants the
 terminal fewer operating-system permissions.
+
+## Application update boundary
+
+Automatic checks use a compile-time fixed GitHub API endpoint for
+`bproject07/Codex-web`; the browser cannot provide a repository, URL, asset,
+checksum, path, command, or executable. Only a newer stable SemVer release
+whose GitHub metadata is published, immutable, and contains the exact native
+asset plus `SHA256SUMS.txt` is eligible. Both assets must be in the uploaded
+state, within bounded sizes, and expose valid SHA-256 metadata. The downloaded
+archive hash must match both GitHub metadata and the checksum file.
+
+Archive inspection happens before execution in a newly created private state
+directory. Absolute/traversal paths, backslashes, NUL/control characters,
+links, special files, duplicates, case collisions, unsafe Windows names,
+excessive entry counts, expanded sizes, and compression ratios are rejected.
+The package must contain the exact release marker, native x86-64 PE/ELF
+header, backend version, frontend, documentation, and target-bound license
+inventory.
+
+Installation is side-by-side under `<state-dir>/updates/releases`; it never
+overwrites the running executable and never elevates privileges. The operator
+must explicitly acknowledge termination of all PTYs and in-memory peer
+threads.
+
+The manually installed v0.2 executable is the persistent root supervisor and
+update trust anchor. It retains the same PID while it launches and monitors
+verified worker generations; a worker cannot create another supervisor. A
+worker may request the next generation only through its reserved exit status
+and a matching bounded `pending.json`. That file contains only schema,
+request ID, source version, and target version. Paths are derived from the
+private state directory. Tokens, URLs, commands, checksums, arguments, and
+environment values are never persisted in either update pointer. Pointer
+writes are private and atomic; invalid or stale pending state is quarantined
+instead of being interpreted as launch authority.
+
+The root passes the current token to a worker only in `CODEX_WEB_TOKEN`—not in
+worker argv, readiness URLs, JSON, update files, or logs—and the worker
+consumes and removes it from the inherited process environment before
+application threads start. If browser policy blocks `sessionStorage`, the
+browser's single post-update reload reuses the normal same-origin authenticated
+URL mechanism and immediately removes the token query again; it does not enter
+update state. For every launch the root also creates an unguessable readiness
+nonce and passes it only through the private worker environment. The worker
+consumes/removes that variable and returns the nonce only in its authenticated
+health response. The root accepts a generation only after direct authenticated
+local readiness, with system proxies disabled and a bounded response, reports
+both the expected server version and exact nonce. It then atomically changes
+the active pointer containing only the active and exact previous versions. On
+validation, launch, readiness, or pointer-commit failure, the candidate is
+terminated and waited for; the exact prior executable is started and must
+itself become ready while the active pointer remains unchanged.
+
+Worker-package updates cannot repair a vulnerability in the already running
+root supervisor or change its private worker/pending protocol. A release that
+changes that security boundary must require a manual full-archive launcher
+replacement. Operators must keep the configured bootstrap package protected
+and present; automatic release cleanup is limited to managed worker packages
+under the state directory.
+
+Only official archives contain `release-package.json`. Copying that marker,
+weakening the fixed repository/asset checks, accepting mutable releases, or
+making browser-triggered installation silent is a security-sensitive change.
+GitHub artifact attestation verification remains a recommended manual
+provenance step; checksum verification alone is not described as equivalent.
 
 ## Reporting a vulnerability
 

@@ -184,6 +184,49 @@ describe("terminal session API selection", () => {
     );
   });
 
+  it("preserves a current-server directory error instead of reporting an old server", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          { error: "The selected directory was not found." },
+          404,
+        ),
+      ),
+    );
+
+    const request = createSession(
+      "0123456789abcdef",
+      "codex",
+      "w1.bWlzc2luZw",
+    );
+
+    await expect(request).rejects.toMatchObject({
+      status: 404,
+      message: "The selected directory was not found.",
+    });
+  });
+
+  it("reports an outdated server when the session route itself is absent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("Not Found", {
+          status: 404,
+          headers: { "Content-Type": "text/plain" },
+        }),
+      ),
+    );
+
+    await expect(
+      createSession("0123456789abcdef", "codex"),
+    ).rejects.toMatchObject({
+      status: 404,
+      message:
+        "Creating another session is unavailable. The browser UI and server may be from different releases, or an older server may still be using this port. Restart with the executable and web folder from the same release, then reload.",
+    });
+  });
+
   it("falls back to Codex when the agent endpoint is unavailable", async () => {
     vi.stubGlobal(
       "fetch",

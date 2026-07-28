@@ -30,6 +30,21 @@ Report suspected vulnerabilities privately by following
   and absent from argv, responses, logs, diagnostics, and screenshots.
 - Do not hand-edit generated third-party license bundles or release archives.
   Dependency changes must pass the fail-closed target license generator.
+- Preserve the updater trust boundary: fixed official repository and exact
+  assets, immutable stable releases, bounded downloads, dual SHA-256 checks,
+  safe extraction, official-package marker, side-by-side activation, explicit
+  PTY termination confirmation, one stable root supervisor, authenticated
+  exact-version plus per-launch nonce readiness, readiness-gated pointer
+  change, and exact-prior rollback. Worker token/nonce environment values must
+  be consumed and removed before application threads start. `pending.json`
+  remains limited to request/source/target identity; never accept or persist
+  browser-supplied update URLs, paths, commands, checksums, tokens, or
+  environment values.
+- Do not make worker generations supervise one another or replace/delete the
+  bootstrap package. A change to the root/worker marker, pending/active schema,
+  reserved exit status, readiness contract, or supervisor security boundary
+  requires an explicit compatibility plan and may require a manual launcher
+  replacement.
 - Update documentation in the same change as behavior.
 
 ## Required validation
@@ -55,6 +70,11 @@ Changes to peer coordination must run `scripts/peer-review-regression.py`
 against the packaged Windows and Linux binaries. Dependency or release changes
 must also generate and review the Windows MSVC and Linux GNU
 `THIRD_PARTY_LICENSES` bundles.
+Updater changes additionally require malicious ZIP/TAR tests and
+`scripts/updater-supervisor-regression.py` on both operating systems. The
+native regression must cover a stable root PID, two sequential worker
+generations without a nested supervisor, active-pointer commit only after
+readiness, and exact-prior rollback after a failed candidate.
 
 Version tags and GitHub Releases are maintainer-owned. Contributors should
 change package versions only as part of an explicitly scoped release change

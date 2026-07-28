@@ -361,6 +361,7 @@ mod tests {
             token: None,
             no_open_browser: true,
             log_level: "info".to_owned(),
+            update_policy: crate::config::UpdatePolicy::Notify,
         }
     }
 

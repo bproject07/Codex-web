@@ -1,5 +1,6 @@
 use std::{
     env,
+    ffi::OsString,
     net::IpAddr,
     path::{Path, PathBuf},
 };
@@ -23,6 +24,15 @@ pub enum ShellKind {
     Cmd,
 }
 
+impl ShellKind {
+    pub const fn argument(self) -> &'static str {
+        match self {
+            Self::Powershell => "powershell",
+            Self::Cmd => "cmd",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
@@ -41,6 +51,20 @@ impl AgentKind {
             Self::Agy => "AGY",
         }
     }
+
+    pub const fn argument(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Agy => "agy",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum UpdatePolicy {
+    Off,
+    Notify,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -143,6 +167,15 @@ pub struct CliArgs {
     /// tracing filter, for example "info" or "codex_web_terminal=debug".
     #[arg(long, env = "CODEX_WEB_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
+
+    /// Check GitHub for official stable releases, or disable update checks.
+    #[arg(
+        long,
+        env = "CODEX_WEB_UPDATE_POLICY",
+        value_enum,
+        default_value = "notify"
+    )]
+    pub update_policy: UpdatePolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +198,7 @@ pub struct Config {
     pub token: Option<String>,
     pub no_open_browser: bool,
     pub log_level: String,
+    pub update_policy: UpdatePolicy,
 }
 
 impl Config {
@@ -265,8 +299,94 @@ impl Config {
             token: args.token,
             no_open_browser: args.no_open_browser,
             log_level: args.log_level,
+            update_policy: args.update_policy,
         })
     }
+
+    pub fn restart_arguments(&self) -> Vec<OsString> {
+        let mut arguments = vec![
+            OsString::from("--host"),
+            OsString::from(self.host.to_string()),
+            OsString::from("--port"),
+            OsString::from(self.port.to_string()),
+            OsString::from("--max-sessions"),
+            OsString::from(self.max_sessions.to_string()),
+            OsString::from("--project"),
+            self.project_dir.clone().into_os_string(),
+            OsString::from("--state-dir"),
+            self.state_dir.clone().into_os_string(),
+            OsString::from("--shell"),
+            OsString::from(self.shell.argument()),
+            OsString::from("--primary-agent"),
+            OsString::from(self.primary_agent.argument()),
+            OsString::from("--log-level"),
+            OsString::from(&self.log_level),
+            OsString::from("--update-policy"),
+            OsString::from(match self.update_policy {
+                UpdatePolicy::Off => "off",
+                UpdatePolicy::Notify => "notify",
+            }),
+            OsString::from("--no-open-browser"),
+        ];
+        append_optional_argument(&mut arguments, "--command", self.command.as_deref());
+        append_optional_argument(
+            &mut arguments,
+            "--new-session-command",
+            self.new_session_command.as_deref(),
+        );
+        append_optional_argument(
+            &mut arguments,
+            "--codex-command",
+            self.codex_command.as_deref(),
+        );
+        append_optional_argument(
+            &mut arguments,
+            "--claude-command",
+            self.claude_command.as_deref(),
+        );
+        append_optional_argument(&mut arguments, "--agy-command", self.agy_command.as_deref());
+        if self.claude_dangerously_skip_permissions {
+            arguments.push(OsString::from("--claude-dangerously-skip-permissions"));
+        }
+        if self.agy_dangerously_skip_permissions {
+            arguments.push(OsString::from("--agy-dangerously-skip-permissions"));
+        }
+        if self.no_agent_auto_detect {
+            arguments.push(OsString::from("--no-agent-auto-detect"));
+        }
+        arguments
+    }
+}
+
+fn append_optional_argument(arguments: &mut Vec<OsString>, name: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        arguments.push(OsString::from(name));
+        arguments.push(OsString::from(value));
+    }
+}
+
+pub fn bootstrap_state_directory() -> Result<PathBuf> {
+    let mut arguments = env::args_os().skip(1);
+    let mut command_line_value = None;
+    while let Some(argument) = arguments.next() {
+        if argument == "--state-dir" {
+            command_line_value = Some(
+                arguments
+                    .next()
+                    .context("--state-dir requires a directory value")?,
+            );
+            continue;
+        }
+        if let Some(text) = argument.to_str()
+            && let Some(value) = text.strip_prefix("--state-dir=")
+        {
+            command_line_value = Some(OsString::from(value));
+        }
+    }
+    if let Some(value) = command_line_value {
+        return resolve_state_directory(Some(PathBuf::from(value)));
+    }
+    resolve_state_directory(env::var_os("CODEX_WEB_STATE_DIR").map(PathBuf::from))
 }
 
 fn resolve_state_directory(configured: Option<PathBuf>) -> Result<PathBuf> {
@@ -412,6 +532,7 @@ mod tests {
             token: Some("0123456789abcdef".to_owned()),
             no_open_browser: true,
             log_level: "info".to_owned(),
+            update_policy: UpdatePolicy::Notify,
         }
     }
 
@@ -432,6 +553,7 @@ mod tests {
         assert_eq!(config.new_session_command, None);
         assert!(!config.claude_dangerously_skip_permissions);
         assert!(!config.agy_dangerously_skip_permissions);
+        assert_eq!(config.update_policy, UpdatePolicy::Notify);
     }
 
     #[test]
@@ -526,5 +648,34 @@ mod tests {
         assert!(config.state_dir.is_absolute());
         assert!(config.state_dir.ends_with("codex-web-state"));
         assert!(!config.state_dir.exists());
+    }
+
+    #[test]
+    fn restart_arguments_preserve_effective_settings_but_not_the_token() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let mut args = args_for(directory.path());
+        args.command = Some("codex-custom".to_owned());
+        args.claude_dangerously_skip_permissions = true;
+        let config = Config::from_args(args).expect("valid config");
+
+        let arguments = config
+            .restart_arguments()
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(arguments.windows(2).any(|pair| pair == ["--port", "8787"]));
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["--command", "codex-custom"])
+        );
+        assert!(
+            arguments
+                .iter()
+                .any(|value| value == "--claude-dangerously-skip-permissions")
+        );
+        assert!(!arguments.iter().any(|value| value == "--token"));
+        assert!(!arguments.iter().any(|value| value == "0123456789abcdef"));
     }
 }

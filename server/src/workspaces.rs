@@ -398,28 +398,50 @@ async fn quarantine_invalid_state(state_file: &Path) -> Result<(), WorkspaceErro
 }
 
 async fn prepare_state_directory(path: &Path) -> Result<(), WorkspaceError> {
-    validate_state_directory_path(path)?;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || prepare_state_directory_sync(&path))
+        .await
+        .map_err(WorkspaceError::Join)?
+}
 
-    match tokio::fs::symlink_metadata(path).await {
+pub fn prepare_state_directory_sync(path: &Path) -> Result<(), WorkspaceError> {
+    validate_state_directory_path(path)?;
+    validate_path_components_are_regular(path)?;
+
+    match std::fs::symlink_metadata(path) {
         Ok(metadata) => validate_existing_state_directory(path, &metadata),
         Err(error) if error.kind() == ErrorKind::NotFound => {
             let parent = path.parent().ok_or(WorkspaceError::UnsafeStateLocation(
                 "the state directory must have a parent",
             ))?;
-            tokio::fs::create_dir_all(parent).await?;
-            let create_path = path.to_path_buf();
-            match tokio::task::spawn_blocking(move || create_private_directory(&create_path)).await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) if error.kind() == ErrorKind::AlreadyExists => {}
-                Ok(Err(error)) => return Err(WorkspaceError::Io(error)),
-                Err(error) => return Err(WorkspaceError::Join(error)),
+            std::fs::create_dir_all(parent)?;
+            match create_private_directory(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(WorkspaceError::Io(error)),
             }
-            let metadata = tokio::fs::symlink_metadata(path).await?;
+            validate_path_components_are_regular(path)?;
+            let metadata = std::fs::symlink_metadata(path)?;
             validate_existing_state_directory(path, &metadata)
         }
         Err(error) => Err(WorkspaceError::Io(error)),
     }
+}
+
+fn validate_path_components_are_regular(path: &Path) -> Result<(), WorkspaceError> {
+    for ancestor in path.ancestors() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) if is_link_or_reparse(&metadata) => {
+                return Err(WorkspaceError::UnsafeStateLocation(
+                    "the state directory path must not contain symlinks or reparse points",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        }
+    }
+    Ok(())
 }
 
 fn validate_state_directory_path(path: &Path) -> Result<(), WorkspaceError> {
@@ -1083,6 +1105,24 @@ mod tests {
                 & 0o777,
             0o700
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn state_directory_parent_symlinks_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().expect("temporary state");
+        let target_parent = fixture.path().join("target-parent");
+        create_private_test_directory(&target_parent);
+        let linked_parent = fixture.path().join("linked-parent");
+        symlink(&target_parent, &linked_parent).expect("create parent symlink");
+
+        assert!(matches!(
+            WorkspaceStore::open(linked_parent.join("state")).await,
+            Err(WorkspaceError::UnsafeStateLocation(_))
+        ));
+        assert!(!target_parent.join("state").exists());
     }
 
     #[cfg(unix)]

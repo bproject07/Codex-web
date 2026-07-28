@@ -3,34 +3,15 @@ use std::{
     ffi::OsString,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Child as ProcessChild, Command, Stdio},
-    sync::mpsc::{self, Receiver},
-    thread,
-    time::{Duration, Instant},
+    process::Command,
+    time::Duration,
 };
 
 #[cfg(windows)]
 use std::ffi::OsStr;
-#[cfg(windows)]
-use std::os::windows::{io::AsRawHandle, process::CommandExt};
 
 use anyhow::{Context, Result, bail};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-#[cfg(windows)]
-use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
-    System::{
-        Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
-        },
-        JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, TerminateJobObject,
-        },
-        Threading::{CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
-    },
-};
 
 use crate::{
     config::{AgentKind, ShellKind},
@@ -39,6 +20,8 @@ use crate::{
         CWT_PEER_CAPABILITY_ENV, CWT_PEER_ENDPOINT_ENV, CWT_PEER_HELPER_ENV, CWT_SESSION_ID_ENV,
         CWT_TERMINAL_ID_ENV,
     },
+    process_tree::{BoundedProcessOptions, run_bounded},
+    update_bootstrap::{READINESS_NONCE_ENV, SUPERVISED_WORKER_ENV},
 };
 
 pub const INITIAL_COLS: u16 = 120;
@@ -57,7 +40,6 @@ const PEER_ENVIRONMENT_NAMES: [&str; 5] = [
 ];
 const VERSION_OUTPUT_LIMIT: usize = 16 * 1024;
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
-const VERSION_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone)]
 pub struct TerminalConfig {
@@ -256,6 +238,8 @@ fn remove_inherited_peer_environment(command: &mut CommandBuilder) {
 
 fn remove_server_secret_environment(command: &mut CommandBuilder) {
     command.env_remove(CODEX_WEB_TOKEN_ENV);
+    command.env_remove(SUPERVISED_WORKER_ENV);
+    command.env_remove(READINESS_NONCE_ENV);
 }
 
 fn resolve_command(command: &str, agent: AgentKind) -> Result<ResolvedCommand> {
@@ -540,94 +524,35 @@ fn probe_command_version(
     };
 
     configure_version_probe_environment(&mut command, agent);
-    command
-        .current_dir(project_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.current_dir(project_dir);
+    let output = run_bounded(
+        &mut command,
+        BoundedProcessOptions {
+            timeout: VERSION_PROBE_TIMEOUT,
+            stdout_limit: VERSION_OUTPUT_LIMIT,
+            stderr_limit: VERSION_OUTPUT_LIMIT,
+        },
+    )
+    .with_context(|| format!("failed to run `{} --version`", agent.label()))?;
 
-    #[cfg(windows)]
-    command.creation_flags(CREATE_SUSPENDED);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-
-        command.process_group(0);
-    }
-
-    let process_owner = ProbeProcessOwner::new()
-        .context("failed to create a bounded version-probe process group")?;
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to run `{} --version`", agent.label()))?;
-    if let Err(error) = process_owner.attach_and_start(&child) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error).context("failed to contain the version-probe process");
-    }
-
-    let stdout = child
-        .stdout
-        .take()
-        .context("failed to capture version command stdout")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("failed to capture version command stderr")?;
-    let stdout_receiver = spawn_bounded_output_reader(stdout);
-    let stderr_receiver = spawn_bounded_output_reader(stderr);
-
-    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| format!("failed to wait for `{} --version`", agent.label()))?
-        {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            process_owner.terminate(&mut child);
-            let _ = child.wait();
-            bail!("`{} --version` timed out", agent.label());
-        }
-        thread::sleep(VERSION_PROBE_POLL_INTERVAL);
-    };
-
-    let stdout = receive_bounded_output(&stdout_receiver, deadline);
-    let stderr = receive_bounded_output(&stderr_receiver, deadline);
-    let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
-        // A version command that exits while leaving descendants attached to
-        // its output streams must not bypass the overall probe deadline.
-        process_owner.terminate(&mut child);
-        bail!(
-            "`{} --version` did not close its output streams",
-            agent.label()
-        );
-    };
-
-    // `--version` must be side-effect free. Clean up any descendant that may
-    // have detached after closing the inherited output streams.
-    process_owner.terminate(&mut child);
-
-    if !status.success() {
+    if !output.status.success() {
         #[cfg(windows)]
         bail!(
             "`{} --version` failed with status {}. Verify the CLI installation and PowerShell execution policy.",
             agent.label(),
-            status,
+            output.status,
         );
 
         #[cfg(not(windows))]
         bail!(
             "`{} --version` failed with status {}. Verify the CLI installation and executable permissions.",
             agent.label(),
-            status,
+            output.status,
         );
     }
 
-    sanitized_version(&stdout)
-        .or_else(|| sanitized_version(&stderr))
+    sanitized_version(&output.stdout)
+        .or_else(|| sanitized_version(&output.stderr))
         .with_context(|| format!("`{} --version` returned no version text", agent.label()))
 }
 
@@ -635,7 +560,9 @@ fn configure_version_probe_environment(command: &mut Command, agent: AgentKind) 
     command
         .env_remove(CODEX_THREAD_ID_ENV)
         .env_remove(CLAUDE_NESTING_ENV)
-        .env_remove(CODEX_WEB_TOKEN_ENV);
+        .env_remove(CODEX_WEB_TOKEN_ENV)
+        .env_remove(SUPERVISED_WORKER_ENV)
+        .env_remove(READINESS_NONCE_ENV);
     for name in PEER_ENVIRONMENT_NAMES {
         command.env_remove(name);
     }
@@ -649,35 +576,6 @@ fn configure_version_probe_environment(command: &mut Command, agent: AgentKind) 
         }
         AgentKind::Codex => {}
     }
-}
-
-fn read_bounded_output(mut reader: impl Read) -> Vec<u8> {
-    let mut retained = Vec::with_capacity(VERSION_OUTPUT_LIMIT);
-    let mut buffer = [0_u8; 4096];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
-            Ok(length) => {
-                let remaining = VERSION_OUTPUT_LIMIT.saturating_sub(retained.len());
-                retained.extend_from_slice(&buffer[..length.min(remaining)]);
-            }
-        }
-    }
-    retained
-}
-
-fn spawn_bounded_output_reader(reader: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let _ = sender.send(read_bounded_output(reader));
-    });
-    receiver
-}
-
-fn receive_bounded_output(receiver: &Receiver<Vec<u8>>, deadline: Instant) -> Option<Vec<u8>> {
-    receiver
-        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        .ok()
 }
 
 fn sanitized_version(output: &[u8]) -> Option<String> {
@@ -763,161 +661,6 @@ fn valid_semver_identifiers(value: &str, reject_numeric_leading_zero: bool) -> b
                         .all(|character| character.is_ascii_digit())
                     && !valid_semver_numeric_identifier(identifier))
         })
-}
-
-struct ProbeProcessOwner {
-    #[cfg(windows)]
-    job: HANDLE,
-}
-
-impl ProbeProcessOwner {
-    fn new() -> Result<Self> {
-        #[cfg(windows)]
-        {
-            // SAFETY: null security attributes and name request a private job
-            // object with default ACLs. The returned handle is owned by Self.
-            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-            if job.is_null() {
-                return Err(std::io::Error::last_os_error()).context("CreateJobObjectW failed");
-            }
-
-            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            // SAFETY: `limits` has the exact layout and byte length required by
-            // JobObjectExtendedLimitInformation, and `job` is a valid handle.
-            let configured = unsafe {
-                SetInformationJobObject(
-                    job,
-                    JobObjectExtendedLimitInformation,
-                    std::ptr::from_ref(&limits).cast(),
-                    std::mem::size_of_val(&limits) as u32,
-                )
-            };
-            if configured == 0 {
-                let error = std::io::Error::last_os_error();
-                // SAFETY: this branch still owns the valid job handle.
-                unsafe {
-                    CloseHandle(job);
-                }
-                return Err(error).context("SetInformationJobObject failed");
-            }
-
-            Ok(Self { job })
-        }
-
-        #[cfg(not(windows))]
-        {
-            Ok(Self {})
-        }
-    }
-
-    fn attach_and_start(&self, child: &ProcessChild) -> Result<()> {
-        #[cfg(windows)]
-        {
-            // SAFETY: both handles are valid for the duration of this call.
-            let assigned = unsafe {
-                AssignProcessToJobObject(self.job, AsRawHandle::as_raw_handle(child) as HANDLE)
-            };
-            if assigned == 0 {
-                return Err(std::io::Error::last_os_error())
-                    .context("AssignProcessToJobObject failed");
-            }
-            resume_suspended_process(child.id())?;
-        }
-
-        #[cfg(not(windows))]
-        let _ = child;
-
-        Ok(())
-    }
-
-    fn terminate(&self, child: &mut ProcessChild) {
-        #[cfg(windows)]
-        {
-            // SAFETY: Self owns `job`. Terminating the job is bounded and
-            // includes descendants even after their direct parent exits.
-            let _ = unsafe { TerminateJobObject(self.job, 1) };
-        }
-
-        #[cfg(unix)]
-        {
-            // The version command starts in its own process group. A negative
-            // PID targets that exact group, including descendants.
-            if let Ok(process_group) = i32::try_from(child.id()) {
-                // SAFETY: kill receives the exact negative process-group
-                // identifier assigned immediately before spawn and a constant
-                // signal. Errors are handled by the direct child fallback.
-                let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
-            }
-        }
-
-        let _ = child.kill();
-    }
-}
-
-#[cfg(windows)]
-fn resume_suspended_process(process_id: u32) -> Result<()> {
-    // SAFETY: the snapshot handle is checked before use and closed on every
-    // path below.
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
-    if snapshot == INVALID_HANDLE_VALUE {
-        return Err(std::io::Error::last_os_error())
-            .context("CreateToolhelp32Snapshot failed while resuming probe");
-    }
-
-    let result = (|| {
-        let mut entry = THREADENTRY32 {
-            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
-            ..THREADENTRY32::default()
-        };
-        // A CREATE_SUSPENDED process has exactly its primary thread at this
-        // point; it cannot execute or create descendants until this succeeds.
-        let mut has_entry = unsafe { Thread32First(snapshot, &mut entry) } != 0;
-        while has_entry {
-            if entry.th32OwnerProcessID == process_id {
-                // SAFETY: the enumerated thread ID belongs to the suspended
-                // process and the returned handle is checked before use.
-                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
-                if thread.is_null() {
-                    return Err(std::io::Error::last_os_error())
-                        .context("OpenThread failed while resuming probe");
-                }
-                // SAFETY: `thread` grants THREAD_SUSPEND_RESUME and is valid.
-                let previous_count = unsafe { ResumeThread(thread) };
-                let resume_error = (previous_count == u32::MAX).then(std::io::Error::last_os_error);
-                // SAFETY: this scope owns the thread handle.
-                unsafe {
-                    CloseHandle(thread);
-                }
-                if let Some(error) = resume_error {
-                    return Err(error).context("ResumeThread failed for version probe");
-                }
-                return Ok(());
-            }
-            // SAFETY: snapshot and entry remain valid for enumeration.
-            has_entry = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
-        }
-
-        bail!("suspended version-probe primary thread was not found")
-    })();
-
-    // SAFETY: this function owns the valid snapshot handle.
-    unsafe {
-        CloseHandle(snapshot);
-    }
-    result
-}
-
-#[cfg(windows)]
-impl Drop for ProbeProcessOwner {
-    fn drop(&mut self) {
-        // Closing a kill-on-close job is the final fail-safe for all probe
-        // descendants, including processes that retained captured pipe handles.
-        // SAFETY: Self owns the handle and closes it exactly once.
-        unsafe {
-            CloseHandle(self.job);
-        }
-    }
 }
 
 #[cfg(windows)]
@@ -1147,7 +890,7 @@ mod command_tests {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use std::ffi::OsString;
+    use std::{ffi::OsString, time::Instant};
 
     use super::*;
 

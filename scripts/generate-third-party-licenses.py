@@ -27,21 +27,28 @@ ALLOWED_TARGETS = frozenset(
 REVIEWED_LICENSE_EXPRESSIONS = frozenset(
     {
         "(MIT OR Apache-2.0) AND Unicode-3.0",
+        "0BSD OR MIT OR Apache-2.0",
+        "Apache-2.0 AND ISC",
         "Apache-2.0",
         "Apache-2.0 OR BSL-1.0",
+        "Apache-2.0 OR ISC OR MIT",
         "Apache-2.0 OR MIT",
         "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
         "BSD-2-Clause OR Apache-2.0",
         "BSD-2-Clause OR Apache-2.0 OR MIT",
         "BSD-3-Clause",
+        "CDLA-Permissive-2.0",
         "CC0-1.0 OR MIT-0 OR Apache-2.0",
         "ISC",
         "MIT",
         "MIT AND BSD-3-Clause",
         "MIT OR Apache-2.0",
+        "MIT OR Apache-2.0 OR Zlib",
+        "MIT OR Zlib OR Apache-2.0",
         "MPL-2.0",
         "Unicode-3.0",
         "Unlicense OR MIT",
+        "Zlib OR Apache-2.0 OR MIT",
     }
 )
 LICENSE_NAME_PREFIXES = (

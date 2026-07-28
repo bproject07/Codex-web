@@ -39,7 +39,9 @@ The most important properties are:
 ├── THIRD_PARTY_NOTICES.md     Dependency licensing and attribution
 ├── LICENSE
 ├── .github/
-│   ├── workflows/ci.yml       Windows/Linux continuous integration
+│   ├── workflows/
+│   │   ├── ci.yml             Windows/Linux continuous integration
+│   │   └── release.yml        Immutable, attested Windows/Linux releases
 │   └── ISSUE_TEMPLATE/        Privacy-safe issue forms
 ├── docs/
 │   └── screenshots/           Sanitized, reproducible product screenshots
@@ -55,12 +57,18 @@ The most important properties are:
 │   ├── mobile-codex-smoke.py  Browser/mobile smoke test
 │   ├── mobile-resize-regression.py
 │   ├── peer-review-regression.py  Native PTY/helper peer workflow
+│   ├── updater-supervisor-regression.py  Stable-root update/rollback fixture
+│   ├── generate-release-package-manifest.py  Updater package identity marker
 │   ├── generate-third-party-licenses.py  Release license/NOTICE gate
+│   ├── validate-release-archive.py  Bounded archive/layout/binary validation
+│   ├── verify-github-release.py  Exact immutable asset/digest verification
 │   ├── session-tabs-regression.py
 │   └── workspace-picker-regression.py  Auth/CWD/persistence/mobile regression
 ├── server/
 │   ├── Cargo.toml
 │   ├── Cargo.lock
+│   ├── examples/
+│   │   └── updater-supervisor-fixture.rs  Native update/rollback fixture
 │   ├── src/
 │   │   ├── agents.rs          Agent discovery and install-guidance catalog
 │   │   ├── auth.rs            Token validation, throttling, Origin checks
@@ -70,11 +78,16 @@ The most important properties are:
 │   │   ├── peer.rs            Bounded peer thread/turn state and capabilities
 │   │   ├── peer_cli.rs        Hidden loopback helper client
 │   │   ├── peer_routes.rs     Public workflow and private bridge routes
+│   │   ├── process_tree.rs    Cross-platform child-process containment
 │   │   ├── protocol.rs        Browser control-message limits and parsing
 │   │   ├── registry.rs        Configurable managed terminal capacity
 │   │   ├── routes.rs          Protected HTTP API and static serving
 │   │   ├── session.rs         PTY lifecycle, replay buffer, process management
 │   │   ├── terminal.rs        Command resolution and platform-specific PTY launch
+│   │   ├── update_bootstrap.rs  Stable-root worker activation and recovery
+│   │   ├── update_fs.rs       Hardened updater state and filesystem operations
+│   │   ├── update_manifest.rs Signed-package identity and target validation
+│   │   ├── updater.rs         Release discovery, staging, and activation API
 │   │   ├── websocket.rs       Authenticated attach, replay, input, live output
 │   │   └── workspaces.rs      Persistent Favorites and Recent workspace state
 │   └── tests/
@@ -88,8 +101,10 @@ The most important properties are:
         ├── AgentPicker.tsx    Responsive agent discovery/start dialog
         ├── App.tsx            Main UI, sessions, settings, lifecycle actions
         ├── api.ts             Token/session storage and HTTP API client
+        ├── api.token.test.ts  Token continuity and explicit-forget regression
         ├── peer/              Peer composer, state, API, and unit tests
         ├── sessions/          Header session tabs and navigation helpers
+        ├── updates/           Update UI, API model, state, and unit tests
         ├── workspaces/        Folder picker, model, DTOs, and unit tests
         ├── terminal/
         │   ├── TerminalView.tsx
@@ -486,6 +501,59 @@ dist-linux/codex-web
 
 The executable and `web` directory are one release unit. Do not deploy only
 one half.
+
+Official release archives also contain `release-package.json`. It is generated
+only by the release workflow after the complete package and license inventory
+exist; local `dist`/`dist-linux` output must remain ineligible for
+self-install. Application updates use the fixed official repository, exact
+target asset, immutable stable release metadata, GitHub and checksum-file
+SHA-256 agreement, bounded safe extraction, and side-by-side state-directory
+releases. Never accept a browser-supplied repository, URL, path, checksum,
+command, or executable. Never overwrite the running package.
+
+An update check is read-only. Applying an update requires explicit
+session-termination confirmation and orderly public/peer/PTY shutdown. The
+manually installed v0.2 executable is the stable root supervisor: its PID
+survives worker updates, it alone launches generations, and workers must never
+form a nested supervisor chain. Service `ExecStart` continues to name that
+bootstrap package; built-in cleanup must never replace or delete it.
+
+`pending.json` contains only schema, request ID, source version, and target
+version. Derive package paths from the private state directory. Never persist
+tokens, URLs, paths, commands, checksums, arguments, or environment values in
+pending/active state. Pass the current token to a worker only through
+`CODEX_WEB_TOKEN`, never argv or update files, and consume/remove it before
+application threads start. Pass a fresh per-launch readiness nonce through the
+private worker environment and consume/remove it there as well. A worker may
+request another generation only with the reserved exit status and a matching
+pending source. Pointer writes must remain private and atomic. Resume only a
+strict pending transition that matches the known active generation; clear an
+already committed pending record and quarantine malformed or stale state.
+
+Persist the matching pending transition while holding `update.lock`, release
+that lock before activation delivery, and only then begin orderly shutdown.
+The root must validate the deterministic package again, launch the candidate,
+and require direct authenticated local readiness with proxies disabled, a
+bounded response, the exact expected server version, and its per-launch nonce
+before atomically changing the pointer that names the active and exact previous
+versions. Failed validation, launch, readiness, or pointer commit must
+terminate/wait the candidate, keep the pointer unchanged, and restart the exact
+prior executable; rollback is successful only after the prior generation also
+passes readiness. Preserve one rollback worker release.
+
+Treat the root/worker marker, reserved exit status, pending/active schemas, and
+readiness exchange as a stable security protocol. A change may require a
+manual full-archive launcher replacement because ordinary worker updates
+cannot replace the running root. The v0.1-to-v0.2 transition is always manual.
+For systemd keep `ExecStart` on the bootstrap package with
+`Restart=on-failure`, `KillSignal=SIGINT`, and `KillMode=control-group`.
+
+Any change to this boundary requires malicious-archive tests and
+`scripts/updater-supervisor-regression.py` plus native packaged
+update/readiness/rollback validation on Windows and Linux. Assert that the root
+PID remains stable across two worker generations, no nested supervisor appears,
+active state commits only after readiness, and a failed candidate returns to
+the exact previous worker.
 
 The Windows `dist` and Linux `dist-linux` directories are ignored artifacts.
 Never infer that their contents belong in a commit.

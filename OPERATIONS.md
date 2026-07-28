@@ -153,6 +153,13 @@ Authenticode-signed yet and may trigger SmartScreen's unknown-publisher
 warning; checksum and provenance verification are required before choosing to
 run an unsigned archive. The Linux artifact is built on Ubuntu 22.04 for
 x86_64 glibc 2.35 or newer; it is not a musl or universal Linux build.
+Official packages also contain `release-package.json`. Do not copy that marker
+into a source build: it is generated only after the release workflow validates
+the complete target package. Before publication, the workflow requires the
+repository immutability policy and exact GitHub SHA-256 digests for the
+Windows archive, Linux archive, and checksum file. After publication, it
+requires the release itself to report immutable with the same exact asset
+names, sizes, and digests; an incomplete release is not updater-eligible.
 
 ## First local start on Windows
 
@@ -172,8 +179,8 @@ Start on loopback with an automatically generated token:
 ```
 
 The server prints an authenticated URL. Open the complete URL in the browser.
-The frontend moves the token into the current tab's `sessionStorage` and
-removes it from the visible address bar.
+The frontend normally moves the token into the current tab's `sessionStorage`
+and removes it from the visible address bar.
 
 ## First local start on Linux
 
@@ -235,9 +242,13 @@ Prefer an environment variable over a command-line token on multi-user
 machines because process command lines can be visible to other local users.
 For a service, store the token in a permission-restricted environment file.
 
-The browser stores the token only in the current tab's `sessionStorage`.
-Closing that tab or choosing **Forget token** removes the browser copy. It does
-not stop the server or change the server-side token.
+The browser normally stores the token only in the current tab's
+`sessionStorage`. If hardened browser settings reject that storage, the current
+page keeps it only in memory. A controlled application-update reload then uses
+the token in a same-origin query for one navigation and removes it from the
+visible address again when the frontend starts. Closing the tab or choosing
+**Forget token** removes the browser copy and any token query. It does not stop
+the server or change the server-side token.
 
 ## Workspace state and backup
 
@@ -353,6 +364,7 @@ browse to the new location.
 | `--token` | generated | Explicit authentication token |
 | `--no-open-browser` | off | Prevent automatic browser launch |
 | `--log-level` | `info` | Rust `tracing` filter |
+| `--update-policy` | `notify` | Official application update checks: `notify` or `off`; installation still requires confirmation |
 
 Equivalent environment variables:
 
@@ -374,6 +386,7 @@ CODEX_WEB_NO_AGENT_AUTO_DETECT
 CODEX_WEB_SHELL
 CODEX_WEB_TOKEN
 CODEX_WEB_LOG_LEVEL
+CODEX_WEB_UPDATE_POLICY
 ```
 
 Command-line arguments override environment variables.
@@ -775,6 +788,18 @@ mobile toolbar. **Copy diagnostics** captures mobile viewport measurements
 after terminal focus; it does not include the authentication token, keyboard
 input, or terminal text.
 
+**Software updates** shows the running server version and the newest official
+stable release. **Check for updates** performs a read-only request to the fixed
+GitHub repository. For a marked official package, **Update to X.Y.Z and restart**
+downloads and validates the complete native archive side-by-side. It is
+enabled only after explicitly confirming that all PTYs and `@cwt` reviewer
+threads will end. Favorites and Recent remain in the state directory.
+
+Source/development builds show the release but cannot self-install it. Update
+them with the reviewed source/build procedure. The browser never supplies a
+download URL, archive path, checksum, repository, command, or executable name
+to the server.
+
 **Terminate _agent_** stops the selected process without deleting its managed
 entry. **Forget token** removes the token from the current browser tab.
 
@@ -809,6 +834,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
+  "serverVersion": "0.2.0",
   "codexInstalled": true,
   "sessionRunning": true,
   "connectedClients": 0,
@@ -828,6 +854,8 @@ Important distinction:
 - `maxSessions` is the configured registry capacity, not a hard-coded UI
   value. `sessionCount` includes stopped entries and dedicated reviewers until
   they are removed or closed.
+- `serverVersion` is the native backend version. The update UI accepts the new
+  process only when this equals the staged release version.
 
 The frontend can still load while a PTY is failed so diagnostics and restart
 controls remain available.
@@ -1008,6 +1036,21 @@ the server creates a missing final directory with mode `0700`. If it already
 exists, it must be owned by the service user and grant no group/other
 permissions.
 
+`ExecStart` must continue to point at the complete manually installed v0.2
+bootstrap package, not at a worker below
+`<state-dir>/updates/releases`. Do not delete that package after a built-in
+update. Its process remains systemd's stable `MainPID`; after the first update
+it supervises the active worker and every later generation without creating a
+nested supervisor chain.
+
+Keep `Restart=on-failure`, `KillSignal=SIGINT`, and
+`KillMode=control-group`. A normal update is handled inside the stable root and
+does not require systemd to replace `MainPID`. An unrecoverable supervisor or
+worker/rollback failure makes the root fail so `Restart=on-failure` can start
+the bootstrap again. A service stop sends SIGINT to the root, which first asks
+its current worker to stop; `KillMode=control-group` remains the final
+service-wide containment boundary.
+
 This hardened example discards stdout because startup stdout contains the
 authenticated URL. It also discards the normal structured tracing stream,
 which currently uses stdout. Service state is still available with:
@@ -1062,6 +1105,69 @@ Resolve the exact service, PID, and port first.
 Server restarts terminate all managed PTYs. Save or finish important agent work
 before upgrading.
 
+### Built-in update for an official package
+
+The v0.1-to-v0.2 transition must be installed manually from the complete v0.2
+archive. Stop the old service, extract the executable and adjacent `web`,
+documentation, and license directories together, point `ExecStart` at that
+v0.2 bootstrap package, and verify it before removing the old v0.1 package.
+After that:
+
+1. Open **Settings → Software updates** and choose **Check for updates**.
+2. Read the release notes. Automatic installation remains disabled unless the
+   release is stable and immutable and its exact platform asset exposes a
+   GitHub SHA-256 digest.
+3. Finish important terminal work and confirm that every PTY and `@cwt` thread
+   may be terminated.
+4. Choose **Update to X.Y.Z and restart**. The server streams the archive into
+   `<state-dir>/updates`, checks the GitHub digest and `SHA256SUMS.txt`, safely
+   extracts and validates the full package, persists only the update request
+   ID and source/target versions in `pending.json`, releases the update lock,
+   and then performs an orderly shutdown.
+5. The original v0.2 root process remains alive with the same PID. It validates
+   the matching pending transition, then starts the staged package as a worker
+   with the same effective project, host, port, state directory, agent
+   configuration, token, and update policy.
+   The token is passed only through the worker environment and is
+   consumed/removed there before application threads start. The root also
+   supplies a fresh per-launch readiness nonce through the private worker
+   environment; the worker consumes/removes that variable before serving.
+6. The root accepts the candidate only after direct authenticated local health,
+   with system proxies disabled, reports the expected `serverVersion` and
+   returns that exact nonce. It then
+   atomically commits `active.json` with the active and exact previous
+   versions, clears the matching pending record, and continues supervising
+   that worker. The browser reloads only after the same version check.
+7. If package validation, startup, readiness, or active-pointer commit fails,
+   the candidate is terminated and waited for, `active.json` remains on the
+   previous version, and the root starts the exact prior executable and
+   requires its readiness. Inspect the server console before retrying.
+
+If the root itself restarts during a transition, it resumes only a strict
+pending source-to-target transition that matches the known active generation.
+A pending record whose target was already committed is cleared; malformed or
+stale pending state is quarantined. Do not edit `active.json`, `pending.json`,
+or versioned worker directories manually.
+
+The updater never requests administrator/root elevation and never overwrites
+the executable that launched it. The manually installed v0.2 bootstrap remains
+the long-lived trust anchor; workers live side-by-side, with the active release
+and at most one prior managed release retained for rollback. Unknown files in
+the bootstrap package directory are not touched. Ensure the state filesystem
+has room for the compressed archive and extracted package.
+
+Never delete the bootstrap package while an interactive launcher, scheduled
+task, or service still starts it. Ordinary worker updates do not update the
+root supervisor itself. If release notes identify a supervisor protocol or
+security change, perform another manual full-archive replacement and update
+the configured launch path before resuming built-in updates.
+
+Disable checks with `--update-policy off` or
+`CODEX_WEB_UPDATE_POLICY=off`. A failed/offline check does not stop the server,
+PTYs, or browser.
+
+### Manual or source upgrade
+
 Recommended sequence:
 
 1. For an official release, download the new archive and verify its checksum
@@ -1078,7 +1184,13 @@ Recommended sequence:
    token if continuity of Favorites/Recent, the browser URL, and the credential
    is required. This does not preserve PTY processes or live terminal sessions.
 7. Check `/api/health`, load the frontend, attach, and verify keyboard input.
-8. Remove the old package only after the new runtime is confirmed.
+8. Remove a superseded manual package only after the configured launcher or
+   service points at the new verified bootstrap. Never remove the bootstrap
+   package that `ExecStart` currently names.
+
+Do not copy a managed worker out of the state directory and make it the
+service executable. A manual bootstrap replacement uses a complete verified
+archive and stops the existing root/worker process tree first.
 
 Do not mix a new frontend with an older backend during deployment.
 Before deployment, confirm that the Markdown documentation still matches the

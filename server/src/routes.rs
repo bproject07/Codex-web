@@ -24,6 +24,7 @@ use crate::{
     peer_routes,
     registry::{RegistryError, SessionRegistry},
     session::SessionSnapshot,
+    updater::{UpdateManager, UpdateStatus},
     websocket,
     workspaces::{WorkspaceError, WorkspaceLibrary, WorkspaceStore},
 };
@@ -38,7 +39,9 @@ pub struct AppState {
     pub agents: AgentCatalog,
     pub directories: DirectoryBrowser,
     pub workspaces: WorkspaceStore,
+    pub updates: UpdateManager,
     pub shutdown: CancellationToken,
+    pub readiness_nonce: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +54,9 @@ struct HealthResponse {
     session_count: usize,
     running_sessions: usize,
     max_sessions: usize,
+    server_version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    readiness_nonce: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,16 +94,28 @@ struct UpsertFavoriteRequest {
     preferred_agent: Option<AgentKind>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+struct ApplyUpdateRequest {
+    expected_version: String,
+    confirm_session_termination: bool,
+}
+
 const MAX_CREATE_SESSION_BODY: usize = 256 * 1024;
 const MAX_DIRECTORY_ID_BODY: usize = 256 * 1024;
 const MAX_RESOLVE_PATH_BODY: usize = 256 * 1024;
 const MAX_FAVORITE_BODY: usize = 256 * 1024;
+const MAX_UPDATE_BODY: usize = 16 * 1024;
 
 pub fn build_router(state: AppState, static_directory: Option<PathBuf>) -> Router {
     let protected_api = Router::new()
         .route("/api/health", get(health))
         .route("/api/agents", get(agents))
         .route("/api/agent-catalog", get(agent_catalog))
+        .route("/api/update", get(update_status))
+        .route("/api/update/check", post(check_for_update))
+        .route("/api/update/apply", post(apply_update))
         .route("/api/filesystem/roots", get(filesystem_roots))
         .route("/api/filesystem/list", post(list_directory))
         .route("/api/filesystem/resolve", post(resolve_directory))
@@ -153,7 +171,60 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         session_count: state.sessions.session_count(),
         running_sessions,
         max_sessions: state.sessions.max_sessions(),
+        server_version: env!("CARGO_PKG_VERSION"),
+        readiness_nonce: state.readiness_nonce.clone(),
     })
+}
+
+async fn update_status(State(state): State<AppState>) -> Json<UpdateStatus> {
+    Json(state.updates.status().await)
+}
+
+async fn check_for_update(State(state): State<AppState>) -> Json<UpdateStatus> {
+    let _ = state.updates.check_now().await;
+    Json(state.updates.status().await)
+}
+
+async fn apply_update(State(state): State<AppState>, body: Bytes) -> Response {
+    let request: ApplyUpdateRequest = match parse_json_body(
+        &body,
+        MAX_UPDATE_BODY,
+        false,
+        "The update request is too large.",
+        "The update request is invalid.",
+    ) {
+        Ok(request) => request,
+        Err(error) => return request_parse_error_response(error),
+    };
+    if request.expected_version.len() > 64 || request.expected_version.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "The expected update version is invalid.",
+            }),
+        )
+            .into_response();
+    }
+    match state
+        .updates
+        .begin_apply(
+            &request.expected_version,
+            request.confirm_session_termination,
+        )
+        .await
+    {
+        Ok(()) => (StatusCode::ACCEPTED, Json(state.updates.status().await)).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "update apply request was refused");
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "The update could not be started. Check update status and server logs.",
+                }),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn primary_session(State(state): State<AppState>) -> Json<SessionSnapshot> {
@@ -693,8 +764,22 @@ async fn development_fallback() -> impl IntoResponse {
 }
 
 async fn security_headers(request: axum::extract::Request, next: Next) -> Response {
+    let request_path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
+    let is_html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"));
     let headers = response.headers_mut();
+    if is_html || request_path == "/" || request_path.ends_with(".html") {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    } else if request_path.starts_with("/assets/") {
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),

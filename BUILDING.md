@@ -607,33 +607,101 @@ checks both archive layouts. The Linux archive preserves the executable bit
 and targets x86_64 glibc 2.35 or newer. The Windows executable is not yet
 Authenticode-signed.
 
+After the package and target-specific license inventory are complete, the
+workflow runs `scripts/generate-release-package-manifest.py`. It adds the exact
+schema-1 `release-package.json` product, version, and target marker required by
+the runtime updater. Local `scripts/build.ps1` and `scripts/build.sh` output
+must not contain this marker and therefore cannot self-install. The archive
+validator binds the marker to the tag version and the expected MSVC/Linux GNU
+target.
+
+### Bootstrap and worker compatibility
+
+The complete manually installed v0.2 package supplies the long-lived bootstrap
+executable. It may initially serve requests directly, but after the first
+built-in update the same root PID launches and supervises verified workers from
+`<state-dir>/updates/releases`. A worker never launches the next worker; while
+holding the update lock it writes a bounded pending record containing only the
+request ID and source/target versions, releases the lock, initiates orderly
+shutdown, and exits with the private restart status. The root validates that
+exact transition before acting.
+
+The root passes the token only through the worker environment; the worker
+consumes/removes it before application threads start. It also supplies a fresh
+per-launch readiness nonce through that private environment, which the worker
+consumes/removes and returns only in authenticated health. Paths remain out of
+the pointer files. The root commits the active/exact-previous version pointer
+only after readiness matches both the expected version and nonce. Candidate
+failure or commit failure terminates and waits for that process, leaves active
+state unchanged, and starts the exact previous executable; rollback must pass
+the same readiness check.
+
+This makes the v0.2 root a compatibility and security boundary. Normal release
+archives update workers, not the already running root. A change to the
+root/worker marker, reserved exit status, pending/active schema, readiness
+contract, or supervisor trust logic must include a migration plan and release
+notes that require a manual full-archive launcher replacement when the old
+root cannot safely implement it. Never remove the bootstrap package used by a
+service or launcher.
+
 Only the tag-only final publish job has `contents: write`, `id-token: write`,
 and `attestations: write`, and it is attached to the repository's `release`
 environment. It downloads the two exact validated artifacts, rejects extra
-filenames, writes checksums, creates GitHub provenance attestations, uploads
-to a draft, verifies the draft asset names, and only then publishes the
-release. It refuses to overwrite an existing release or asset.
+filenames, writes checksums, creates GitHub provenance attestations, and
+uploads to a draft. Before publication, it polls for the three exact uploaded
+assets and requires each GitHub `sha256:` digest and size to match the local
+Windows archive, Linux archive, and `SHA256SUMS.txt`; the checksum file must
+also bind both archives. Only then does it publish. A second bounded poll
+requires the resulting release to report `immutable: true` with the same exact
+asset set, sizes, and digests. It refuses to overwrite an existing release or
+asset.
+
+Repository release immutability must be enabled before publishing a version
+that is offered to the built-in updater. GitHub applies that setting only to
+future releases. The runtime requires `immutable: true`, the exact uploaded
+asset state/name/size, the GitHub `sha256:` asset digest, a matching
+`SHA256SUMS.txt` entry, and its own safe package checks. Artifact attestations
+remain the stronger manual provenance check and are not falsely represented as
+verified by the embedded updater.
+
+The `release` environment must contain
+`RELEASE_IMMUTABILITY_READ_TOKEN`: a fine-grained token scoped only to this
+repository with **Administration: read** (and the automatically included
+metadata read access), no write administration permission, and a maintained
+expiration. The workflow uses it only to call the repository immutability
+status endpoint before creating the draft and again immediately before
+publication. The ordinary short-lived `GITHUB_TOKEN` retains the existing
+`contents`, `id-token`, and `attestations` permissions for release publication;
+the workflow never enables or disables repository immutability.
 
 The maintainer sequence is:
 
-1. complete and record Windows and Linux validation;
-2. review dependency licenses, documentation, and a secret scan of the tree
+1. enable repository release immutability and configure the read-only
+   `RELEASE_IMMUTABILITY_READ_TOKEN` secret in the protected `release`
+   environment;
+2. complete and record Windows and Linux validation;
+3. review dependency licenses, documentation, and a secret scan of the tree
    and Git history;
-3. commit and push the reviewed source to `main`;
-4. complete the non-publishing `workflow_dispatch` run;
-5. create and push the matching version tag from the unchanged `main` tip;
-6. monitor the Release workflow and verify the published checksum,
+4. commit and push the reviewed source to `main`;
+5. complete the non-publishing `workflow_dispatch` run;
+6. create and push the matching version tag from the unchanged `main` tip;
+7. monitor the Release workflow and verify the published checksum,
    attestation, archive layout, and clean-host startup.
 
 Do not upload an old local `dist` directory or create release assets manually.
 Configure the `release` environment and a repository rule for `v*` tag
-creation before the first tag. If a publish run fails after creating its
-draft, inspect that draft and its logs; remove only the failed release while
-preserving the tag before retrying:
+creation before the first tag. If a publish run fails while the release is
+still a draft, inspect that draft and its logs; remove only that unpublished
+draft while preserving the tag before retrying:
 
 ```bash
 gh release delete vX.Y.Z --repo bproject07/Codex-web --yes
 ```
+
+Do not use that retry procedure after publication. An immutable release has
+already consumed its tag identity and protected its assets; investigate a
+post-publication verification failure as a release incident instead of trying
+to overwrite assets or reuse the version.
 
 ## Runtime smoke tests
 
@@ -676,6 +744,46 @@ Use `--state-dir` or `CODEX_WEB_STATE_DIR` with a disposable directory for
 this check. Give parallel test servers distinct state directories because the
 store has no cross-process locking. Do not write test Favorites/Recent into a
 live operator profile.
+
+### Updater supervisor regression
+
+Run the deterministic native supervisor regression on Windows and Linux:
+
+```text
+python -B scripts/updater-supervisor-regression.py
+```
+
+When Windows validation uses an explicit GNU Rust toolchain:
+
+```powershell
+python -B .\scripts\updater-supervisor-regression.py `
+  --toolchain 1.95.0-x86_64-pc-windows-gnu
+```
+
+The fixture uses an isolated temporary state directory and loopback port. It
+performs two sequential forward transitions, asserts that the original root
+PID survives while each worker PID changes, rejects a nested supervisor,
+waits for active state to commit after readiness, then forces a candidate
+readiness failure and verifies exact-prior rollback with the active version
+unchanged. By default the fixture is both the root and the synthetic worker.
+
+After building a complete package, repeat the same regression with the real
+packaged server as the stable root and the fixture only as its supervised
+worker:
+
+```powershell
+python -B .\scripts\updater-supervisor-regression.py `
+  --root-server .\dist\codex-web.exe
+```
+
+```bash
+python3 -B ./scripts/updater-supervisor-regression.py \
+  --root-server ./dist-linux/codex-web
+```
+
+The release workflow runs this packaged-root mode on both Windows and Linux.
+Run it locally as well whenever updater process, package, or readiness behavior
+changes.
 
 The cross-platform registry test in `server/src/registry.rs` uses a synthetic
 command that prints its native current working directory; it proves that the
@@ -972,6 +1080,8 @@ Commit:
 - frontend source and `web/package-lock.json`
 - build/run scripts
 - release workflow and the third-party license generator
+- release package marker generator, GitHub release metadata verifier, and
+  updater archive validation
 - tests
 - Markdown documentation
 - `LICENSE`

@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import {
+  ApiError,
   addWorkspaceFavorite,
   clearSelectedTerminalId,
   clearSessionToken,
@@ -63,6 +64,18 @@ import {
   type WorkspaceDirectory,
   type WorkspacePickerTransition,
 } from "./workspaces";
+import {
+  applyUpdate,
+  checkForUpdate,
+  getUpdateStatus,
+  isUpdateHandoffState,
+  isUpdatePollState,
+  reloadForUpdatedServer,
+  UpdatePanel,
+  waitForServerVersion,
+  type UpdateOperation,
+  type UpdateStatus,
+} from "./updates";
 
 const STATUS_LABELS: Record<ConnectionStatus | "codex_exited", string> = {
   connecting: "Connecting",
@@ -114,6 +127,11 @@ export function App() {
   const [maxSessions, setMaxSessions] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [updateLoading, setUpdateLoading] = useState(false);
+  const [updateOperation, setUpdateOperation] =
+    useState<UpdateOperation>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const [viewportDiagnostics, setViewportDiagnostics] = useState("");
   const [viewportDiagnosticsCollecting, setViewportDiagnosticsCollecting] =
     useState(false);
@@ -124,6 +142,8 @@ export function App() {
   const sessionsRequestEpochRef = useRef(0);
   const capacityRequestEpochRef = useRef(0);
   const agentCatalogRequestEpochRef = useRef(0);
+  const updateRequestEpochRef = useRef(0);
+  const updateReconnectRef = useRef<AbortController | null>(null);
   const suppressTerminalFocusOnceRef = useRef(false);
   const peerController = usePeerController(token);
 
@@ -190,6 +210,228 @@ export function App() {
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  const beginUpdateReconnect = useCallback(
+    async (expectedVersion: string) => {
+      if (!token) {
+        return;
+      }
+
+      updateReconnectRef.current?.abort();
+      const abortController = new AbortController();
+      updateReconnectRef.current = abortController;
+      setUpdateOperation("reconnecting");
+      setUpdateError(null);
+
+      const ready = await waitForServerVersion({
+        token,
+        expectedVersion,
+        signal: abortController.signal,
+      });
+      if (
+        abortController.signal.aborted ||
+        updateReconnectRef.current !== abortController
+      ) {
+        return;
+      }
+
+      updateReconnectRef.current = null;
+      if (ready) {
+        reloadForUpdatedServer({ token });
+        return;
+      }
+
+      setUpdateOperation(null);
+      setUpdateError(
+        `The server did not return as version ${expectedVersion}. Check the server console, then try again.`,
+      );
+    },
+    [token],
+  );
+
+  useEffect(() => {
+    const requestEpoch = ++updateRequestEpochRef.current;
+    const abortController = new AbortController();
+    updateReconnectRef.current?.abort();
+    updateReconnectRef.current = null;
+    setUpdateStatus(null);
+    setUpdateError(null);
+    setUpdateOperation(null);
+
+    if (!token) {
+      setUpdateLoading(false);
+      return () => abortController.abort();
+    }
+
+    setUpdateLoading(true);
+    void getUpdateStatus(token, abortController.signal)
+      .then((status) => {
+        if (updateRequestEpochRef.current !== requestEpoch) {
+          return;
+        }
+        setUpdateStatus(status);
+        if (isUpdateHandoffState(status.state) && status.latestVersion) {
+          void beginUpdateReconnect(status.latestVersion);
+        }
+      })
+      .catch((error) => {
+        if (
+          !abortController.signal.aborted &&
+          updateRequestEpochRef.current === requestEpoch
+        ) {
+          setUpdateError(
+            error instanceof Error
+              ? error.message
+              : "Could not load update status.",
+          );
+        }
+      })
+      .finally(() => {
+        if (
+          !abortController.signal.aborted &&
+          updateRequestEpochRef.current === requestEpoch
+        ) {
+          setUpdateLoading(false);
+        }
+      });
+
+    return () => {
+      abortController.abort();
+      updateRequestEpochRef.current += 1;
+    };
+  }, [beginUpdateReconnect, token]);
+
+  useEffect(() => {
+    if (
+      !token ||
+      updateOperation !== null ||
+      !updateStatus ||
+      !isUpdatePollState(updateStatus.state)
+    ) {
+      return;
+    }
+
+    const abortController = new AbortController();
+    let timer: number | null = null;
+
+    const poll = async () => {
+      try {
+        const status = await getUpdateStatus(token, abortController.signal);
+        if (abortController.signal.aborted) {
+          return;
+        }
+        setUpdateStatus(status);
+        if (isUpdateHandoffState(status.state) && status.latestVersion) {
+          void beginUpdateReconnect(status.latestVersion);
+          return;
+        }
+        if (isUpdatePollState(status.state)) {
+          timer = window.setTimeout(() => void poll(), 750);
+        }
+      } catch (error) {
+        if (!abortController.signal.aborted) {
+          if (
+            error instanceof TypeError &&
+            updateStatus.latestVersion &&
+            isUpdatePollState(updateStatus.state)
+          ) {
+            void beginUpdateReconnect(updateStatus.latestVersion);
+          } else {
+            setUpdateError(
+              error instanceof Error
+                ? error.message
+                : "Could not refresh update progress.",
+            );
+          }
+        }
+      }
+    };
+
+    timer = window.setTimeout(() => void poll(), 750);
+    return () => {
+      abortController.abort();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [beginUpdateReconnect, token, updateOperation, updateStatus]);
+
+  const handleCheckForUpdate = useCallback(async () => {
+    if (!token || updateOperation !== null) {
+      return;
+    }
+
+    const requestEpoch = ++updateRequestEpochRef.current;
+    setUpdateOperation("checking");
+    setUpdateError(null);
+    try {
+      const status = await checkForUpdate(token);
+      if (updateRequestEpochRef.current === requestEpoch) {
+        setUpdateStatus(status);
+      }
+    } catch (error) {
+      if (updateRequestEpochRef.current === requestEpoch) {
+        setUpdateError(
+          error instanceof Error ? error.message : "Could not check for updates.",
+        );
+      }
+    } finally {
+      if (updateRequestEpochRef.current === requestEpoch) {
+        setUpdateOperation(null);
+      }
+    }
+  }, [token, updateOperation]);
+
+  const handleApplyUpdate = useCallback(
+    async (expectedVersion: string) => {
+      if (!token || updateOperation !== null) {
+        return;
+      }
+
+      const requestEpoch = ++updateRequestEpochRef.current;
+      let reconnecting = false;
+      setUpdateOperation("applying");
+      setUpdateError(null);
+      try {
+        const status = await applyUpdate(token, expectedVersion);
+        if (updateRequestEpochRef.current !== requestEpoch) {
+          return;
+        }
+        setUpdateStatus(status);
+        if (status.state === "failed") {
+          setUpdateError(status.error ?? "The update could not be applied.");
+        } else if (isUpdateHandoffState(status.state)) {
+          reconnecting = true;
+          void beginUpdateReconnect(expectedVersion);
+        }
+      } catch (error) {
+        if (updateRequestEpochRef.current !== requestEpoch) {
+          return;
+        }
+        if (error instanceof TypeError) {
+          // The successful handoff may close the listening socket before the
+          // browser receives the response. Verify the expected version before
+          // reloading instead of treating that disconnect as success.
+          reconnecting = true;
+          void beginUpdateReconnect(expectedVersion);
+        } else {
+          setUpdateError(
+            error instanceof ApiError || error instanceof Error
+              ? error.message
+              : "The update could not be applied.",
+          );
+        }
+      } finally {
+        if (
+          !reconnecting &&
+          updateRequestEpochRef.current === requestEpoch
+        ) {
+          setUpdateOperation(null);
+        }
+      }
+    },
+    [beginUpdateReconnect, token, updateOperation],
+  );
 
   useEffect(() => {
     if (suppressTerminalFocusOnceRef.current && !agentPickerOpen) {
@@ -1288,7 +1530,11 @@ export function App() {
           </button>
           <button
             type="button"
-            title="Open terminal settings"
+            title={
+              updateStatus?.state === "available"
+                ? "Open settings — update available"
+                : "Open terminal settings"
+            }
             onClick={() => {
               setPeerComposerOpen(false);
               setWorkspacePickerOpen(false);
@@ -1300,6 +1546,11 @@ export function App() {
           >
             <span className="action-label action-label--full">Settings</span>
             <span className="action-label action-label--compact">Setup</span>
+            {updateStatus?.state === "available" && (
+              <span className="header-update-badge" aria-label="Update available">
+                ↑
+              </span>
+            )}
           </button>
         </div>
       </header>
@@ -1427,12 +1678,22 @@ export function App() {
           busy={busy}
           agentLabel={selectedAgentLabel}
           onChange={updateSettings}
+          updateStatus={updateStatus}
+          updateLoading={updateLoading}
+          updateOperation={updateOperation}
+          updateError={updateError}
+          onCheckForUpdate={() => void handleCheckForUpdate()}
+          onApplyUpdate={(expectedVersion) =>
+            void handleApplyUpdate(expectedVersion)
+          }
           onClose={() => {
             setSettingsOpen(false);
             focusTerminalForFinePointer();
           }}
           onTerminate={() => void handleTerminate()}
           onForgetToken={() => {
+            updateReconnectRef.current?.abort();
+            updateReconnectRef.current = null;
             clearSessionToken();
             clearSelectedTerminalId();
             setSettingsOpen(false);
@@ -1687,6 +1948,12 @@ interface SettingsPanelProps {
   busy: boolean;
   agentLabel: string;
   onChange: (patch: Partial<TerminalSettings>) => void;
+  updateStatus: UpdateStatus | null;
+  updateLoading: boolean;
+  updateOperation: UpdateOperation;
+  updateError: string | null;
+  onCheckForUpdate: () => void;
+  onApplyUpdate: (expectedVersion: string) => void;
   onClose: () => void;
   onTerminate: () => void;
   onForgetToken: () => void;
@@ -1701,6 +1968,12 @@ function SettingsPanel({
   busy,
   agentLabel,
   onChange,
+  updateStatus,
+  updateLoading,
+  updateOperation,
+  updateError,
+  onCheckForUpdate,
+  onApplyUpdate,
   onClose,
   onTerminate,
   onForgetToken,
@@ -1794,6 +2067,15 @@ function SettingsPanel({
           />
           Show mobile keys
         </label>
+
+        <UpdatePanel
+          status={updateStatus}
+          loading={updateLoading}
+          operation={updateOperation}
+          error={updateError}
+          onCheck={onCheckForUpdate}
+          onApply={onApplyUpdate}
+        />
 
         <div className="diagnostics-settings">
           <div>

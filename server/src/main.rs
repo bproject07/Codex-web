@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -23,7 +24,9 @@ use codex_web_terminal::{
     peer_cli, peer_routes,
     registry::SessionRegistry,
     routes::{AppState, build_router},
-    workspaces::WorkspaceStore,
+    update_bootstrap,
+    updater::{UpdateActivation, UpdateManager},
+    workspaces::{WorkspaceStore, prepare_state_directory_sync},
 };
 
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -33,16 +36,50 @@ enum StopCause {
     Signal(io::Result<()>),
     Public(ServerTaskResult),
     Peer(ServerTaskResult),
+    Update(UpdateActivation),
+    UpdateChannelClosed,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     if peer_cli::try_run_from_environment()? {
         return Ok(());
     }
 
+    let worker_context = update_bootstrap::take_worker_context()?;
     let mut config = Config::load()?;
     let token = config.token.take().unwrap_or(generate_token()?);
+    // SAFETY: the synchronous outer main has not created the Tokio runtime or
+    // any application threads yet. The parsed token remains in owned memory.
+    unsafe {
+        std::env::remove_var("CODEX_WEB_TOKEN");
+    }
+    prepare_state_directory_sync(&config.state_dir).with_context(|| {
+        format!(
+            "failed to prepare the protected state directory {}",
+            config.state_dir.display()
+        )
+    })?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to initialize the Tokio runtime")?;
+    runtime.block_on(run(config, token, worker_context))
+}
+
+async fn run(
+    config: Config,
+    token: String,
+    worker_context: update_bootstrap::WorkerContext,
+) -> Result<()> {
+    let previous_executable =
+        std::env::current_exe().context("failed to locate the running executable")?;
+    if !worker_context.supervised
+        && update_bootstrap::supervise_startup(&config, &token, &previous_executable).await?
+    {
+        return Ok(());
+    }
+    let supervised_worker = worker_context.supervised;
+    let readiness_nonce = worker_context.readiness_nonce;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -87,6 +124,8 @@ async fn main() -> Result<()> {
                 config.state_dir.display()
             )
         })?;
+    let (update_tx, mut update_rx) = mpsc::channel(1);
+    let updates = UpdateManager::new(config.state_dir.clone(), config.update_policy, update_tx)?;
 
     let bind_address = SocketAddr::new(config.host, config.port);
     let listener = TcpListener::bind(bind_address)
@@ -133,16 +172,19 @@ async fn main() -> Result<()> {
     let peer_shutdown = CancellationToken::new();
     let state = AppState {
         config: Arc::new(config.clone()),
-        auth: AuthState::new(token),
+        auth: AuthState::new(token.clone()),
         sessions: sessions.clone(),
         peers: peers.clone(),
         agents: agent_catalog,
         directories,
         workspaces,
+        updates: updates.clone(),
         shutdown: public_shutdown.clone(),
+        readiness_nonce,
     };
     let app = build_router(state, static_directory);
     let peer_app = peer_routes::internal_router(peers.clone());
+    updates.spawn_background_checks(public_shutdown.clone());
 
     if !config.no_open_browser
         && let Err(error) = webbrowser::open(&browser_url)
@@ -173,6 +215,7 @@ async fn main() -> Result<()> {
         tokio::signal::ctrl_c(),
         &mut public_server,
         &mut peer_server,
+        &mut update_rx,
     )
     .await;
 
@@ -217,6 +260,30 @@ async fn main() -> Result<()> {
                 Err(error) => Err(error.context("private peer bridge stopped unexpectedly")),
             }
         }
+        StopCause::Update(activation) => {
+            await_server_task(&mut public_server, "HTTP server").await?;
+            await_server_task(&mut peer_server, "private peer bridge").await?;
+            if supervised_worker {
+                update_bootstrap::verify_pending_activation(&config.state_dir, &activation)?;
+                std::process::exit(update_bootstrap::UPDATE_RESTART_EXIT_CODE);
+            }
+            update_bootstrap::activate_and_supervise(
+                &activation,
+                &config,
+                &token,
+                &previous_executable,
+            )
+            .await
+        }
+        StopCause::UpdateChannelClosed => {
+            if let Err(error) = await_server_task(&mut public_server, "HTTP server").await {
+                tracing::error!(%error, "HTTP server cleanup failed");
+            }
+            if let Err(error) = await_server_task(&mut peer_server, "private peer bridge").await {
+                tracing::error!(%error, "private peer bridge cleanup failed");
+            }
+            bail!("update control channel closed unexpectedly")
+        }
     }
 }
 
@@ -224,6 +291,7 @@ async fn wait_for_stop_cause<S>(
     signal: S,
     public_server: &mut JoinHandle<io::Result<()>>,
     peer_server: &mut JoinHandle<io::Result<()>>,
+    update_rx: &mut mpsc::Receiver<UpdateActivation>,
 ) -> StopCause
 where
     S: Future<Output = io::Result<()>>,
@@ -233,6 +301,10 @@ where
         result = &mut signal => StopCause::Signal(result),
         result = public_server => StopCause::Public(result),
         result = peer_server => StopCause::Peer(result),
+        activation = update_rx.recv() => match activation {
+            Some(activation) => StopCause::Update(activation),
+            None => StopCause::UpdateChannelClosed,
+        },
     }
 }
 
@@ -352,10 +424,16 @@ mod tests {
     async fn an_unexpected_private_bridge_exit_is_detected() {
         let mut public_server = tokio::spawn(std::future::pending::<io::Result<()>>());
         let mut peer_server = tokio::spawn(async { Ok(()) });
+        let (_update_tx, mut update_rx) = mpsc::channel(1);
 
         let cause = timeout(
             Duration::from_secs(1),
-            wait_for_stop_cause(std::future::pending(), &mut public_server, &mut peer_server),
+            wait_for_stop_cause(
+                std::future::pending(),
+                &mut public_server,
+                &mut peer_server,
+                &mut update_rx,
+            ),
         )
         .await
         .expect("private bridge exit detected");

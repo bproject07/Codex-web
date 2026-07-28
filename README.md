@@ -142,10 +142,11 @@ archives from the repository's
 
 Each archive contains the native server executable, the adjacent `web`
 directory, documentation, and a generated target-specific
-`THIRD_PARTY_LICENSES` bundle. `SHA256SUMS.txt` and GitHub artifact provenance
-are attached to the same release. If the Releases page has no tagged version
-yet, use the source-build instructions below; do not download binaries from an
-unofficial mirror.
+`THIRD_PARTY_LICENSES` bundle. It also contains `release-package.json`, the
+target/version marker required by the built-in updater. `SHA256SUMS.txt` and
+GitHub artifact provenance are attached to the same release. If the Releases
+page has no tagged version yet, use the source-build instructions below; do
+not download binaries from an unofficial mirror.
 
 Verify a downloaded archive before extracting it:
 
@@ -182,6 +183,67 @@ Linux:
 
 The Linux archive is built on Ubuntu 22.04 for x86_64 GNU/Linux and targets a
 glibc 2.35-or-newer runtime. It is not a universal Linux or musl binary.
+
+### Automatic application updates
+
+An official portable package checks the official
+`bproject07/Codex-web` GitHub Releases feed shortly after startup and at most
+once every 24 hours. Settings shows the installed/latest versions and a badge
+when a newer stable release is available. Checking is read-only. Installation
+requires the operator to tick the session-termination confirmation and choose
+**Update to X.Y.Z and restart**; there is no silent restart.
+
+The updater accepts only the exact Windows or Linux asset for the running
+target. It requires a published, stable, immutable GitHub Release, matches the
+GitHub asset SHA-256 metadata with the downloaded bytes and
+`SHA256SUMS.txt`, rejects unsafe archive paths/links/special files, validates
+`release-package.json`, the PE/ELF architecture, the complete web/license
+layout, and the staged binary version. The verified package is installed
+side-by-side under the dedicated state directory. The old executable is never
+overwritten.
+
+The executable from the manually installed v0.2 package is the stable
+bootstrap and root supervisor. It may serve v0.2 directly until the first
+built-in update. During that update it remains alive under the same process ID,
+starts the verified package as a supervised worker, and becomes the sole
+supervisor for every later worker generation. Workers never create another
+supervisor. A later worker persists a matching bounded `pending.json` before
+initiating orderly shutdown, then requests the transition with its reserved
+exit status. The record contains only the request ID, source version, and
+target version—never a path, URL, command, checksum, or token.
+
+The candidate receives the existing token only through `CODEX_WEB_TOKEN`, not
+argv or update state, and consumes/removes that inherited variable before
+starting application threads. The root also supplies a fresh per-launch
+readiness nonce through the private worker environment; the worker consumes
+that variable and returns the value only in its authenticated health response.
+The candidate must bind the same port and pass direct authenticated local
+health, with system proxies disabled, using the expected `serverVersion` and
+nonce. Only then does the root atomically commit
+`active.json` with the active and exact previous versions. On failure, the
+candidate is terminated and waited for, the pointer remains unchanged, and the
+root starts the exact prior executable and requires it to become ready before
+supervision continues.
+
+Updating terminates all PTYs and in-memory `@cwt` threads. It preserves the
+same effective server settings, authentication token, port, project,
+Favorites, and Recent state for the controlled restart. The browser waits for
+the expected server version and reloads. If the browser has blocked
+`sessionStorage`, that one same-origin reload carries the token in the query
+string and removes it from the visible address again as soon as the frontend
+starts. Keep enough free space for the download, extraction, current release,
+and one rollback release.
+
+Only GitHub release packages carry the required marker. `dist`, `dist-linux`,
+`cargo run`, and locally modified/source-built packages can check and link to a
+new release but deliberately cannot self-install it. The move from v0.1 to
+v0.2 must therefore be performed manually once using the complete archive.
+Keep that manually installed v0.2 package: a service continues to start its
+bootstrap executable even after newer workers are active under
+`<state-dir>/updates/releases`. Built-in cleanup must not delete it. A future
+change to the supervisor/security protocol may explicitly require another
+manual full-archive launcher replacement. Set `--update-policy off` when
+update checks are not allowed or the host has no outbound GitHub access.
 
 ## Prerequisites
 
@@ -298,8 +360,11 @@ Local URL:
 http://127.0.0.1:8787/?token=...
 ```
 
-Open that URL. The frontend moves the token into `sessionStorage` and removes it
-from the visible address. The token is not put in `localStorage`.
+Open that URL. The frontend normally moves the token into `sessionStorage` and
+removes it from the visible address. The token is not put in `localStorage`.
+If hardened browser settings reject tab storage, the current page keeps the
+token only in memory; the controlled update reload uses the same one-navigation
+fallback described above.
 
 Use the session tabs in the header to switch between managed terminals and
 **+ New** to create another live agent PTY. **+ New** first opens **Choose a
@@ -593,6 +658,7 @@ Supported arguments:
 | `--token` | Authentication token, minimum 16 characters |
 | `--no-open-browser` | Do not launch the default browser |
 | `--log-level` | tracing filter such as `info` or `debug` |
+| `--update-policy` | Official application release checks: `notify` (default) or `off`; never enables silent installation |
 
 Command values are treated as executable names or file paths, not as arbitrary
 shell expressions. A discovered `.cmd` entry point is always invoked through
@@ -666,6 +732,7 @@ CLI arguments override environment variables.
 | `CODEX_WEB_NO_AGENT_AUTO_DETECT` | `false` |
 | `CODEX_WEB_SHELL` | `powershell`; Windows-only and ignored on Unix |
 | `CODEX_WEB_LOG_LEVEL` | `info` |
+| `CODEX_WEB_UPDATE_POLICY` | `notify`; set `off` to disable official application release checks |
 
 The default project directory is canonicalized and checked at startup. The
 primary terminal starts there. An authenticated **New** request may instead
@@ -744,7 +811,10 @@ Endpoints:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/health` | Aggregate installation, process, session/client counts, and configured `maxSessions` capacity |
+| `GET` | `/api/health` | Server version plus aggregate installation, process, session/client counts, and configured `maxSessions` capacity |
+| `GET` | `/api/update` | Read the in-memory official application update state; never performs host mutation |
+| `POST` | `/api/update/check` | Check the fixed official GitHub release feed now |
+| `POST` | `/api/update/apply` | Start verified side-by-side installation after exact-version and session-termination confirmation |
 | `GET` | `/api/agents` | Compatibility list of configured, ready profiles available to **New** |
 | `GET` | `/api/agent-catalog` | Read-only platform, status, version, verification, install, and update metadata |
 | `GET` | `/api/filesystem/roots` | List the configured default directory and server filesystem roots |
@@ -1251,6 +1321,9 @@ when available.
   turn waiting; terminal output is never parsed to infer completion.
 - Agent discovery is local and read-only. The browser cannot install, update,
   authenticate, or repair a CLI; it only shows vetted host-side instructions.
+- Application self-update is separate from agent CLI management. It is
+  available only to marked official release packages, uses a fixed repository
+  and exact assets, and always requires an explicit restart confirmation.
 - The folder picker is intentionally directory-only and non-recursive. It does
   not browse files, preview content, search the filesystem, or enforce a root
   allowlist.
@@ -1277,9 +1350,17 @@ when available.
   attachment receives only the newest 2 MiB, so a reconnect may reconstruct an
   imperfect screen when required ANSI state is older. A Codex redraw or
   restart repairs it.
-- Restarting the Rust server terminates all managed PTY sessions and changes an
-  automatically generated token. Saved Codex conversations may be resumed in a
-  new PTY, but the previous live terminal process cannot be adopted.
+- Restarting the Rust server terminates all managed PTY sessions. A normal
+  manual restart generates a new token when none is configured. A supervised
+  application update carries the current token only through the child process
+  environment so the same browser URL can reconnect; it never stores the token
+  in update state, argv, logs, or manifests. Previous live terminal processes
+  cannot be adopted.
+- Built-in worker updates deliberately do not replace the manually installed
+  v0.2 root supervisor. Keep its complete package available at the configured
+  launch path. A supervisor protocol or security fix can require a documented
+  manual launcher replacement even when ordinary worker updates remain
+  available.
 - Browser and mobile operating-system shortcut interception varies. The
   desktop unmodified `/` case is handled explicitly; other reserved shortcuts
   may remain unavailable to xterm.

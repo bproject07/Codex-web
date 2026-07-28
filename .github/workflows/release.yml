@@ -9,14 +9,14 @@ on:
       version:
         description: Package version to build and validate without publishing
         required: true
-        default: "0.1.0"
+        default: "0.2.0"
         type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: codex-web-release
   cancel-in-progress: false
 
 jobs:
@@ -183,9 +183,15 @@ jobs:
             --expected-rust-version 1.95.0 `
             --output-dir .\dist\THIRD_PARTY_LICENSES
           if ($LASTEXITCODE -ne 0) { throw "license generation failed" }
+          python -B .\scripts\generate-release-package-manifest.py `
+            --version $env:RELEASE_VERSION `
+            --target x86_64-pc-windows-msvc `
+            --output-dir .\dist
+          if ($LASTEXITCODE -ne 0) { throw "release marker generation failed" }
           $required = @(
             ".\dist\codex-web.exe",
             ".\dist\web\index.html",
+            ".\dist\release-package.json",
             ".\dist\README.md",
             ".\dist\BUILDING.md",
             ".\dist\OPERATIONS.md",
@@ -219,6 +225,13 @@ jobs:
           python -B .\scripts\peer-review-regression.py `
             --server .\dist\codex-web.exe `
             --port 8814
+
+      - name: Exercise packaged updater supervision and rollback
+        shell: pwsh
+        run: |
+          python -B .\scripts\updater-supervisor-regression.py `
+            --root-server .\dist\codex-web.exe `
+            --timeout 20
 
       - name: Create Windows archive
         id: archive
@@ -315,9 +328,14 @@ jobs:
             --target x86_64-unknown-linux-gnu \
             --expected-rust-version 1.95.0 \
             --output-dir ./dist-linux/THIRD_PARTY_LICENSES
+          python3 -B ./scripts/generate-release-package-manifest.py \
+            --version "$RELEASE_VERSION" \
+            --target x86_64-unknown-linux-gnu \
+            --output-dir ./dist-linux
           for path in \
             ./dist-linux/codex-web \
             ./dist-linux/web/index.html \
+            ./dist-linux/release-package.json \
             ./dist-linux/README.md \
             ./dist-linux/BUILDING.md \
             ./dist-linux/OPERATIONS.md \
@@ -346,6 +364,14 @@ jobs:
           python3 -B ./scripts/peer-review-regression.py \
             --server ./dist-linux/codex-web \
             --port 8815
+
+      - name: Exercise packaged updater supervision and rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B ./scripts/updater-supervisor-regression.py \
+            --root-server ./dist-linux/codex-web \
+            --timeout 20
 
       - name: Create Linux archive
         id: archive
@@ -455,6 +481,11 @@ jobs:
       RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
+      - name: Check out release verification tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Download validated archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -484,7 +515,59 @@ jobs:
         with:
           subject-path: release-assets/*
 
-      - name: Create, verify, and publish release
+      - name: Require repository release immutability
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_IMMUTABILITY_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            printf '%s\n' \
+              'release environment secret RELEASE_IMMUTABILITY_READ_TOKEN is required' \
+              >&2
+            exit 1
+          fi
+          metadata="$RUNNER_TEMP/repository-immutable-releases.json"
+          if ! gh api \
+            --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            > "$metadata"; then
+            printf '%s\n' \
+              'cannot confirm repository release immutability; refusing to publish' \
+              >&2
+            exit 1
+          fi
+          python3 -B ./scripts/verify-github-release.py policy \
+            --metadata "$metadata"
+
+      - name: Recheck remote release identity before draft
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          tag_ref="refs/tags/${RELEASE_TAG}"
+          tag_check_ref="refs/cwt-release-check/tag"
+          main_check_ref="refs/cwt-release-check/main"
+          git fetch --no-tags --force "$remote_url" \
+            "+${tag_ref}:${tag_check_ref}" \
+            "+refs/heads/main:${main_check_ref}"
+          expected_commit=$(git rev-parse --verify "${EXPECTED_SHA}^{commit}")
+          tag_commit=$(git rev-parse --verify "${tag_check_ref}^{commit}")
+          main_commit=$(git rev-parse --verify "${main_check_ref}^{commit}")
+          if [[ "$expected_commit" != "$tag_commit" ||
+                "$expected_commit" != "$main_commit" ]]; then
+            printf '%s\n' \
+              'release source, remote tag, and current main no longer identify one commit' \
+              >&2
+            exit 1
+          fi
+
+      - name: Create draft release
+        id: draft
         shell: bash
         run: |
           set -euo pipefail
@@ -500,18 +583,156 @@ jobs:
             --title "Codex Web Terminal $RELEASE_TAG" \
             release-assets/*
 
-          mapfile -t published < <(
+          release_id=$(
             gh release view "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --json assets \
-              --jq '.assets[].name' |
-              sort
+              --json databaseId \
+              --jq '.databaseId'
           )
-          mapfile -t expected < <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
-          if [[ "${published[*]}" != "${expected[*]}" ]]; then
-            printf 'draft asset verification failed\n' >&2
+          if [[ ! "$release_id" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'invalid draft release database ID: %q\n' "$release_id" >&2
             exit 1
           fi
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+
+      - name: Verify draft assets and GitHub SHA-256 digests
+        env:
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          windows="codex-web-terminal-v${RELEASE_VERSION}-windows-x86_64.zip"
+          linux="codex-web-terminal-v${RELEASE_VERSION}-linux-x86_64-glibc.tar.gz"
+          metadata="$RUNNER_TEMP/draft-release.json"
+          error_file="$RUNNER_TEMP/draft-release-error.txt"
+          verified=false
+          for attempt in $(seq 1 60); do
+            if gh api \
+                --method GET \
+                --header 'Accept: application/vnd.github+json' \
+                --header 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+                > "$metadata" &&
+              python3 -B ./scripts/verify-github-release.py release \
+                --metadata "$metadata" \
+                --tag "$RELEASE_TAG" \
+                --phase draft \
+                --asset-dir release-assets \
+                --asset "$windows" \
+                --asset "$linux" \
+                --asset SHA256SUMS.txt \
+                2> "$error_file"; then
+              verified=true
+              break
+            fi
+            if (( attempt < 60 )); then
+              sleep 2
+            fi
+          done
+          if [[ "$verified" != true ]]; then
+            printf '%s\n' \
+              'draft release metadata did not become complete within 120 seconds' \
+              >&2
+            if [[ -s "$error_file" ]]; then
+              cat "$error_file" >&2
+            fi
+            exit 1
+          fi
+
+      - name: Recheck immutability policy before publication
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_IMMUTABILITY_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/repository-immutable-releases-prepublish.json"
+          if [[ -z "${GH_TOKEN:-}" ]] ||
+            ! gh api \
+              --method GET \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/immutable-releases" \
+              > "$metadata"; then
+            printf '%s\n' \
+              'cannot reconfirm repository release immutability; draft remains unpublished' \
+              >&2
+            exit 1
+          fi
+          python3 -B ./scripts/verify-github-release.py policy \
+            --metadata "$metadata"
+
+      - name: Recheck remote release identity before publication
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          tag_ref="refs/tags/${RELEASE_TAG}"
+          tag_check_ref="refs/cwt-release-check/tag"
+          main_check_ref="refs/cwt-release-check/main"
+          git fetch --no-tags --force "$remote_url" \
+            "+${tag_ref}:${tag_check_ref}" \
+            "+refs/heads/main:${main_check_ref}"
+          expected_commit=$(git rev-parse --verify "${EXPECTED_SHA}^{commit}")
+          tag_commit=$(git rev-parse --verify "${tag_check_ref}^{commit}")
+          main_commit=$(git rev-parse --verify "${main_check_ref}^{commit}")
+          if [[ "$expected_commit" != "$tag_commit" ||
+                "$expected_commit" != "$main_commit" ]]; then
+            printf '%s\n' \
+              'release source, remote tag, and current main no longer identify one commit' \
+              >&2
+            exit 1
+          fi
+
+      - name: Publish verified draft
+        shell: bash
+        run: |
+          set -euo pipefail
           gh release edit "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --draft=false
+
+      - name: Require immutable published release and digested assets
+        env:
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          windows="codex-web-terminal-v${RELEASE_VERSION}-windows-x86_64.zip"
+          linux="codex-web-terminal-v${RELEASE_VERSION}-linux-x86_64-glibc.tar.gz"
+          metadata="$RUNNER_TEMP/published-release.json"
+          error_file="$RUNNER_TEMP/published-release-error.txt"
+          verified=false
+          for attempt in $(seq 1 60); do
+            if gh api \
+                --method GET \
+                --header 'Accept: application/vnd.github+json' \
+                --header 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+                > "$metadata" &&
+              python3 -B ./scripts/verify-github-release.py release \
+                --metadata "$metadata" \
+                --tag "$RELEASE_TAG" \
+                --phase published \
+                --asset-dir release-assets \
+                --asset "$windows" \
+                --asset "$linux" \
+                --asset SHA256SUMS.txt \
+                2> "$error_file"; then
+              verified=true
+              break
+            fi
+            if (( attempt < 60 )); then
+              sleep 2
+            fi
+          done
+          if [[ "$verified" != true ]]; then
+            printf '%s\n' \
+              'published release did not become immutable and complete within 120 seconds' \
+              >&2
+            if [[ -s "$error_file" ]]; then
+              cat "$error_file" >&2
+            fi
+            exit 1
+          fi
