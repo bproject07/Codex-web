@@ -78,7 +78,8 @@ Rust server
   Tokio + Axum
       ├── authenticated directory browser ── server-account filesystem
       ├── Favorites / Recent store ───────── workspaces.json
-      └── managed session registry (maximum 4)
+      ├── supervised peer broker ──────────── in-memory threads and turns
+      └── managed session registry (20 by default, configurable)
                           │
                           ▼
                    Native PTY sessions
@@ -90,17 +91,18 @@ Rust server
                in each selected folder
 ```
 
-The server owns up to four independent, web-managed agent PTY sessions. The
-browser displays one selected session in the same xterm screen and can switch
-between them without terminating the others. Closing a tab or losing the
-network does not terminate those sessions. A reconnecting browser resets xterm
-and replays the selected session's bounded terminal output buffer before it
-resumes live output.
+The server owns up to 20 independent, web-managed agent PTY sessions by
+default. The operator can select a limit from 1 through 256. The browser
+displays one selected session in the same xterm screen and can switch between
+them without terminating the others. Closing the browser page/window or losing
+the network does not terminate those sessions; using a terminal tab's explicit
+× action does. A reconnecting browser resets xterm and replays the selected
+session's bounded terminal output buffer before it resumes live output.
 
 ## Current scope
 
-- Up to four persistent, web-managed session entries per server; each running
-  entry owns one agent process
+- 20 persistent, web-managed session entries per server by default,
+  configurable from 1 through 256; each running entry owns one agent process
 - One primary agent session, started automatically
 - Read-only discovery of Codex, Claude, and AGY with installed version and
   `ready`, `missing`, or `misconfigured` status
@@ -110,6 +112,10 @@ resumes live output.
   filesystem roots, one-level directory browsing, or a manual absolute path
 - Server-side persistence for up to 100 Favorites and 30 deduplicated Recent
   folders
+- Supervised `@cwt` handoff, independent review, return, and same-reviewer
+  `Recheck` between Codex, Claude, and AGY sessions
+- A fresh dedicated reviewer PTY for every new peer thread; ordinary sessions
+  are never selected or reused as reviewers
 - One 16 MiB bounded raw terminal output buffer per session
 - Up to the newest 2 MiB replayed to each newly attached client
 - Initial PTY size of 120 columns by 35 rows
@@ -125,7 +131,63 @@ read/write control over every managed session plus folder browsing and launch
 authority anywhere readable by the server account. Do not share it with
 anyone who should not have that access.
 
+## Download a prebuilt release
+
+Tagged releases are designed to provide two self-contained application
+archives from the repository's
+[GitHub Releases](https://github.com/bproject07/Codex-web/releases) page:
+
+- `codex-web-terminal-vX.Y.Z-windows-x86_64.zip`
+- `codex-web-terminal-vX.Y.Z-linux-x86_64-glibc.tar.gz`
+
+Each archive contains the native server executable, the adjacent `web`
+directory, documentation, and a generated target-specific
+`THIRD_PARTY_LICENSES` bundle. `SHA256SUMS.txt` and GitHub artifact provenance
+are attached to the same release. If the Releases page has no tagged version
+yet, use the source-build instructions below; do not download binaries from an
+unofficial mirror.
+
+Verify a downloaded archive before extracting it:
+
+```bash
+grep -F '  codex-web-terminal-vX.Y.Z-linux-x86_64-glibc.tar.gz' \
+  SHA256SUMS.txt | sha256sum -c -
+gh attestation verify \
+  --repo bproject07/Codex-web \
+  --signer-workflow bproject07/Codex-web/.github/workflows/release.yml \
+  codex-web-terminal-vX.Y.Z-linux-x86_64-glibc.tar.gz
+```
+
+On Windows, use `Get-FileHash -Algorithm SHA256` and compare the result with
+`SHA256SUMS.txt`; use the same repository and
+`--signer-workflow bproject07/Codex-web/.github/workflows/release.yml` when
+verifying the ZIP attestation. Release archives are not Authenticode-signed
+yet, so Windows SmartScreen may show an unknown-publisher warning. Verify both
+the checksum and GitHub attestation before deciding whether to run an unsigned
+build.
+
+After extraction, keep `web` next to the executable and start it directly:
+
+Windows:
+
+```powershell
+.\codex-web.exe --project "C:\Projects\my-app"
+```
+
+Linux:
+
+```bash
+./codex-web --project "/home/user/projects/my-app" --no-open-browser
+```
+
+The Linux archive is built on Ubuntu 22.04 for x86_64 GNU/Linux and targets a
+glibc 2.35-or-newer runtime. It is not a universal Linux or musl binary.
+
 ## Prerequisites
+
+Prebuilt archives require only a supported operating system, browser, and at
+least one separately installed agent CLI. Rust, Node.js, compilers, and the
+source tree are required only when building from source.
 
 ### Windows
 
@@ -139,7 +201,7 @@ anyone who should not have that access.
 - GCC or Clang and the normal native build tools required by Rust
 - A supported browser on the client device
 
-### Rust
+### Rust (source builds only)
 
 Install stable Rust from [rustup.rs](https://rustup.rs/).
 
@@ -157,7 +219,7 @@ rustc --version
 cargo --version
 ```
 
-### Node.js
+### Node.js (source builds only)
 
 Install a Vite-supported Node.js release: Node 20.19 or newer within the Node
 20 line, or Node 22.12 or newer. Then verify:
@@ -207,7 +269,7 @@ deliberately no silent browser installation: installing a host executable is
 a security-sensitive operator action and may require interactive review,
 authentication, package-manager policy, or elevation.
 
-## Quick start
+## Quick start from source
 
 From the repository root:
 
@@ -262,8 +324,84 @@ browser tab cannot reuse stale availability. A missing or misconfigured agent
 displays manual host-side installation guidance and **Refresh** /
 **Check again** actions. Swipe the tab strip on mobile, or use a wheel,
 trackpad, or the overflow arrows on desktop. **Manage** opens the detailed
-session list. Switching tabs does not stop the previously displayed session;
-it continues running and buffering output in the background.
+session list and shows the current/configured count, for example `3/20`.
+**+ New** is disabled at capacity; existing `@cwt` follow-ups remain available
+because they reuse their dedicated reviewer. Switching tabs does not stop the
+previously displayed session; it continues running and buffering output in
+the background.
+
+### `@cwt` peer review
+
+The header's **@cwt** button opens a separate peer composer. It intentionally
+does not intercept text typed into xterm, so raw terminal input and Android
+IME handling remain unchanged.
+
+1. Select **Review**, **Verify**, **Ask**, or **Handoff**, choose an installed
+   agent kind, describe the scope, and use **Source ready — Prepare handoff**
+   only while the source is at an empty agent prompt.
+2. The server creates a fresh dedicated reviewer PTY in the source session's
+   revalidated working directory. It never selects an existing ordinary tab.
+   Catalog **Ready** proves executable discovery and a bounded version probe
+   only; complete any first-run sign-in or folder-trust prompt in the linked
+   reviewer tab yourself.
+3. The source agent prepares a bounded Markdown handoff through a private
+   local bridge. The browser shows it for review and optional editing.
+4. **Reviewer ready — Send** releases the approved handoff after the dedicated
+   reviewer is at an empty agent prompt.
+5. When the response is ready, **Source ready — Return** asks the source agent
+   to retrieve it and present the useful conclusion in its existing context.
+6. A later **Recheck** or follow-up uses the same live reviewer PTY. **+ New
+   peer** always creates a clean reviewer context.
+
+A new reviewer also consumes one session slot, so **+ New peer** is disabled
+when the configured capacity is full. Existing follow-ups remain enabled
+because they reuse their reviewer. The broker retains at most 32 turns in one
+reviewer thread; after that, close it and start a clean peer conversation.
+Active in-memory peer threads are bounded by the server's supported maximum of
+256, while the configured session capacity is normally the tighter limit.
+
+For example, open **@cwt** from a Codex source tab, choose **Verify** and
+Claude, then enter: `Review the current implementation for correctness,
+security regressions, and missing Windows/Linux tests.` The source prepares
+the handoff; you inspect it before sending. After Claude submits its bounded
+response, **Source ready — Return** brings the result back to that exact Codex
+conversation. A later **Recheck** keeps Claude's reviewer context; **+ New
+peer** deliberately starts without it.
+
+Peer and ordinary non-primary tabs have an accessible `×`. Closing a peer tab
+terminates only its dedicated PTY and purges its in-memory thread. A reviewer
+uses one slot from the configured session capacity; the server never evicts
+another tab.
+Restart, terminate, and removal of a source are blocked while it owns an open
+peer thread because those operations would make the retained context
+ambiguous.
+
+The bridge listens only on an ephemeral loopback port. Every PTY generation
+gets a random, narrowly scoped capability that is revoked when that generation
+ends. The browser token is never given to the helper and `CODEX_WEB_TOKEN` is
+removed from managed PTY and version-probe environments. Shutdown disables
+capability activation before releasing the private listener; an unexpected
+bridge exit shuts the public service down. Handoffs and responses are limited
+to 64 KiB, retained only in server memory, excluded from logs, and never
+extracted from ANSI/xterm output. Line endings are normalized and terminal
+control characters are rejected before storage and again before the helper
+writes an artifact.
+
+This is supervised coordination, not an autonomous scheduler. Generic CLI
+TUIs expose no reliable cross-provider "idle" signal, so Preview, Send, Return,
+and retry decisions stay explicit. The readiness-labelled buttons are the
+operator's acknowledgement; the matching API requests require
+`sourceReady: true` or `reviewerReady: true`. Delivery is bound to the exact
+PTY `sessionId` generation, but the server intentionally does not guess
+whether a CLI is showing its normal prompt, a confirmation, or first-run
+setup. If an agent declines the helper command or its tool policy blocks it,
+the UI remains at the current visible state instead of guessing from terminal
+output.
+
+Automation prompt text and its Enter submit key are one ordered queue
+transaction but use separate PTY writes with a short settle interval. This
+prevents paste-burst guards from treating Enter as part of a fast pasted prompt
+while still preventing browser input from interleaving between the two writes.
 
 The generated token changes whenever the server restarts. Supply `--token` or
 `CODEX_WEB_TOKEN` when a stable token is required.
@@ -392,9 +530,10 @@ Keep the `web` directory next to `codex-web.exe`. The executable serves those
 assets. A Linux package uses the same layout with the extensionless
 `codex-web` binary. During `cargo run`, the backend also looks for `web/dist`.
 
-These are local build outputs, not published binary releases. Anyone
-redistributing them must first include the complete dependency license and
-NOTICE texts described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The local build scripts do not create a redistribution license bundle. Before
+sharing either directory, run the target-specific license generator described
+in [BUILDING.md](BUILDING.md) and include its `THIRD_PARTY_LICENSES` directory.
+Tagged GitHub Releases perform and verify that step automatically.
 
 ## Command-line interface
 
@@ -438,6 +577,7 @@ Supported arguments:
 | --- | --- |
 | `--host` | Bind address; defaults to `127.0.0.1` |
 | `--port` | TCP port; defaults to `8787` |
+| `--max-sessions` | Managed capacity including the primary entry, stopped entries, and `@cwt` reviewers; defaults to `20`, valid range `1`–`256` |
 | `--project` | Default working directory for the primary terminal and new sessions that omit a folder |
 | `--state-dir` | Dedicated directory for server-side Favorites and Recent state; uses the per-user OS default when omitted |
 | `--shell` | Windows-only: `powershell` or `cmd`; ignored on Unix |
@@ -511,6 +651,7 @@ CLI arguments override environment variables.
 | --- | --- |
 | `CODEX_WEB_HOST` | `127.0.0.1` |
 | `CODEX_WEB_PORT` | `8787` |
+| `CODEX_WEB_MAX_SESSIONS` | `20`; valid range `1`–`256` |
 | `CODEX_WEB_PROJECT_DIR` | Current directory |
 | `CODEX_WEB_STATE_DIR` | Windows: `%LOCALAPPDATA%\codex-web-terminal`; Unix: `$XDG_STATE_HOME/codex-web-terminal` or `$HOME/.local/state/codex-web-terminal` |
 | `CODEX_WEB_TOKEN` | Secure random token generated at startup |
@@ -603,7 +744,7 @@ Endpoints:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/health` | Aggregate installation, process, session, and client-count health |
+| `GET` | `/api/health` | Aggregate installation, process, session/client counts, and configured `maxSessions` capacity |
 | `GET` | `/api/agents` | Compatibility list of configured, ready profiles available to **New** |
 | `GET` | `/api/agent-catalog` | Read-only platform, status, version, verification, install, and update metadata |
 | `GET` | `/api/filesystem/roots` | List the configured default directory and server filesystem roots |
@@ -618,10 +759,22 @@ Endpoints:
 | `POST` | `/api/sessions/{terminalId}/restart` | Terminate and recreate one agent PTY |
 | `POST` | `/api/sessions/{terminalId}/terminate` | Terminate one agent PTY without removing its entry |
 | `DELETE` | `/api/sessions/{terminalId}` | Terminate and remove a non-primary session |
+| `GET` | `/api/peer/threads` | List active supervised peer threads and their current bounded turn |
+| `POST` | `/api/peer/threads` | Create a fresh dedicated reviewer for one running source terminal |
+| `GET` | `/api/peer/threads/{threadId}` | Read one active peer thread |
+| `POST` | `/api/peer/threads/{threadId}/turns` | Prepare a follow-up on the same live reviewer |
+| `POST` | `/api/peer/threads/{threadId}/dispatch` | Approve and deliver the current handoff preview |
+| `POST` | `/api/peer/threads/{threadId}/return` | Return a ready reviewer response to the source |
+| `DELETE` | `/api/peer/threads/{threadId}` | Close the reviewer and purge the in-memory thread |
 | `GET` | `/api/session` | Legacy alias for primary-session metadata |
 | `POST` | `/api/session/restart` | Legacy alias for restarting the primary session |
 | `POST` | `/api/session/terminate` | Legacy alias for terminating the primary session |
 | `GET` | `/ws?token=...&terminalId=...` | Attach an authenticated WebSocket to one managed terminal |
+
+Peer requests that enqueue an automation prompt require an explicit readiness
+acknowledgement: create/follow-up/return bodies include `sourceReady: true`,
+and dispatch includes `reviewerReady: true`. Callers must set it only after
+the named terminal is visibly at an empty agent prompt.
 
 No response contains the authentication token, terminal input, terminal
 output, Codex credentials, or Codex authentication files.
@@ -713,7 +866,10 @@ performs detection only. No API endpoint executes that command.
 Each session snapshot contains a stable `terminalId`, display `name`, `agent`,
 `isPrimary`, `createdAt`, the display `project` path, and its opaque
 `directoryId`. The existing `sessionId` identifies the current PTY generation
-and therefore changes when that terminal is restarted.
+and therefore changes when that terminal is restarted. `purpose` is
+`{"kind":"interactive"}` for ordinary and primary sessions. A dedicated
+reviewer reports
+`{"kind":"peer","threadId":"...","parentTerminalId":"..."}`.
 
 ## WebSocket protocol
 
@@ -1077,8 +1233,22 @@ when available.
 
 ## Known limitations
 
-- The four-session registry contains only PTYs created and owned by the current
-  Codex Web Terminal server process.
+- The managed-session registry contains only PTYs created and owned by the
+  current Codex Web Terminal server process. Its default capacity is 20 and
+  its configured limit includes the primary entry, ordinary running or stopped
+  entries, and dedicated peer reviewers. A slot is released only when a
+  removable session is deleted or its peer thread is closed.
+- Raising `--max-sessions` increases process and memory exposure. Every running
+  slot can own a full agent CLI process, and every managed entry can retain a
+  16 MiB output buffer.
+- Peer threads and their bounded handoff/response artifacts are in memory only.
+  A server restart closes their PTYs and cannot restore reviewer context.
+- Dedicated peer tabs isolate conversational context from ordinary tabs, but
+  are not an operating-system security boundary. All configured CLIs run as
+  the same server account.
+- Agent CLIs must use their tool runner to call the loopback peer helper.
+  Provider policy, sandboxing, or a declined tool call can leave a supervised
+  turn waiting; terminal output is never parsed to infer completion.
 - Agent discovery is local and read-only. The browser cannot install, update,
   authenticate, or repair a CLI; it only shows vetted host-side instructions.
 - The folder picker is intentionally directory-only and non-recursive. It does

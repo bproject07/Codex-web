@@ -22,6 +22,14 @@ export type SessionLifecycle =
 
 export type AgentKind = "codex" | "claude" | "agy";
 
+export type SessionPurpose =
+  | { kind: "interactive" }
+  | {
+      kind: "peer";
+      threadId: string;
+      parentTerminalId: string;
+    };
+
 export type AgentDiscoveryState = "ready" | "missing" | "misconfigured";
 export type AgentConfiguration = "auto" | "override";
 
@@ -58,6 +66,16 @@ export interface AgentCatalogOptions {
   signal?: AbortSignal;
 }
 
+export interface HealthSnapshot {
+  status: "ok";
+  codexInstalled: boolean;
+  sessionRunning: boolean;
+  connectedClients: number;
+  sessionCount: number;
+  runningSessions: number;
+  maxSessions: number;
+}
+
 export interface SessionSnapshot {
   terminalId: string;
   name: string;
@@ -74,6 +92,7 @@ export interface SessionSnapshot {
   project: string;
   directoryId: string;
   lastError: string | null;
+  purpose: SessionPurpose;
 }
 
 export interface FilesystemRoots {
@@ -183,6 +202,37 @@ export function websocketUrl(token: string, terminalId: string): string {
   url.searchParams.set("token", token);
   url.searchParams.set("terminalId", terminalId);
   return url.toString();
+}
+
+export async function getHealth(
+  token: string,
+  signal?: AbortSignal,
+): Promise<HealthSnapshot> {
+  const health = await apiRequest<unknown>("/api/health", token, { signal });
+  if (
+    !isRecord(health) ||
+    health.status !== "ok" ||
+    typeof health.codexInstalled !== "boolean" ||
+    typeof health.sessionRunning !== "boolean" ||
+    !isNonNegativeSafeInteger(health.connectedClients) ||
+    !isNonNegativeSafeInteger(health.sessionCount) ||
+    !isNonNegativeSafeInteger(health.runningSessions) ||
+    typeof health.maxSessions !== "number" ||
+    !Number.isSafeInteger(health.maxSessions) ||
+    health.maxSessions <= 0
+  ) {
+    throw new ApiError(502, "The server returned an invalid health response.");
+  }
+
+  return {
+    status: "ok",
+    codexInstalled: health.codexInstalled,
+    sessionRunning: health.sessionRunning,
+    connectedClients: health.connectedClients,
+    sessionCount: health.sessionCount,
+    runningSessions: health.runningSessions,
+    maxSessions: health.maxSessions,
+  };
 }
 
 export async function listSessions(
@@ -448,6 +498,7 @@ type LegacySessionSnapshot = Omit<
   | "isPrimary"
   | "createdAt"
   | "directoryId"
+  | "purpose"
 >;
 
 export function normalizeSessionSnapshot(
@@ -479,7 +530,48 @@ export function normalizeSessionSnapshot(
         : (session.startedAt ?? Date.now()),
     directoryId:
       typeof session.directoryId === "string" ? session.directoryId : "",
+    purpose: normalizeSessionPurpose(
+      session.purpose,
+      Object.prototype.hasOwnProperty.call(session, "purpose"),
+    ),
   };
+}
+
+function normalizeSessionPurpose(
+  value: unknown,
+  fieldIsPresent: boolean,
+): SessionPurpose {
+  if (!fieldIsPresent) {
+    return { kind: "interactive" };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw invalidSessionPurpose();
+  }
+
+  const record = value as Record<string, unknown>;
+  if (record.kind === "interactive") {
+    return { kind: "interactive" };
+  }
+  if (record.kind === "peer") {
+    const threadId = record.threadId;
+    const parentTerminalId = record.parentTerminalId;
+    if (
+      typeof threadId === "string" &&
+      CLEAN_TERMINAL_ID.test(threadId) &&
+      typeof parentTerminalId === "string" &&
+      CLEAN_TERMINAL_ID.test(parentTerminalId)
+    ) {
+      return { kind: "peer", threadId, parentTerminalId };
+    }
+  }
+  throw invalidSessionPurpose();
+}
+
+function invalidSessionPurpose(): ApiError {
+  return new ApiError(
+    502,
+    "The server returned an invalid terminal session purpose.",
+  );
 }
 
 function normalizeFilesystemRoots(value: unknown): FilesystemRoots {
@@ -698,6 +790,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+  );
+}
+
 function normalizeHttpsUrl(value: string): string {
   if (!value) {
     return "";
@@ -718,7 +818,7 @@ function endpointIsUnavailable(error: unknown): boolean {
   );
 }
 
-async function apiRequest<T>(
+export async function apiRequest<T>(
   path: string,
   token: string,
   init: RequestInit = {},

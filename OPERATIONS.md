@@ -1,7 +1,8 @@
 # Operating Codex Web Terminal
 
-This guide explains how to configure, start, use, monitor, stop, upgrade, and
-troubleshoot Codex Web Terminal after it has been built.
+This guide explains how to install, configure, start, use, monitor, stop,
+upgrade, and troubleshoot Codex Web Terminal from a verified release archive
+or a local source build.
 
 See [BUILDING.md](BUILDING.md) for compilation and packaging. See
 [README.md](README.md) for architecture, protocol, and API details.
@@ -116,9 +117,46 @@ review. The operator must review and run them explicitly. **Refresh** and
 **Check again** perform only fixed executable discovery and bounded
 `--version` probes.
 
+## Install a tagged release
+
+Download the Windows or Linux archive and `SHA256SUMS.txt` from the official
+[GitHub Releases](https://github.com/bproject07/Codex-web/releases) page. A
+release archive is accepted only after Windows/Linux tests, the packaged
+`@cwt` regression, and target-specific third-party license generation pass.
+Do not use an archive copied from a local `dist` directory or an unofficial
+mirror.
+
+Verify the archive before extraction. On Linux:
+
+```bash
+grep -F '  codex-web-terminal-vX.Y.Z-linux-x86_64-glibc.tar.gz' \
+  SHA256SUMS.txt | sha256sum -c -
+gh attestation verify \
+  --repo bproject07/Codex-web \
+  --signer-workflow bproject07/Codex-web/.github/workflows/release.yml \
+  codex-web-terminal-vX.Y.Z-linux-x86_64-glibc.tar.gz
+```
+
+On Windows, compare `Get-FileHash -Algorithm SHA256 <archive.zip>` with the
+matching line in `SHA256SUMS.txt`, then run:
+
+```powershell
+gh attestation verify `
+  --repo bproject07/Codex-web `
+  --signer-workflow bproject07/Codex-web/.github/workflows/release.yml `
+  .\codex-web-terminal-vX.Y.Z-windows-x86_64.zip
+```
+
+Extract the whole versioned directory. Keep `web` and
+`THIRD_PARTY_LICENSES` beside the executable. Windows packages are not
+Authenticode-signed yet and may trigger SmartScreen's unknown-publisher
+warning; checksum and provenance verification are required before choosing to
+run an unsigned archive. The Linux artifact is built on Ubuntu 22.04 for
+x86_64 glibc 2.35 or newer; it is not a musl or universal Linux build.
+
 ## First local start on Windows
 
-Build first:
+For a source checkout, build first:
 
 ```powershell
 .\scripts\build.ps1
@@ -139,7 +177,7 @@ removes it from the visible address bar.
 
 ## First local start on Linux
 
-Build first:
+For a source checkout, build first:
 
 ```bash
 ./scripts/build.sh
@@ -299,6 +337,7 @@ browse to the new location.
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | Address on which the HTTP server listens |
 | `--port` | `8787` | TCP port |
+| `--max-sessions` | `20` | Managed capacity from `1` through `256`, including the primary entry, stopped entries, and dedicated `@cwt` reviewers |
 | `--project` | current directory | Default working directory for the primary PTY and new sessions without a selected folder |
 | `--state-dir` | per-user OS state directory | Dedicated directory containing `workspaces.json` Favorites/Recent state |
 | `--command` | derived | Explicit primary executable override; otherwise follows `--primary-agent` |
@@ -320,6 +359,7 @@ Equivalent environment variables:
 ```text
 CODEX_WEB_HOST
 CODEX_WEB_PORT
+CODEX_WEB_MAX_SESSIONS
 CODEX_WEB_PROJECT_DIR
 CODEX_WEB_STATE_DIR
 CODEX_WEB_COMMAND
@@ -337,6 +377,13 @@ CODEX_WEB_LOG_LEVEL
 ```
 
 Command-line arguments override environment variables.
+
+`scripts/run.ps1` exposes the same setting as `-MaxSessions`; when that
+parameter is omitted it leaves `CODEX_WEB_MAX_SESSIONS` available to the
+server. `run.sh` forwards `--max-sessions` after its project argument. Raising
+the capacity increases both process and memory exposure: every running slot
+may own a full agent CLI process, and every managed entry may retain a 16 MiB
+output buffer.
 
 The command values are executable names or paths, not shell expressions. Do
 not pass pipes, redirections, command substitutions, or chained commands.
@@ -539,6 +586,76 @@ highlighted and each tab includes a lifecycle-status dot.
 - **Remove** terminates and deletes a non-primary managed session.
 - The primary `<agent> 1` entry (for example `Codex 1`) cannot be removed.
 
+### `@cwt` peer workflow
+
+**@cwt** opens a supervised cross-agent composer without changing xterm input
+handling. A new peer thread always starts a fresh dedicated reviewer in the
+source terminal's current, revalidated server directory. It does not reuse a
+normal tab, even when a matching agent appears idle.
+
+The operational sequence is:
+
+1. choose the reviewer agent and action, then use **Source ready — Prepare
+   handoff** while the source is at an empty agent prompt;
+2. wait for the source agent to submit a bounded handoff;
+3. inspect or edit **Preview handoff**;
+4. use **Reviewer ready — Send** while the reviewer is at an empty agent
+   prompt;
+5. wait for **Response ready**;
+6. use **Source ready — Return** while the source is at an empty agent prompt;
+7. use a follow-up or **Recheck** to retain that same reviewer context.
+
+Concrete example: from a Codex source tab, choose **Verify** with Claude and
+enter `Review the current implementation for correctness, security regressions,
+and missing Windows/Linux tests.` Inspect the generated handoff before
+dispatch. Return Claude's response to the same Codex source, then use
+**Recheck** for another pass that should retain Claude's reviewer context.
+Use **+ New peer** only when a clean reviewer conversation is intentional.
+It is disabled when session capacity is full, while follow-ups on an existing
+reviewer remain available. One reviewer thread retains at most 32 turns; close
+it and start a clean peer after reaching that boundary. The broker permits at
+most 256 active in-memory peer threads, though the configured session capacity
+normally applies first because each thread owns a dedicated terminal.
+
+Catalog **Ready** means executable discovery and the bounded `--version` probe
+succeeded. A fresh provider TUI may still require sign-in, onboarding, or
+folder trust; complete those prompts manually in the linked reviewer tab.
+
+The reviewer is visible as a linked tab and counts toward the configured
+session capacity. `×` closes and removes it only after the reviewer process exit is
+confirmed. A termination error keeps the exact reviewer and thread available
+for a retry instead of reporting a false successful close. Provisioning owns
+the reviewer identity before its PTY starts, so a concurrent Close is rejected
+until that transaction finishes. The server never closes another session to
+make room. An open peer thread prevents restart, terminate, or deletion of its
+source. Generic restart/terminate controls are disabled or rejected for the
+reviewer itself because a restarted PTY would not retain the claimed context.
+
+Peer coordination does not parse raw PTY output and does not infer agent
+idleness from silence, cursor position, or process state. The agents call a
+hidden helper in the same `codex-web` executable. That helper connects to an
+ephemeral loopback-only listener with a random capability scoped to the exact
+PTY generation. The capability is not the browser token, is never accepted on
+the public listener, and is revoked when the generation ends.
+`CODEX_WEB_TOKEN` is stripped from managed PTYs and version probes. Server
+shutdown disables new capabilities and revokes existing ones before releasing
+the private listener; an unexpected private-listener exit also stops the
+public service.
+
+The readiness-labelled buttons are an explicit operator acknowledgement, not
+an inferred state. The corresponding API requests require `sourceReady: true`
+or `reviewerReady: true`, and delivery is rejected if the PTY generation has
+changed. Do not confirm readiness while the CLI is showing a permission,
+login, trust, or first-run prompt, or while text is partially entered.
+
+If an agent's tool policy declines or blocks the helper invocation, the turn
+remains visibly pending. Inspect that agent's tab, approve the local command
+if appropriate, or close the peer thread. Do not diagnose completion by
+copying terminal output into the application. Handoffs and responses are
+limited to 64 KiB, live only in memory, and are lost when the server stops.
+Their line endings are normalized and unsafe terminal control characters are
+rejected by both the broker and helper.
+
 ### New
 
 **+ New** uses two focused steps.
@@ -596,8 +713,15 @@ On a phone, scroll vertically inside the agent-card list. Each card keeps its
 own **Start** action; later cards and their buttons remain reachable without
 scrolling the underlying terminal page.
 
-The server allows at most four managed sessions. Each has its own process,
-lifecycle, output replay buffer, and connected-client count.
+The server allows 20 managed sessions by default and accepts a configured
+capacity from 1 through 256. **Manage** displays the current/capacity value,
+for example `3/20`. The count includes the primary entry, ordinary running or
+stopped entries, and dedicated peer reviewers. **+ New** is disabled when the
+capacity is full; existing peer follow-ups remain available because they reuse
+their reviewer. A slot is released only by deleting a removable ordinary
+entry or closing its peer thread. Each entry has its own lifecycle, output
+replay buffer, and connected-client count; each running entry also owns a full
+agent process.
 
 When a dangerous-mode switch is active, the card warns that approvals are
 disabled and the agent may edit files and run commands without asking for
@@ -690,7 +814,7 @@ Healthy output has:
   "connectedClients": 0,
   "sessionCount": 1,
   "runningSessions": 1,
-  "maxSessions": 4
+  "maxSessions": 20
 }
 ```
 
@@ -701,6 +825,9 @@ Important distinction:
   the configured agent's `--version`; it is not a continuously refreshed
   installation probe. The field name is retained for API compatibility.
 - `sessionRunning: true` means at least one PTY process is actually running.
+- `maxSessions` is the configured registry capacity, not a hard-coded UI
+  value. `sessionCount` includes stopped entries and dedicated reviewers until
+  they are removed or closed.
 
 The frontend can still load while a PTY is failed so diagnostics and restart
 controls remain available.
@@ -752,6 +879,20 @@ curl \
   -H "Authorization: Bearer $CODEX_WEB_TOKEN" \
   http://127.0.0.1:8787/api/sessions
 ```
+
+List active peer threads:
+
+```bash
+curl \
+  -H "Authorization: Bearer $CODEX_WEB_TOKEN" \
+  http://127.0.0.1:8787/api/peer/threads
+```
+
+Peer API responses contain the current handoff or reviewer response after one
+has been submitted. Treat them as terminal-conversation data: do not put them
+in diagnostics or logs. Browser routes use the normal bearer token. The
+private `/internal/v1/peer` helper route exists only on a separate loopback
+listener and is not served on the configured public port.
 
 Inspect filesystem roots and saved workspace state:
 
@@ -923,12 +1064,16 @@ before upgrading.
 
 Recommended sequence:
 
-1. Pull or check out the desired reviewed commit.
-2. Run the full Windows and Linux build/test matrix from
-   [BUILDING.md](BUILDING.md). Every code update must pass both platforms.
+1. For an official release, download the new archive and verify its checksum
+   and attestation before extraction. For a source deployment, pull or check
+   out the desired reviewed commit and run the full Windows and Linux
+   build/test matrix from [BUILDING.md](BUILDING.md).
+2. Read the release notes and confirm that the host satisfies the artifact's
+   platform and glibc requirements.
 3. Keep the old package until the new one has passed validation.
 4. Stop the existing server.
-5. Replace the executable and the entire adjacent `web` directory together.
+5. Replace the executable, the entire adjacent `web` directory, and the
+   accompanying documentation/license bundle together.
 6. Start the new server with the same project, state directory, and explicit
    token if continuity of Favorites/Recent, the browser URL, and the credential
    is required. This does not preserve PTY processes or live terminal sessions.

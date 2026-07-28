@@ -1,5 +1,6 @@
 use std::{
     env,
+    ffi::OsString,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child as ProcessChild, Command, Stdio},
@@ -34,14 +35,26 @@ use windows_sys::Win32::{
 use crate::{
     config::{AgentKind, ShellKind},
     filesystem::validate_canonical_readable_directory,
+    peer::{
+        CWT_PEER_CAPABILITY_ENV, CWT_PEER_ENDPOINT_ENV, CWT_PEER_HELPER_ENV, CWT_SESSION_ID_ENV,
+        CWT_TERMINAL_ID_ENV,
+    },
 };
 
 pub const INITIAL_COLS: u16 = 120;
 pub const INITIAL_ROWS: u16 = 35;
 const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
 const CLAUDE_NESTING_ENV: &str = "CLAUDECODE";
+const CODEX_WEB_TOKEN_ENV: &str = "CODEX_WEB_TOKEN";
 const CLAUDE_DISABLE_AUTOUPDATER_ENV: &str = "DISABLE_AUTOUPDATER";
 const AGY_DISABLE_AUTO_UPDATE_ENV: &str = "AGY_CLI_DISABLE_AUTO_UPDATE";
+const PEER_ENVIRONMENT_NAMES: [&str; 5] = [
+    CWT_PEER_ENDPOINT_ENV,
+    CWT_PEER_HELPER_ENV,
+    CWT_TERMINAL_ID_ENV,
+    CWT_SESSION_ID_ENV,
+    CWT_PEER_CAPABILITY_ENV,
+];
 const VERSION_OUTPUT_LIMIT: usize = 16 * 1024;
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const VERSION_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -139,6 +152,14 @@ pub fn spawn_resolved(
     config: &TerminalConfig,
     resolved: &ResolvedCommand,
 ) -> Result<SpawnedTerminal> {
+    spawn_resolved_with_environment(config, resolved, &[])
+}
+
+pub fn spawn_resolved_with_environment(
+    config: &TerminalConfig,
+    resolved: &ResolvedCommand,
+    environment: &[(OsString, OsString)],
+) -> Result<SpawnedTerminal> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -149,7 +170,7 @@ pub fn spawn_resolved(
         })
         .context("failed to create a native pseudo-terminal")?;
 
-    let command = pty_command(config, resolved);
+    let command = pty_command_with_environment(config, resolved, environment);
     validate_project_directory(config)?;
     let child = pair.slave.spawn_command(command).with_context(|| {
         format!(
@@ -178,7 +199,16 @@ pub fn spawn_resolved(
     })
 }
 
+#[cfg(test)]
 fn pty_command(config: &TerminalConfig, resolved: &ResolvedCommand) -> CommandBuilder {
+    pty_command_with_environment(config, resolved, &[])
+}
+
+fn pty_command_with_environment(
+    config: &TerminalConfig,
+    resolved: &ResolvedCommand,
+    environment: &[(OsString, OsString)],
+) -> CommandBuilder {
     #[cfg(windows)]
     let mut command = if resolved.is_batch_file || config.shell == ShellKind::Cmd {
         let mut command = CommandBuilder::new("cmd.exe");
@@ -202,6 +232,12 @@ fn pty_command(config: &TerminalConfig, resolved: &ResolvedCommand) -> CommandBu
 
     command.cwd(&config.project_dir);
     remove_parent_agent_markers(&mut command);
+    remove_inherited_peer_environment(&mut command);
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    remove_parent_agent_markers(&mut command);
+    remove_server_secret_environment(&mut command);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     command
@@ -210,6 +246,16 @@ fn pty_command(config: &TerminalConfig, resolved: &ResolvedCommand) -> CommandBu
 fn remove_parent_agent_markers(command: &mut CommandBuilder) {
     command.env_remove(CODEX_THREAD_ID_ENV);
     command.env_remove(CLAUDE_NESTING_ENV);
+}
+
+fn remove_inherited_peer_environment(command: &mut CommandBuilder) {
+    for name in PEER_ENVIRONMENT_NAMES {
+        command.env_remove(name);
+    }
+}
+
+fn remove_server_secret_environment(command: &mut CommandBuilder) {
+    command.env_remove(CODEX_WEB_TOKEN_ENV);
 }
 
 fn resolve_command(command: &str, agent: AgentKind) -> Result<ResolvedCommand> {
@@ -588,7 +634,11 @@ fn probe_command_version(
 fn configure_version_probe_environment(command: &mut Command, agent: AgentKind) {
     command
         .env_remove(CODEX_THREAD_ID_ENV)
-        .env_remove(CLAUDE_NESTING_ENV);
+        .env_remove(CLAUDE_NESTING_ENV)
+        .env_remove(CODEX_WEB_TOKEN_ENV);
+    for name in PEER_ENVIRONMENT_NAMES {
+        command.env_remove(name);
+    }
 
     match agent {
         AgentKind::Claude => {
@@ -899,11 +949,63 @@ mod command_tests {
     fn child_agents_do_not_inherit_parent_session_markers() {
         let mut command = CommandBuilder::new("codex");
         command.env(CODEX_THREAD_ID_ENV, "parent-thread");
+        command.env(CODEX_WEB_TOKEN_ENV, "server-bearer-token");
+        for name in PEER_ENVIRONMENT_NAMES {
+            command.env(name, "stale-peer-value");
+        }
 
         remove_parent_agent_markers(&mut command);
+        remove_inherited_peer_environment(&mut command);
+        remove_server_secret_environment(&mut command);
 
         assert_eq!(command.get_env(CODEX_THREAD_ID_ENV), None);
         assert_eq!(command.get_env(CLAUDE_NESTING_ENV), None);
+        assert_eq!(command.get_env(CODEX_WEB_TOKEN_ENV), None);
+        for name in PEER_ENVIRONMENT_NAMES {
+            assert_eq!(command.get_env(name), None);
+        }
+    }
+
+    #[test]
+    fn internal_environment_is_applied_without_restoring_parent_agent_markers() {
+        let config = TerminalConfig {
+            project_dir: PathBuf::from("."),
+            command: "codex".to_owned(),
+            arguments: Vec::new(),
+            agent: AgentKind::Codex,
+            shell: ShellKind::Powershell,
+        };
+        let resolved = ResolvedCommand {
+            path: PathBuf::from("codex"),
+            #[cfg(windows)]
+            is_batch_file: false,
+        };
+        let environment = vec![
+            (
+                OsString::from("CWT_PEER_ENDPOINT"),
+                OsString::from("127.0.0.1:43123"),
+            ),
+            (
+                OsString::from(CODEX_THREAD_ID_ENV),
+                OsString::from("parent-thread"),
+            ),
+            (
+                OsString::from(CODEX_WEB_TOKEN_ENV),
+                OsString::from("server-bearer-token"),
+            ),
+            (OsString::from("TERM"), OsString::from("unsafe-override")),
+        ];
+
+        let command = pty_command_with_environment(&config, &resolved, &environment);
+
+        assert_eq!(
+            command.get_env("CWT_PEER_ENDPOINT"),
+            Some(OsStr::new("127.0.0.1:43123"))
+        );
+        assert_eq!(command.get_env(CODEX_THREAD_ID_ENV), None);
+        assert_eq!(command.get_env(CLAUDE_NESTING_ENV), None);
+        assert_eq!(command.get_env(CODEX_WEB_TOKEN_ENV), None);
+        assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
     }
 
     #[test]
@@ -918,7 +1020,9 @@ mod command_tests {
         let mut claude = Command::new("claude");
         claude
             .env(CODEX_THREAD_ID_ENV, "parent-codex")
-            .env(CLAUDE_NESTING_ENV, "parent-claude");
+            .env(CLAUDE_NESTING_ENV, "parent-claude")
+            .env(CODEX_WEB_TOKEN_ENV, "server-bearer-token")
+            .env("CWT_PEER_CAPABILITY", "stale-peer-secret");
         configure_version_probe_environment(&mut claude, AgentKind::Claude);
         let claude_environment = environment(&claude);
         assert_eq!(
@@ -930,8 +1034,16 @@ mod command_tests {
             Some(&None)
         );
         assert_eq!(
+            claude_environment.get(OsStr::new(CODEX_WEB_TOKEN_ENV)),
+            Some(&None)
+        );
+        assert_eq!(
             claude_environment.get(OsStr::new(CLAUDE_DISABLE_AUTOUPDATER_ENV)),
             Some(&Some(OsString::from("1")))
+        );
+        assert_eq!(
+            claude_environment.get(OsStr::new("CWT_PEER_CAPABILITY")),
+            Some(&None)
         );
         assert!(!claude_environment.contains_key(OsStr::new(AGY_DISABLE_AUTO_UPDATE_ENV)));
 
@@ -942,11 +1054,19 @@ mod command_tests {
             agy_environment.get(OsStr::new(AGY_DISABLE_AUTO_UPDATE_ENV)),
             Some(&Some(OsString::from("true")))
         );
+        assert_eq!(
+            agy_environment.get(OsStr::new(CODEX_WEB_TOKEN_ENV)),
+            Some(&None)
+        );
         assert!(!agy_environment.contains_key(OsStr::new(CLAUDE_DISABLE_AUTOUPDATER_ENV)));
 
         let mut codex = Command::new("codex");
         configure_version_probe_environment(&mut codex, AgentKind::Codex);
         let codex_environment = environment(&codex);
+        assert_eq!(
+            codex_environment.get(OsStr::new(CODEX_WEB_TOKEN_ENV)),
+            Some(&None)
+        );
         assert!(!codex_environment.contains_key(OsStr::new(CLAUDE_DISABLE_AUTOUPDATER_ENV)));
         assert!(!codex_environment.contains_key(OsStr::new(AGY_DISABLE_AUTO_UPDATE_ENV)));
     }

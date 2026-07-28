@@ -7,7 +7,12 @@ import {
 } from "react";
 
 import type { SessionSnapshot } from "../api";
-import { AGENT_SHORT_LABELS } from "../agents";
+import { AGENT_LABELS, AGENT_SHORT_LABELS } from "../agents";
+import {
+  peerStatusLabel,
+  peerThreadDisplayId,
+  type PeerThread,
+} from "../peer";
 import {
   compactSessionName,
   horizontalWheelDelta,
@@ -15,11 +20,16 @@ import {
 
 interface SessionTabsProps {
   sessions: SessionSnapshot[];
+  maxSessions: number | null;
   selectedTerminalId: string;
   busy: boolean;
   onSelect: (session: SessionSnapshot) => void;
+  onClose: (session: SessionSnapshot) => void;
   onCreate: () => void;
+  onPeer: () => void;
   onManage: () => void;
+  peerThreads: PeerThread[];
+  peerDisabledReason: string | null;
 }
 
 interface ScrollState {
@@ -36,15 +46,62 @@ const EMPTY_SCROLL_STATE: ScrollState = {
 
 export function SessionTabs({
   sessions,
+  maxSessions,
   selectedTerminalId,
   busy,
   onSelect,
+  onClose,
   onCreate,
+  onPeer,
   onManage,
+  peerThreads,
+  peerDisabledReason,
 }: SessionTabsProps) {
   const tabListRef = useRef<HTMLDivElement>(null);
   const [scrollState, setScrollState] =
     useState<ScrollState>(EMPTY_SCROLL_STATE);
+  const sessionTopologyKey = sessions
+    .map((session) => session.terminalId)
+    .join("|");
+  const tabLayoutKey = [
+    ...sessions.map(
+      (session) =>
+        `${session.terminalId}:${session.name}:${session.status}:${session.purpose.kind}`,
+    ),
+    ...peerThreads.map(
+      (thread) =>
+        `${thread.id}:${thread.reviewerTerminalId ?? ""}:${thread.status}`,
+    ),
+  ].join("|");
+  const peerButtonDescription =
+    peerDisabledReason ??
+    (!selectedTerminalId
+      ? "@cwt requires a selected source terminal."
+      : busy
+        ? "Wait for the current terminal operation before opening @cwt."
+        : "Open @cwt peer collaboration");
+  const configuredMaxSessions =
+    maxSessions !== null &&
+    Number.isSafeInteger(maxSessions) &&
+    maxSessions > 0
+      ? maxSessions
+      : null;
+  const capacityReached =
+    configuredMaxSessions !== null &&
+    sessions.length >= configuredMaxSessions;
+  const sessionCountLabel =
+    configuredMaxSessions === null
+      ? `${sessions.length}`
+      : `${sessions.length}/${configuredMaxSessions}`;
+  const createButtonDescription = capacityReached
+    ? `Session capacity reached (${sessions.length} of ${configuredMaxSessions})`
+    : "Choose an agent for a new terminal";
+  const manageButtonDescription =
+    configuredMaxSessions === null
+      ? `Manage ${sessions.length} terminal ${
+          sessions.length === 1 ? "session" : "sessions"
+        }`
+      : `Manage ${sessions.length} of ${configuredMaxSessions} terminal sessions`;
 
   const measureScroll = useCallback(() => {
     const tabList = tabListRef.current;
@@ -82,15 +139,15 @@ export function SessionTabs({
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       const tabList = tabListRef.current;
-      const activeTab = tabList?.querySelector<HTMLElement>(
-        '.session-tab[aria-selected="true"]',
+      const activeTabShell = tabList?.querySelector<HTMLElement>(
+        ".session-tab-shell--active",
       );
-      if (!tabList || !activeTab) {
+      if (!tabList || !activeTabShell) {
         measureScroll();
         return;
       }
 
-      const tabRect = activeTab.getBoundingClientRect();
+      const tabRect = activeTabShell.getBoundingClientRect();
       const listRect = tabList.getBoundingClientRect();
 
       if (tabRect.left < listRect.left) {
@@ -108,7 +165,12 @@ export function SessionTabs({
     });
 
     return () => window.cancelAnimationFrame(frame);
-  }, [measureScroll, selectedTerminalId, sessions]);
+  }, [measureScroll, selectedTerminalId, sessionTopologyKey]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(measureScroll);
+    return () => window.cancelAnimationFrame(frame);
+  }, [measureScroll, tabLayoutKey]);
 
   const scrollByPage = (direction: -1 | 1) => {
     const tabList = tabListRef.current;
@@ -157,38 +219,109 @@ export function SessionTabs({
       >
         {sessions.map((candidate, index) => {
           const selected = candidate.terminalId === selectedTerminalId;
+          const purpose = candidate.purpose;
+          const reviewerThread =
+            purpose.kind === "peer"
+              ? peerThreads.find(
+                  (thread) => thread.id === purpose.threadId,
+                ) ?? null
+              : null;
+          const readyResponses =
+            purpose.kind === "interactive"
+              ? peerThreads.filter(
+                  (thread) =>
+                    thread.sourceTerminalId === candidate.terminalId &&
+                    thread.status === "response_ready",
+                ).length
+              : 0;
+          const peerLabel = reviewerThread
+            ? `${AGENT_SHORT_LABELS[candidate.agent]}·${peerThreadDisplayId(
+                reviewerThread.id,
+              )}`
+            : null;
+          const fullLabel = reviewerThread
+            ? `↳ ${AGENT_LABELS[candidate.agent]} Review · ${peerThreadDisplayId(
+                reviewerThread.id,
+              )}`
+            : candidate.name;
+          const peerState = reviewerThread?.status;
           return (
-            <button
+            <div
               key={candidate.terminalId}
-              type="button"
-              role="tab"
               className={
-                selected ? "session-tab session-tab--active" : "session-tab"
+                [
+                  "session-tab-shell",
+                  selected ? "session-tab-shell--active" : "",
+                  candidate.isPrimary ? "session-tab-shell--primary" : "",
+                  reviewerThread ? "session-tab-shell--peer" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")
               }
-              aria-selected={selected}
-              title={`Open ${candidate.name} — ${candidate.status}`}
-              onClick={() => onSelect(candidate)}
             >
-              <span
-                className={`session-tab-status session-tab-status--${candidate.status}`}
-                aria-hidden="true"
-              />
-              <span className="session-tab-label session-tab-label--full">
-                {candidate.name}
-              </span>
-              <span className="session-tab-label session-tab-label--compact">
-                {compactSessionName(
-                  candidate.name,
-                  index,
-                  AGENT_SHORT_LABELS[candidate.agent],
+              <button
+                type="button"
+                role="tab"
+                className={
+                  selected ? "session-tab session-tab--active" : "session-tab"
+                }
+                aria-selected={selected}
+                title={`Open ${fullLabel} — ${
+                  peerState ? peerStatusLabel(peerState) : candidate.status
+                }`}
+                onClick={() => onSelect(candidate)}
+              >
+                <span
+                  className={`session-tab-status session-tab-status--${
+                    peerState ?? candidate.status
+                  }`}
+                  aria-hidden="true"
+                />
+                {reviewerThread && (
+                  <span className="session-tab-peer-arrow" aria-hidden="true">
+                    ↳
+                  </span>
                 )}
-              </span>
-              {candidate.isPrimary && (
-                <span className="session-tab-primary" title="Primary terminal">
-                  P
+                <span className="session-tab-label session-tab-label--full">
+                  {fullLabel}
                 </span>
+                <span className="session-tab-label session-tab-label--compact">
+                  {peerLabel ??
+                    compactSessionName(
+                      candidate.name,
+                      index,
+                      AGENT_SHORT_LABELS[candidate.agent],
+                    )}
+                </span>
+                {candidate.isPrimary && (
+                  <span className="session-tab-primary" title="Primary terminal">
+                    P
+                  </span>
+                )}
+                {readyResponses > 0 && (
+                  <span
+                    className="session-tab-peer-count"
+                    aria-label={`${readyResponses} peer ${
+                      readyResponses === 1 ? "response" : "responses"
+                    } ready`}
+                  >
+                    {readyResponses}
+                  </span>
+                )}
+              </button>
+              {!candidate.isPrimary && (
+                <button
+                  type="button"
+                  className="session-tab-close"
+                  aria-label={`Close ${fullLabel}`}
+                  title={`Close ${fullLabel}`}
+                  disabled={busy}
+                  onClick={() => onClose(candidate)}
+                >
+                  ×
+                </button>
               )}
-            </button>
+            </div>
           );
         })}
       </div>
@@ -206,10 +339,20 @@ export function SessionTabs({
       )}
       <button
         type="button"
+        className="header-action--peer session-peer-button"
+        title={peerButtonDescription}
+        aria-label={peerButtonDescription}
+        disabled={busy || Boolean(peerDisabledReason) || !selectedTerminalId}
+        onClick={onPeer}
+      >
+        @cwt
+      </button>
+      <button
+        type="button"
         className="header-action--new session-new-button"
-        title="Choose an agent for a new terminal"
-        aria-label="Choose an agent for a new terminal"
-        disabled={busy}
+        title={createButtonDescription}
+        aria-label={createButtonDescription}
+        disabled={busy || capacityReached}
         onClick={onCreate}
       >
         <span className="session-new-label--full">+ New</span>
@@ -218,13 +361,15 @@ export function SessionTabs({
       <button
         type="button"
         className="header-action--sessions session-manage-button"
-        title="Manage terminal sessions"
-        aria-label={`Manage ${sessions.length} terminal sessions`}
+        title={manageButtonDescription}
+        aria-label={manageButtonDescription}
         onClick={onManage}
       >
-        <span className="session-manage-label--full">Manage</span>
+        <span className="session-manage-label--full">
+          Manage {sessionCountLabel}
+        </span>
         <span className="session-manage-label--compact">
-          {sessions.length}
+          {sessionCountLabel}
         </span>
       </button>
     </nav>

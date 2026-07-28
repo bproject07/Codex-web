@@ -23,6 +23,13 @@ Report suspected vulnerabilities privately by following
 - Use neutral fixtures and screenshots.
 - Do not add automatic public tunnels or broad firewall rules.
 - Keep Windows and Unix launch behavior independently correct.
+- Keep peer coordination supervised and provider-neutral: no ANSI/output
+  scraping, idle heuristics, ordinary-session reuse, or repository
+  requirement.
+- Keep peer helper capabilities loopback-only, per PTY generation, bounded,
+  and absent from argv, responses, logs, diagnostics, and screenshots.
+- Do not hand-edit generated third-party license bundles or release archives.
+  Dependency changes must pass the fail-closed target license generator.
 - Update documentation in the same change as behavior.
 
 ## Required validation
@@ -44,6 +51,14 @@ server:
 
 Run the package script and a native PTY/runtime smoke test on each affected
 platform when relevant. See [BUILDING.md](BUILDING.md) for exact commands.
+Changes to peer coordination must run `scripts/peer-review-regression.py`
+against the packaged Windows and Linux binaries. Dependency or release changes
+must also generate and review the Windows MSVC and Linux GNU
+`THIRD_PARTY_LICENSES` bundles.
+
+Version tags and GitHub Releases are maintainer-owned. Contributors should
+change package versions only as part of an explicitly scoped release change
+and should never upload local `dist` output to a pull request.
 
 ## Pull requests
 

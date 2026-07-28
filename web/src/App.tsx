@@ -16,6 +16,7 @@ import {
   deleteSession,
   getAgentCatalog,
   getFilesystemRoots,
+  getHealth,
   getWorkspaceLibrary,
   listSessions,
   listWorkspaceDirectory,
@@ -46,6 +47,15 @@ import {
 } from "./terminal/settings";
 import { SessionTabs } from "./sessions/SessionTabs";
 import { shouldRouteDesktopSlash } from "./terminal/desktopSlash";
+import {
+  PeerComposer,
+  usePeerController,
+  type CreatePeerThreadInput,
+  type CreatePeerTurnInput,
+  type DispatchPeerTurnInput,
+  type PeerThread,
+  type ReturnPeerTurnInput,
+} from "./peer";
 import {
   WorkspacePicker,
   type WorkspaceAgent,
@@ -93,6 +103,7 @@ export function App() {
   const [launchDirectory, setLaunchDirectory] =
     useState<WorkspaceDirectory | null>(null);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  const [peerComposerOpen, setPeerComposerOpen] = useState(false);
   const [agentCatalog, setAgentCatalog] = useState<AgentCatalog | null>(null);
   const [agentCatalogLoading, setAgentCatalogLoading] = useState(false);
   const [agentCatalogError, setAgentCatalogError] = useState<string | null>(
@@ -100,6 +111,7 @@ export function App() {
   );
   const [creatingAgent, setCreatingAgent] = useState<AgentKind | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [maxSessions, setMaxSessions] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [viewportDiagnostics, setViewportDiagnostics] = useState("");
@@ -110,8 +122,10 @@ export function App() {
   const terminalRef = useRef<TerminalViewHandle>(null);
   const selectedTerminalIdRef = useRef(selectedTerminalId);
   const sessionsRequestEpochRef = useRef(0);
+  const capacityRequestEpochRef = useRef(0);
   const agentCatalogRequestEpochRef = useRef(0);
   const suppressTerminalFocusOnceRef = useRef(false);
+  const peerController = usePeerController(token);
 
   selectedTerminalIdRef.current = selectedTerminalId;
 
@@ -147,6 +161,31 @@ export function App() {
       ? "codex_exited"
       : connectionStatus;
   const selectedAgentLabel = session ? agentLabel(session.agent) : "Agent";
+  const peerSourceSession = useMemo(() => {
+    if (!session) {
+      return null;
+    }
+    const purpose = session.purpose;
+    return purpose.kind === "peer"
+      ? sessions.find(
+          (candidate) => candidate.terminalId === purpose.parentTerminalId,
+        ) ?? null
+      : session;
+  }, [session, sessions]);
+  const selectedPeerThreadId =
+    session?.purpose.kind === "peer" ? session.purpose.threadId : null;
+  const peerUnavailableReason = !peerSourceSession
+    ? "@cwt requires an available source terminal."
+    : peerSourceSession.purpose.kind !== "interactive"
+      ? "@cwt requires an interactive source terminal."
+      : peerSourceSession.status !== "running"
+        ? `@cwt is unavailable because ${peerSourceSession.name} is ${peerSourceSession.status}. A running source terminal is required.`
+        : null;
+  const sessionCapacityReached =
+    maxSessions !== null && sessions.length >= maxSessions;
+  const newPeerThreadDisabledReason = sessionCapacityReached
+    ? `Session capacity reached (${sessions.length} of ${maxSessions}). Close a terminal tab before starting a new reviewer. Existing reviewer conversations remain available.`
+    : null;
 
   useEffect(() => {
     saveSettings(settings);
@@ -166,6 +205,7 @@ export function App() {
       sessionsOpen ||
       workspacePickerOpen ||
       agentPickerOpen ||
+      peerComposerOpen ||
       window.matchMedia("(pointer: coarse)").matches
     ) {
       return;
@@ -183,6 +223,7 @@ export function App() {
     settingsOpen,
     workspacePickerOpen,
     agentPickerOpen,
+    peerComposerOpen,
     token,
   ]);
 
@@ -210,7 +251,8 @@ export function App() {
             settingsOpen ||
             sessionsOpen ||
             workspacePickerOpen ||
-            agentPickerOpen,
+            agentPickerOpen ||
+            peerComposerOpen,
           editableTarget,
           terminalAvailable:
             Boolean(token && selectedTerminalId) &&
@@ -259,6 +301,7 @@ export function App() {
     settingsOpen,
     workspacePickerOpen,
     agentPickerOpen,
+    peerComposerOpen,
     token,
   ]);
 
@@ -296,12 +339,56 @@ export function App() {
     [],
   );
 
+  const refreshCapacity = useCallback(
+    async (signal?: AbortSignal) => {
+      const requestEpoch = ++capacityRequestEpochRef.current;
+      if (!token) {
+        if (capacityRequestEpochRef.current === requestEpoch) {
+          setMaxSessions(null);
+        }
+        return;
+      }
+
+      try {
+        const health = await getHealth(token, signal);
+        if (
+          !signal?.aborted &&
+          capacityRequestEpochRef.current === requestEpoch
+        ) {
+          setMaxSessions(health.maxSessions);
+        }
+      } catch {
+        if (
+          !signal?.aborted &&
+          capacityRequestEpochRef.current === requestEpoch
+        ) {
+          // Capacity metadata is advisory. Keep session management usable with
+          // an older, temporarily unavailable, or malformed health endpoint.
+          setMaxSessions(null);
+        }
+      }
+    },
+    [token],
+  );
+
+  useEffect(() => {
+    const abortController = new AbortController();
+    setMaxSessions(null);
+    void refreshCapacity(abortController.signal);
+
+    return () => {
+      abortController.abort();
+      capacityRequestEpochRef.current += 1;
+    };
+  }, [refreshCapacity]);
+
   const refreshSessions = useCallback(
     async (preferredTerminalId?: string) => {
       if (!token) {
         return;
       }
 
+      void refreshCapacity();
       const requestEpoch = ++sessionsRequestEpochRef.current;
       setSessionsLoading(true);
       try {
@@ -323,7 +410,7 @@ export function App() {
         }
       }
     },
-    [applySessionList, token],
+    [applySessionList, refreshCapacity, token],
   );
 
   useEffect(() => {
@@ -670,9 +757,15 @@ export function App() {
     });
   }, []);
 
-  const handleStatus = useCallback((status: ConnectionStatus) => {
-    setConnectionStatus(status);
-  }, []);
+  const handleStatus = useCallback(
+    (status: ConnectionStatus) => {
+      setConnectionStatus(status);
+      if (status === "connected") {
+        void refreshCapacity();
+      }
+    },
+    [refreshCapacity],
+  );
 
   const handleError = useCallback((error: string | null) => {
     setMessage(error);
@@ -748,6 +841,34 @@ export function App() {
   const closeSessions = () => {
     setSessionsOpen(false);
     focusTerminalForFinePointer();
+  };
+
+  const closePeerComposer = () => {
+    setPeerComposerOpen(false);
+    if (window.matchMedia("(pointer: coarse)").matches) {
+      suppressTerminalFocusOnceRef.current = true;
+      return;
+    }
+    focusTerminalForFinePointer();
+  };
+
+  const openPeerComposer = () => {
+    if (!peerSourceSession || peerUnavailableReason) {
+      setMessage(
+        peerUnavailableReason ??
+          "The source terminal for this peer request is unavailable.",
+      );
+      return;
+    }
+    setSettingsOpen(false);
+    setSessionsOpen(false);
+    setWorkspacePickerOpen(false);
+    setAgentPickerOpen(false);
+    setLaunchDirectory(null);
+    setPeerComposerOpen(true);
+    peerController.clearError();
+    void peerController.refresh();
+    void refreshAgentCatalog(true);
   };
 
   const closeWorkspacePicker = () => {
@@ -886,6 +1007,93 @@ export function App() {
     }
   };
 
+  const handleCloseSessionTab = async (target: SessionSnapshot) => {
+    if (target.isPrimary) {
+      return;
+    }
+    if (target.purpose.kind !== "peer") {
+      await handleDeleteSession(target);
+      return;
+    }
+
+    const purpose = target.purpose;
+    const thread = peerController.threads.find(
+      (candidate) => candidate.id === purpose.threadId,
+    );
+    const warning =
+      thread?.status === "response_ready"
+        ? "Its reviewer response has not finished returning to the source."
+        : thread &&
+            ["preparing_handoff", "awaiting_preview", "reviewing"].includes(
+              thread.status,
+            )
+          ? "The peer task is still in progress."
+          : "Its dedicated reviewer process will be terminated.";
+    if (
+      !window.confirm(
+        `Close "${target.name}"? ${warning}`,
+      )
+    ) {
+      return;
+    }
+
+    setMessage(null);
+    try {
+      await peerController.closeThread(purpose.threadId);
+      await refreshSessions(
+        target.terminalId === selectedTerminalIdRef.current
+          ? purpose.parentTerminalId
+          : selectedTerminalIdRef.current,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Could not close the peer session.",
+      );
+    }
+  };
+
+  const syncPeerReviewer = async (next: PeerThread) => {
+    if (!next.reviewerTerminalId) {
+      return;
+    }
+    await refreshSessions(
+      selectedTerminalIdRef.current || next.sourceTerminalId,
+    );
+  };
+
+  const handleCreatePeerThread = async (input: CreatePeerThreadInput) => {
+    const next = await peerController.createThread(input);
+    await syncPeerReviewer(next);
+    return next;
+  };
+
+  const handleCreatePeerTurn = async (
+    threadId: string,
+    input: CreatePeerTurnInput,
+  ) => {
+    const next = await peerController.createTurn(threadId, input);
+    await syncPeerReviewer(next);
+    return next;
+  };
+
+  const handleDispatchPeerTurn = async (
+    threadId: string,
+    input: DispatchPeerTurnInput,
+  ) => {
+    const next = await peerController.dispatchTurn(threadId, input);
+    await syncPeerReviewer(next);
+    return next;
+  };
+
+  const handleReturnPeerTurn = async (
+    threadId: string,
+    input: ReturnPeerTurnInput,
+  ) => {
+    return peerController.returnTurn(threadId, input);
+  };
+
   const toggleFullscreen = async () => {
     try {
       if (document.fullscreenElement) {
@@ -999,10 +1207,16 @@ export function App() {
         <div className="header-actions">
           <SessionTabs
             sessions={sessions}
+            maxSessions={maxSessions}
             selectedTerminalId={selectedTerminalId}
-            busy={busy}
+            busy={busy || peerController.operation !== null}
+            peerThreads={peerController.threads}
+            peerDisabledReason={peerUnavailableReason}
             onSelect={attachSession}
+            onClose={(target) => void handleCloseSessionTab(target)}
+            onPeer={openPeerComposer}
             onCreate={() => {
+              setPeerComposerOpen(false);
               setSessionsOpen(false);
               setSettingsOpen(false);
               setAgentPickerOpen(false);
@@ -1012,6 +1226,7 @@ export function App() {
               void refreshAgentCatalog(true);
             }}
             onManage={() => {
+              setPeerComposerOpen(false);
               setWorkspacePickerOpen(false);
               setLaunchDirectory(null);
               setAgentPickerOpen(false);
@@ -1046,7 +1261,7 @@ export function App() {
           <button
             type="button"
             title={`Restart ${selectedAgentLabel}`}
-            disabled={busy}
+            disabled={busy || session?.purpose.kind === "peer"}
             onClick={() => void handleRestart()}
           >
             <span className="action-label action-label--full">
@@ -1075,6 +1290,7 @@ export function App() {
             type="button"
             title="Open terminal settings"
             onClick={() => {
+              setPeerComposerOpen(false);
               setWorkspacePickerOpen(false);
               setLaunchDirectory(null);
               setAgentPickerOpen(false);
@@ -1162,6 +1378,30 @@ export function App() {
         />
       )}
 
+      {peerComposerOpen && peerSourceSession && (
+        <PeerComposer
+          sourceSession={peerSourceSession}
+          initialThreadId={selectedPeerThreadId}
+          allowNew={session?.purpose.kind !== "peer"}
+          newThreadDisabledReason={newPeerThreadDisabledReason}
+          catalog={agentCatalog}
+          catalogLoading={agentCatalogLoading}
+          catalogError={agentCatalogError}
+          threads={peerController.threads}
+          threadsReady={peerController.ready}
+          threadsLoading={peerController.loading}
+          operation={peerController.operation}
+          error={peerController.error}
+          onCreateThread={handleCreatePeerThread}
+          onCreateTurn={handleCreatePeerTurn}
+          onDispatchTurn={handleDispatchPeerTurn}
+          onReturnTurn={handleReturnPeerTurn}
+          onRefreshThreads={peerController.refresh}
+          onClearError={peerController.clearError}
+          onClose={closePeerComposer}
+        />
+      )}
+
       {workspacePickerOpen && (
         <div
           className="dialog-backdrop"
@@ -1197,6 +1437,7 @@ export function App() {
             clearSelectedTerminalId();
             setSettingsOpen(false);
             setSessionsOpen(false);
+            setPeerComposerOpen(false);
             setWorkspacePickerOpen(false);
             setAgentPickerOpen(false);
             setLaunchDirectory(null);
@@ -1216,10 +1457,10 @@ export function App() {
         <SessionsPanel
           sessions={sessions}
           selectedTerminalId={selectedTerminalId}
-          busy={busy}
+          busy={busy || peerController.operation !== null}
           loading={sessionsLoading}
           onAttach={attachSession}
-          onRemove={(target) => void handleDeleteSession(target)}
+          onRemove={(target) => void handleCloseSessionTab(target)}
           onRefresh={() => void refreshSessions()}
           onClose={closeSessions}
         />
@@ -1325,6 +1566,11 @@ function SessionsPanel({
                     {candidate.isPrimary && (
                       <span className="session-badge">Primary</span>
                     )}
+                    {candidate.purpose.kind === "peer" && (
+                      <span className="session-badge session-badge--peer">
+                        Peer review
+                      </span>
+                    )}
                     {attached && (
                       <span className="session-badge session-badge--attached">
                         Attached
@@ -1364,7 +1610,9 @@ function SessionsPanel({
                       disabled={busy}
                       onClick={() => onRemove(candidate)}
                     >
-                      Remove
+                      {candidate.purpose.kind === "peer"
+                        ? "Close review"
+                        : "Remove"}
                     </button>
                   )}
                 </div>

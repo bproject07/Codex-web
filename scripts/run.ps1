@@ -9,6 +9,9 @@ param(
     [ValidateRange(1, 65535)]
     [int] $Port = 8787,
 
+    [ValidateRange(1, 256)]
+    [Nullable[int]] $MaxSessions,
+
     [ValidateSet("powershell", "cmd")]
     [string] $Shell = "powershell",
 
@@ -74,6 +77,10 @@ $arguments = @(
     "--shell", $Shell,
     "--primary-agent", $PrimaryAgent
 )
+
+if ($PSBoundParameters.ContainsKey("MaxSessions")) {
+    $arguments += @("--max-sessions", $MaxSessions.Value.ToString())
+}
 
 if ($Command) {
     $arguments += @("--command", $Command)

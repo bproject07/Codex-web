@@ -1,5 +1,6 @@
 # Rust
 /server/target/
+/server/target-*/
 
 # Node
 /web/node_modules/
@@ -9,6 +10,10 @@
 # Packaged application
 /dist/
 /dist-*/
+/release-assets/
+/codex-web-terminal-v*.zip
+/codex-web-terminal-v*.tar.gz
+/SHA256SUMS.txt
 
 # Local test/runtime artifacts
 __pycache__/

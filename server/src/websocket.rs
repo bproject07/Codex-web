@@ -133,6 +133,8 @@ async fn handle_socket(
                     Some(Ok(message)) => {
                         if !handle_client_message(
                             message,
+                            &state.sessions,
+                            terminal_id,
                             &session,
                             &mut sender,
                         ).await {
@@ -210,6 +212,8 @@ fn resolve_session(
 
 async fn handle_client_message(
     message: Message,
+    registry: &SessionRegistry,
+    terminal_id: Uuid,
     session: &SessionManager,
     sender: &mut SplitSink<WebSocket, Message>,
 ) -> bool {
@@ -245,14 +249,10 @@ async fn handle_client_message(
                     }
                 }
                 Ok(ClientControl::Restart) => {
-                    if let Err(error) = session.restart().await {
-                        tracing::error!(%error, "WebSocket restart failed");
-                        return send_protocol_error(
-                            sender,
-                            "restart_failed",
-                            "The terminal agent could not be restarted. Check the server log.",
-                        )
-                        .await;
+                    if let Err(error) = registry.restart(terminal_id).await {
+                        tracing::warn!(%error, %terminal_id, "WebSocket restart rejected or failed");
+                        return send_protocol_error(sender, "restart_failed", &error.to_string())
+                            .await;
                     }
                 }
                 Err(error) => {

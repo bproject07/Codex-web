@@ -30,6 +30,40 @@ filesystem reach of the server account. Run the service under a dedicated,
 least-privileged account when broader access is not intended.
 Session-create and workspace JSON request bodies are capped at 256 KiB.
 
+## Peer helper boundary
+
+The supervised `@cwt` workflow creates a fresh dedicated reviewer PTY under
+the same operating-system account as every other managed agent. This provides
+conversation separation from ordinary tabs, not hostile-process or filesystem
+isolation. A reviewer can inspect anything its account and configured agent
+policy permit. Use a least-privileged account when that reach is too broad.
+
+Peer handoffs and responses are limited to 64 KiB and kept only in memory.
+They are returned only by bearer-authenticated browser APIs or by a private
+helper listener bound to an ephemeral loopback port. Each PTY generation gets
+a 256-bit capability scoped to its source/reviewer role. It rotates on restart
+and is revoked on failure, exit, terminate, or deletion. The browser token is
+never passed to the helper: `CODEX_WEB_TOKEN` is removed from managed PTY and
+version-probe environments after server configuration is read. Helper
+capabilities must never appear in argv, URLs, logs, diagnostics, screenshots,
+or public error reports. During shutdown, new capability activation is
+disabled and active capabilities are cleared before the private listener is
+released. An unexpected private-bridge exit fails the public server closed.
+
+Artifacts preserve normal Unicode Markdown, but their line endings are
+normalized and terminal control characters are rejected by the broker and
+again by the helper before output. Automation delivery also requires an
+explicit source/reviewer readiness acknowledgement and the exact active PTY
+generation. This prevents stale-session routing; it does not detect whether a
+third-party CLI is showing its normal prompt, a permission dialog, or setup
+screen. Confirm readiness only at an empty agent prompt.
+
+A process running as the same account may be able to inspect another process's
+environment on some operating systems. The scoped capability prevents it from
+creating sessions or routing arbitrary turns, but it does not prove that a
+particular model authored an artifact. Stronger provenance requires separate
+operating-system or container identities and is outside the current scope.
+
 Favorites and Recent are stored server-side in `workspaces.json`. This file
 contains filesystem paths and usage history. Protect its directory and
 backups, and do not attach it to public reports. Give concurrently running
@@ -49,8 +83,27 @@ pending write over the same limit is rejected before replacement.
 
 ## Supported versions
 
-Until stable releases are published, security fixes target the latest commit
-on `main`. Older commits and locally modified builds are not supported.
+Until the first stable tagged release is published, security fixes target the
+latest commit on `main`. After releases begin, the latest published release
+and the latest commit on `main` are supported; older releases, unofficial
+archives, and locally modified builds are not.
+
+Official release archives appear only on the repository's GitHub Releases
+page. Verify the matching `SHA256SUMS.txt` entry and GitHub artifact
+attestation before extraction:
+
+```text
+gh attestation verify --repo bproject07/Codex-web \
+  --signer-workflow bproject07/Codex-web/.github/workflows/release.yml \
+  <archive>
+```
+
+Release archives include a target-specific `THIRD_PARTY_LICENSES` manifest
+bound to both dependency lockfiles. Windows executables are not
+Authenticode-signed yet and may show an unknown-publisher warning. A checksum
+protects transfer integrity and an attestation binds the archive to the
+repository workflow; neither makes an unreviewed version safe or grants the
+terminal fewer operating-system permissions.
 
 ## Reporting a vulnerability
 

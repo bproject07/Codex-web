@@ -1,0 +1,517 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version to build and validate without publishing
+        required: true
+        default: "0.1.0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-tag:
+    name: Validate release identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Validate release and package versions
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import tomllib
+
+          event_name = os.environ["EVENT_NAME"]
+          if event_name == "push":
+              release_identity = os.environ["RELEASE_TAG"]
+              match = re.fullmatch(
+                  r"v([0-9]+\.[0-9]+\.[0-9]+)",
+                  release_identity,
+              )
+          elif event_name == "workflow_dispatch":
+              release_identity = os.environ["REQUESTED_VERSION"]
+              match = re.fullmatch(
+                  r"([0-9]+\.[0-9]+\.[0-9]+)",
+                  release_identity,
+              )
+          else:
+              raise SystemExit(f"unsupported release event: {event_name!r}")
+          if match is None:
+              raise SystemExit(
+                  f"invalid release version for {event_name}: {release_identity!r}"
+              )
+          version = match.group(1)
+
+          cargo = tomllib.loads(Path("server/Cargo.toml").read_text(encoding="utf-8"))
+          lock = tomllib.loads(Path("server/Cargo.lock").read_text(encoding="utf-8"))
+          web = json.loads(Path("web/package.json").read_text(encoding="utf-8"))
+          web_lock = json.loads(
+              Path("web/package-lock.json").read_text(encoding="utf-8")
+          )
+          lock_versions = [
+              package["version"]
+              for package in lock["package"]
+              if package["name"] == "codex-web-terminal"
+          ]
+          web_lock_root = web_lock.get("packages", {}).get("", {})
+          actual = {
+              "server/Cargo.toml": cargo["package"]["version"],
+              "server/Cargo.lock": lock_versions[0] if len(lock_versions) == 1 else None,
+              "web/package.json": web["version"],
+              "web/package-lock.json": web_lock.get("version"),
+              "web/package-lock.json packages root": web_lock_root.get("version"),
+          }
+          mismatches = {path: value for path, value in actual.items() if value != version}
+          if mismatches:
+              raise SystemExit(
+                  f"release version {version} does not match package versions: "
+                  f"{mismatches}"
+              )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+          PY
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            git fetch --no-tags origin \
+              "+refs/heads/main:refs/remotes/origin/main"
+            tag_commit=$(git rev-parse "${GITHUB_SHA}^{commit}")
+            main_commit=$(git rev-parse "refs/remotes/origin/main^{commit}")
+            if [[ "$tag_commit" != "$main_commit" ]]; then
+              printf 'release tag commit %s is not the current main tip %s\n' \
+                "$tag_commit" "$main_commit" >&2
+              exit 1
+            fi
+          fi
+
+  build-windows:
+    name: Windows x86_64 release
+    needs: validate-tag
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Rust 1.95
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.95.0
+          $rustHostTarget = ((
+            rustc -vV |
+              Where-Object { $_ -like "host:*" } |
+              Select-Object -First 1
+          ) -replace "^host:\s*", "").Trim()
+          if ($rustHostTarget -ne "x86_64-pc-windows-msvc") {
+            throw "Unexpected Rust host target: $rustHostTarget"
+          }
+
+      - name: Validate source
+        shell: pwsh
+        run: |
+          python -B .\scripts\release-tools-tests.py
+          if ($LASTEXITCODE -ne 0) { throw "release tooling tests failed" }
+          Push-Location web
+          try {
+            npm ci
+            if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+            npm test
+            if ($LASTEXITCODE -ne 0) { throw "frontend tests failed" }
+          }
+          finally {
+            Pop-Location
+          }
+          Push-Location server
+          try {
+            cargo fmt --all -- --check
+            if ($LASTEXITCODE -ne 0) { throw "cargo fmt failed" }
+            cargo test --all-targets --locked
+            if ($LASTEXITCODE -ne 0) { throw "cargo test failed" }
+            cargo clippy --all-targets --locked -- -D warnings
+            if ($LASTEXITCODE -ne 0) { throw "cargo clippy failed" }
+          }
+          finally {
+            Pop-Location
+          }
+
+      - name: Build complete Windows package
+        shell: pwsh
+        run: .\scripts\build.ps1
+
+      - name: Generate and validate third-party licenses
+        shell: pwsh
+        run: |
+          python -B .\scripts\generate-third-party-licenses.py `
+            --target x86_64-pc-windows-msvc `
+            --expected-rust-version 1.95.0 `
+            --output-dir .\dist\THIRD_PARTY_LICENSES
+          if ($LASTEXITCODE -ne 0) { throw "license generation failed" }
+          $required = @(
+            ".\dist\codex-web.exe",
+            ".\dist\web\index.html",
+            ".\dist\README.md",
+            ".\dist\BUILDING.md",
+            ".\dist\OPERATIONS.md",
+            ".\dist\AGENTS.md",
+            ".\dist\TODO.md",
+            ".\dist\CONTRIBUTING.md",
+            ".\dist\SECURITY.md",
+            ".\dist\CODE_OF_CONDUCT.md",
+            ".\dist\THIRD_PARTY_NOTICES.md",
+            ".\dist\LICENSE",
+            ".\dist\docs\screenshots\README.md",
+            ".\dist\THIRD_PARTY_LICENSES\THIRD_PARTY_LICENSES.txt",
+            ".\dist\THIRD_PARTY_LICENSES\manifest.json"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing release file: $path"
+            }
+          }
+          if (-not (Get-ChildItem -LiteralPath .\dist\web\assets -File)) {
+            throw "The frontend asset directory is empty."
+          }
+          $reportedVersion = (.\dist\codex-web.exe --version).Trim()
+          if ($reportedVersion -ne "codex-web $env:RELEASE_VERSION") {
+            throw "Unexpected binary version: $reportedVersion"
+          }
+
+      - name: Exercise packaged peer workflow
+        shell: pwsh
+        run: |
+          python -B .\scripts\peer-review-regression.py `
+            --server .\dist\codex-web.exe `
+            --port 8814
+
+      - name: Create Windows archive
+        id: archive
+        shell: pwsh
+        run: |
+          $rootName = "codex-web-terminal-v$env:RELEASE_VERSION-windows-x86_64"
+          $stage = Join-Path $env:RUNNER_TEMP $rootName
+          $archive = Join-Path $PWD "$rootName.zip"
+          Copy-Item -LiteralPath .\dist -Destination $stage -Recurse
+          Compress-Archive -LiteralPath $stage -DestinationPath $archive -CompressionLevel Optimal
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "Windows release archive was not created."
+          }
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+
+      - name: Validate extracted Windows archive
+        shell: pwsh
+        run: |
+          python -B .\scripts\validate-release-archive.py `
+            --archive "${{ steps.archive.outputs.archive }}" `
+            --expected-root "codex-web-terminal-v$env:RELEASE_VERSION-windows-x86_64" `
+            --platform windows `
+            --expected-version $env:RELEASE_VERSION `
+            --execute-smoke
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows release archive validation failed."
+          }
+
+      - name: Upload Windows archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-windows
+          path: ${{ steps.archive.outputs.archive }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  build-linux:
+    name: Linux x86_64 glibc release
+    needs: validate-tag
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Rust 1.95
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.95.0
+          rust_host=$(rustc -vV | sed -n 's/^host: //p')
+          if [[ "$rust_host" != "x86_64-unknown-linux-gnu" ]]; then
+            printf 'unexpected Rust host target: %s\n' "$rust_host" >&2
+            exit 1
+          fi
+
+      - name: Validate source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B ./scripts/release-tools-tests.py
+          (
+            cd web
+            npm ci
+            npm test
+          )
+          (
+            cd server
+            cargo fmt --all -- --check
+            cargo test --all-targets --locked
+            cargo clippy --all-targets --locked -- -D warnings
+          )
+
+      - name: Build complete Linux package
+        shell: bash
+        run: ./scripts/build.sh
+
+      - name: Generate and validate third-party licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B ./scripts/generate-third-party-licenses.py \
+            --target x86_64-unknown-linux-gnu \
+            --expected-rust-version 1.95.0 \
+            --output-dir ./dist-linux/THIRD_PARTY_LICENSES
+          for path in \
+            ./dist-linux/codex-web \
+            ./dist-linux/web/index.html \
+            ./dist-linux/README.md \
+            ./dist-linux/BUILDING.md \
+            ./dist-linux/OPERATIONS.md \
+            ./dist-linux/AGENTS.md \
+            ./dist-linux/TODO.md \
+            ./dist-linux/CONTRIBUTING.md \
+            ./dist-linux/SECURITY.md \
+            ./dist-linux/CODE_OF_CONDUCT.md \
+            ./dist-linux/THIRD_PARTY_NOTICES.md \
+            ./dist-linux/LICENSE \
+            ./dist-linux/docs/screenshots/README.md \
+            ./dist-linux/THIRD_PARTY_LICENSES/THIRD_PARTY_LICENSES.txt \
+            ./dist-linux/THIRD_PARTY_LICENSES/manifest.json; do
+            test -f "$path"
+          done
+          test -n "$(find ./dist-linux/web/assets -maxdepth 1 -type f -print -quit)"
+          test "$(./dist-linux/codex-web --version)" = \
+            "codex-web $RELEASE_VERSION"
+          file ./dist-linux/codex-web
+          ! ldd ./dist-linux/codex-web | grep -q 'not found'
+
+      - name: Exercise packaged peer workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B ./scripts/peer-review-regression.py \
+            --server ./dist-linux/codex-web \
+            --port 8815
+
+      - name: Create Linux archive
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          root_name="codex-web-terminal-v${RELEASE_VERSION}-linux-x86_64-glibc"
+          stage="$RUNNER_TEMP/$root_name"
+          archive="$PWD/$root_name.tar.gz"
+          cp -a ./dist-linux "$stage"
+          tar -C "$RUNNER_TEMP" -czf "$archive" "$root_name"
+          test -f "$archive"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Validate extracted Linux archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B ./scripts/validate-release-archive.py \
+            --archive "${{ steps.archive.outputs.archive }}" \
+            --expected-root \
+              "codex-web-terminal-v${RELEASE_VERSION}-linux-x86_64-glibc" \
+            --platform linux \
+            --expected-version "$RELEASE_VERSION" \
+            --execute-smoke
+
+      - name: Upload Linux archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-linux
+          path: ${{ steps.archive.outputs.archive }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  validate-assets:
+    name: Validate downloaded release assets
+    needs:
+      - validate-tag
+      - build-windows
+      - build-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download release archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Validate both downloaded archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          windows="codex-web-terminal-v${RELEASE_VERSION}-windows-x86_64.zip"
+          linux="codex-web-terminal-v${RELEASE_VERSION}-linux-x86_64-glibc.tar.gz"
+          mapfile -t assets < <(
+            find release-assets -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              sort
+          )
+          expected=("$linux" "$windows")
+          if (( ${#assets[@]} != ${#expected[@]} )); then
+            printf 'unexpected release asset count: %s\n' "${assets[*]}" >&2
+            exit 1
+          fi
+          for index in "${!expected[@]}"; do
+            if [[ "${assets[$index]}" != "${expected[$index]}" ]]; then
+              printf 'unexpected release assets: %s\n' "${assets[*]}" >&2
+              exit 1
+            fi
+          done
+
+          python3 -B ./scripts/validate-release-archive.py \
+            --archive "release-assets/$windows" \
+            --expected-root \
+              "codex-web-terminal-v${RELEASE_VERSION}-windows-x86_64" \
+            --platform windows \
+            --expected-version "$RELEASE_VERSION"
+          python3 -B ./scripts/validate-release-archive.py \
+            --archive "release-assets/$linux" \
+            --expected-root \
+              "codex-web-terminal-v${RELEASE_VERSION}-linux-x86_64-glibc" \
+            --platform linux \
+            --expected-version "$RELEASE_VERSION"
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs:
+      - validate-tag
+      - validate-assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Download validated archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Validate assets and write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          windows="codex-web-terminal-v${RELEASE_VERSION}-windows-x86_64.zip"
+          linux="codex-web-terminal-v${RELEASE_VERSION}-linux-x86_64-glibc.tar.gz"
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          expected=("$linux" "$windows")
+          if [[ "${assets[*]}" != "${expected[*]}" ]]; then
+            printf 'unexpected release assets: %s\n' "${assets[*]}" >&2
+            exit 1
+          fi
+          (
+            cd release-assets
+            sha256sum "$windows" "$linux" > SHA256SUMS.txt
+          )
+
+      - name: Attest release archives and checksums
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: release-assets/*
+
+      - name: Create, verify, and publish release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf 'release already exists; refusing to overwrite it\n' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --generate-notes \
+            --title "Codex Web Terminal $RELEASE_TAG" \
+            release-assets/*
+
+          mapfile -t published < <(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name' |
+              sort
+          )
+          mapfile -t expected < <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [[ "${published[*]}" != "${expected[*]}" ]]; then
+            printf 'draft asset verification failed\n' >&2
+            exit 1
+          fi
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false

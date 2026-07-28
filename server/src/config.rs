@@ -14,6 +14,8 @@ const MAX_COMMAND_LENGTH: usize = 1_024;
 const MAX_TOKEN_LENGTH: usize = 512;
 const MIN_TOKEN_LENGTH: usize = 16;
 const MAX_LOG_LEVEL_LENGTH: usize = 64;
+pub const DEFAULT_MAX_SESSIONS: usize = 20;
+pub const MAX_CONFIGURED_SESSIONS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ShellKind {
@@ -55,6 +57,14 @@ pub struct CliArgs {
     /// TCP port to listen on.
     #[arg(long, env = "CODEX_WEB_PORT", default_value_t = 8787)]
     pub port: u16,
+
+    /// Maximum number of managed terminal sessions, including peer reviewers.
+    #[arg(
+        long,
+        env = "CODEX_WEB_MAX_SESSIONS",
+        default_value_t = DEFAULT_MAX_SESSIONS
+    )]
+    pub max_sessions: usize,
 
     /// Default working directory for the primary terminal and new sessions.
     #[arg(long = "project", env = "CODEX_WEB_PROJECT_DIR", default_value = ".")]
@@ -139,6 +149,7 @@ pub struct CliArgs {
 pub struct Config {
     pub host: IpAddr,
     pub port: u16,
+    pub max_sessions: usize,
     pub project_dir: PathBuf,
     pub state_dir: PathBuf,
     pub shell: ShellKind,
@@ -164,6 +175,9 @@ impl Config {
     pub fn from_args(args: CliArgs) -> Result<Self> {
         if args.port == 0 {
             bail!("--port must be between 1 and 65535");
+        }
+        if !(1..=MAX_CONFIGURED_SESSIONS).contains(&args.max_sessions) {
+            bail!("--max-sessions must be between 1 and {MAX_CONFIGURED_SESSIONS}");
         }
 
         validate_length(
@@ -235,6 +249,7 @@ impl Config {
         Ok(Self {
             host: args.host,
             port: args.port,
+            max_sessions: args.max_sessions,
             project_dir,
             state_dir,
             shell: args.shell,
@@ -381,6 +396,7 @@ mod tests {
         CliArgs {
             host: "127.0.0.1".parse().expect("valid host"),
             port: 8787,
+            max_sessions: DEFAULT_MAX_SESSIONS,
             project_dir: project_dir.to_path_buf(),
             state_dir: Some(project_dir.join("state")),
             shell: ShellKind::Powershell,
@@ -410,6 +426,7 @@ mod tests {
         );
         assert_eq!(config.state_dir, directory.path().join("state"));
         assert_eq!(config.port, 8787);
+        assert_eq!(config.max_sessions, DEFAULT_MAX_SESSIONS);
         assert_eq!(config.command, None);
         assert_eq!(config.primary_agent, AgentKind::Codex);
         assert_eq!(config.new_session_command, None);
@@ -435,6 +452,39 @@ mod tests {
 
         let error = Config::from_args(args).expect_err("short token must be rejected");
         assert!(error.to_string().contains("at least"));
+    }
+
+    #[test]
+    fn accepts_an_explicit_session_limit() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let mut args = args_for(directory.path());
+        args.max_sessions = 42;
+
+        let config = Config::from_args(args).expect("valid session limit");
+
+        assert_eq!(config.max_sessions, 42);
+    }
+
+    #[test]
+    fn rejects_session_limits_outside_the_safe_range() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let mut zero = args_for(directory.path());
+        zero.max_sessions = 0;
+        assert!(
+            Config::from_args(zero)
+                .expect_err("zero session limit must be rejected")
+                .to_string()
+                .contains("--max-sessions")
+        );
+
+        let mut excessive = args_for(directory.path());
+        excessive.max_sessions = MAX_CONFIGURED_SESSIONS + 1;
+        assert!(
+            Config::from_args(excessive)
+                .expect_err("excessive session limit must be rejected")
+                .to_string()
+                .contains("--max-sessions")
+        );
     }
 
     #[test]

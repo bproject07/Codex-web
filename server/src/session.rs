@@ -6,8 +6,11 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
@@ -20,16 +23,22 @@ use uuid::Uuid;
 use crate::{
     config::AgentKind,
     filesystem::encode_directory_id,
+    peer::{PeerBroker, SessionPurpose},
     protocol::validate_resize,
     terminal::{self, TerminalConfig},
 };
 
 pub const OUTPUT_BUFFER_LIMIT: usize = 16 * 1024 * 1024;
 pub const MAX_CONNECTED_CLIENTS: usize = 4;
+pub const MAX_AUTOMATION_PROMPT_SIZE: usize = 16 * 1024;
 const OUTPUT_REPLAY_LIMIT: usize = 2 * 1024 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 256;
 const EVENT_BROADCAST_CAPACITY: usize = 64;
 const MAX_PUBLIC_ERROR_LENGTH: usize = 512;
+const AUTOMATION_PROMPT_SETTLE_DELAY: Duration = Duration::from_millis(200);
+const TERMINATION_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(5);
+const TERMINATION_ACK_TIMEOUT: Duration = Duration::from_secs(6);
+const TERMINATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,7 +69,10 @@ impl Lifecycle {
                     Self::Running,
                     Self::Exited | Self::Terminating | Self::Failed
                 )
-                | (Self::Terminating, Self::Terminated | Self::Exited)
+                | (
+                    Self::Terminating,
+                    Self::Running | Self::Terminated | Self::Exited
+                )
                 | (
                     Self::Terminated | Self::Exited | Self::Failed,
                     Self::Starting
@@ -102,6 +114,7 @@ pub struct SessionSnapshot {
     pub name: String,
     pub agent: AgentKind,
     pub is_primary: bool,
+    pub purpose: SessionPurpose,
     pub created_at: u64,
     pub session_id: Option<Uuid>,
     pub status: Lifecycle,
@@ -271,6 +284,8 @@ struct SessionInner {
     terminal_id: Uuid,
     name: String,
     is_primary: bool,
+    purpose: SessionPurpose,
+    peer_broker: Option<PeerBroker>,
     created_at: u64,
     terminal_config: TerminalConfig,
     operation: Mutex<()>,
@@ -282,6 +297,8 @@ struct SessionInner {
     command_available: AtomicBool,
     shutting_down: AtomicBool,
     shutdown_signal: CancellationToken,
+    #[cfg(test)]
+    termination_failures_remaining: AtomicUsize,
 }
 
 struct SessionRecord {
@@ -297,8 +314,23 @@ struct SessionRecord {
 struct ActiveProcess {
     session_id: Uuid,
     master: Box<dyn MasterPty + Send>,
-    input_sender: SyncSender<Vec<u8>>,
+    input_sender: SyncSender<PtyInput>,
     termination_sender: SyncSender<TerminationRequest>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PtyInput {
+    Raw(Vec<u8>),
+    AutomationPrompt {
+        prompt: Vec<u8>,
+        policy: AutomationPromptPolicy,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AutomationPromptPolicy {
+    settle_delay: Duration,
+    submit_key: &'static [u8],
 }
 
 struct TerminationRequest {
@@ -321,6 +353,24 @@ impl SessionManager {
         name: String,
         is_primary: bool,
     ) -> Self {
+        Self::new_managed_with_peer(
+            terminal_config,
+            terminal_id,
+            name,
+            is_primary,
+            SessionPurpose::Interactive,
+            None,
+        )
+    }
+
+    pub fn new_managed_with_peer(
+        terminal_config: TerminalConfig,
+        terminal_id: Uuid,
+        name: String,
+        is_primary: bool,
+        purpose: SessionPurpose,
+        peer_broker: Option<PeerBroker>,
+    ) -> Self {
         let (output_sender, _) = watch::channel(0);
         let (event_sender, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
 
@@ -329,6 +379,8 @@ impl SessionManager {
                 terminal_id,
                 name,
                 is_primary,
+                purpose,
+                peer_broker,
                 created_at: unix_time_millis(),
                 terminal_config,
                 operation: Mutex::new(()),
@@ -348,6 +400,8 @@ impl SessionManager {
                 command_available: AtomicBool::new(false),
                 shutting_down: AtomicBool::new(false),
                 shutdown_signal: CancellationToken::new(),
+                #[cfg(test)]
+                termination_failures_remaining: AtomicUsize::new(0),
             }),
         }
     }
@@ -388,30 +442,61 @@ impl SessionManager {
             .context("session terminate task failed")?
     }
 
-    pub async fn shutdown(&self) {
-        if self.inner.shutting_down.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
+    pub(crate) async fn shutdown_checked(&self) -> Result<()> {
+        self.inner.shutting_down.store(true, Ordering::SeqCst);
         self.inner.shutdown_signal.cancel();
-        if let Err(error) = self.terminate().await {
+        self.revoke_current_peer_generation();
+        self.terminate().await
+    }
+
+    pub async fn shutdown(&self) {
+        if let Err(error) = self.shutdown_checked().await {
             tracing::error!(%error, agent = self.inner.terminal_config.agent.label(), "failed to terminate agent during shutdown");
         }
     }
 
-    pub fn write_input(&self, data: &[u8]) -> Result<()> {
-        let input_sender = {
-            let record = lock(&self.inner.record);
-            let Some(active) = record.active.as_ref() else {
-                bail!(
-                    "{} is not running",
-                    self.inner.terminal_config.agent.label()
-                );
-            };
-            active.input_sender.clone()
-        };
+    #[cfg(test)]
+    pub(crate) fn fail_next_termination_for_test(&self) {
+        self.inner
+            .termination_failures_remaining
+            .fetch_add(1, Ordering::SeqCst);
+    }
 
-        match input_sender.try_send(data.to_vec()) {
+    pub fn write_input(&self, data: &[u8]) -> Result<()> {
+        self.queue_input_for_active_session(PtyInput::Raw(data.to_vec()), None)
+    }
+
+    pub fn write_automation_prompt(&self, expected_session_id: Uuid, prompt: &str) -> Result<()> {
+        let prompt = encode_automation_prompt(prompt)?;
+        self.queue_input_for_active_session(
+            PtyInput::AutomationPrompt {
+                prompt,
+                policy: automation_prompt_policy(self.inner.terminal_config.agent),
+            },
+            Some(expected_session_id),
+        )
+    }
+
+    fn queue_input_for_active_session(
+        &self,
+        input: PtyInput,
+        expected_session_id: Option<Uuid>,
+    ) -> Result<()> {
+        let record = lock(&self.inner.record);
+        let Some(active) = record.active.as_ref() else {
+            bail!(
+                "{} is not running",
+                self.inner.terminal_config.agent.label()
+            );
+        };
+        if expected_session_id.is_some_and(|expected| active.session_id != expected) {
+            bail!(
+                "{} session changed before the automation prompt could be delivered",
+                self.inner.terminal_config.agent.label()
+            );
+        }
+
+        match active.input_sender.try_send(input) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => bail!("PTY input queue is full"),
             Err(TrySendError::Disconnected(_)) => bail!("PTY input stream is closed"),
@@ -447,6 +532,7 @@ impl SessionManager {
             name: self.inner.name.clone(),
             agent: self.inner.terminal_config.agent,
             is_primary: self.inner.is_primary,
+            purpose: self.inner.purpose.clone(),
             created_at: self.inner.created_at,
             session_id: record.session_id,
             status: record.machine.state(),
@@ -510,6 +596,10 @@ impl SessionManager {
         lock(&self.inner.record).machine.state() == Lifecycle::Running
     }
 
+    pub fn purpose(&self) -> &SessionPurpose {
+        &self.inner.purpose
+    }
+
     fn start_blocking(&self) -> Result<()> {
         let _operation = lock(&self.inner.operation);
         self.start_locked()
@@ -559,6 +649,22 @@ impl SessionManager {
         lock(&self.inner.output).reset(session_id);
         self.notify_event();
 
+        let peer_activation = match self.inner.peer_broker.as_ref() {
+            Some(broker) => match broker.activate_session(
+                self.inner.terminal_id,
+                session_id,
+                &self.inner.purpose,
+            ) {
+                Ok(activation) => Some(activation),
+                Err(error) => {
+                    let error = error.context("failed to activate peer communication");
+                    self.mark_start_failed(session_id, &error);
+                    return Err(error);
+                }
+            },
+            None => None,
+        };
+
         let resolved = match terminal::preflight(&self.inner.terminal_config) {
             Ok(resolved) => {
                 self.inner.command_available.store(true, Ordering::Relaxed);
@@ -577,7 +683,14 @@ impl SessionManager {
             "starting agent in PTY"
         );
 
-        let spawned = match terminal::spawn_resolved(&self.inner.terminal_config, &resolved) {
+        let peer_environment = peer_activation
+            .as_ref()
+            .map_or(&[][..], |activation| activation.environment());
+        let spawned = match terminal::spawn_resolved_with_environment(
+            &self.inner.terminal_config,
+            &resolved,
+            peer_environment,
+        ) {
             Ok(spawned) => spawned,
             Err(error) => {
                 self.mark_start_failed(session_id, &error);
@@ -646,8 +759,8 @@ impl SessionManager {
         let request_result = active
             .termination_sender
             .send(TerminationRequest { acknowledgement });
-        let kill_result = match request_result {
-            Ok(()) => match acknowledgement_receiver.recv_timeout(Duration::from_secs(5)) {
+        let termination_result = match request_result {
+            Ok(()) => match acknowledgement_receiver.recv_timeout(TERMINATION_ACK_TIMEOUT) {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(message)) => Err(anyhow::anyhow!(message))
                     .context("failed to terminate the agent PTY process"),
@@ -659,21 +772,40 @@ impl SessionManager {
             // The waiter drops this channel only after the process has exited.
             Err(_) => Ok(()),
         };
-        drop(active);
+        self.revoke_peer_generation(session_id);
 
-        {
-            let mut record = lock(&self.inner.record);
-            if record.session_id == Some(session_id)
-                && record.machine.state() == Lifecycle::Terminating
-            {
-                record.machine.transition(Lifecycle::Terminated)?;
+        match termination_result {
+            Ok(()) => {
+                drop(active);
+                let mut record = lock(&self.inner.record);
+                if record.session_id == Some(session_id)
+                    && record.machine.state() == Lifecycle::Terminating
+                {
+                    record.machine.transition(Lifecycle::Terminated)?;
+                }
+                drop(record);
+                self.notify_event();
+                Ok(())
+            }
+            Err(error) => {
+                let mut record = lock(&self.inner.record);
+                if record.session_id == Some(session_id)
+                    && record.machine.state() == Lifecycle::Terminating
+                    && record.active.is_none()
+                {
+                    record.active = Some(active);
+                    record.machine.transition(Lifecycle::Running)?;
+                    record.last_error = Some(public_error(&error));
+                }
+                drop(record);
+                self.notify_event();
+                Err(error)
             }
         }
-        self.notify_event();
-        kill_result
     }
 
     fn mark_start_failed(&self, session_id: Uuid, error: &anyhow::Error) {
+        self.revoke_peer_generation(session_id);
         let mut record = lock(&self.inner.record);
         if record.session_id == Some(session_id) {
             let _ = record.machine.transition(Lifecycle::Failed);
@@ -688,7 +820,7 @@ impl SessionManager {
         &self,
         session_id: Uuid,
         writer: Box<dyn Write + Send>,
-        receiver: Receiver<Vec<u8>>,
+        receiver: Receiver<PtyInput>,
     ) {
         let manager = self.clone();
         std::thread::Builder::new()
@@ -737,12 +869,8 @@ impl SessionManager {
         }
     }
 
-    fn process_exited(
-        &self,
-        session_id: Uuid,
-        exit_code: Option<u32>,
-        wait_error: Option<std::io::Error>,
-    ) {
+    fn process_exited(&self, session_id: Uuid, exit_code: Option<u32>) {
+        self.revoke_peer_generation(session_id);
         let mut record = lock(&self.inner.record);
         if record.session_id != Some(session_id) {
             return;
@@ -759,10 +887,6 @@ impl SessionManager {
             Lifecycle::Exited
         };
         let _ = record.machine.transition(target);
-        if let Some(error) = wait_error.as_ref() {
-            record.last_error = Some("The agent process wait operation failed.".to_owned());
-            tracing::error!(%error, %session_id, "failed while waiting for agent process");
-        }
         drop(record);
 
         self.notify_event();
@@ -771,6 +895,25 @@ impl SessionManager {
         } else {
             tracing::info!(%session_id, agent = self.inner.terminal_config.agent.label(), "agent process exited without an exit code");
         }
+    }
+
+    fn record_process_wait_error(&self, session_id: Uuid, error: &std::io::Error) {
+        let mut record = lock(&self.inner.record);
+        if record.session_id != Some(session_id) {
+            return;
+        }
+        record.last_error = Some(
+            "The agent process status check failed; process exit was not confirmed.".to_owned(),
+        );
+        drop(record);
+
+        tracing::warn!(
+            error_kind = ?error.kind(),
+            %error,
+            %session_id,
+            "agent process status check failed; retaining the active process"
+        );
+        self.notify_event();
     }
 
     fn record_stream_error(&self, session_id: Uuid, message: &'static str) {
@@ -785,16 +928,39 @@ impl SessionManager {
     fn notify_event(&self) {
         let _ = self.inner.event_sender.send(());
     }
+
+    fn revoke_peer_generation(&self, session_id: Uuid) {
+        if let Some(broker) = self.inner.peer_broker.as_ref() {
+            broker.revoke_session(self.inner.terminal_id, session_id);
+        }
+    }
+
+    fn revoke_current_peer_generation(&self) {
+        let session_id = lock(&self.inner.record).session_id;
+        if let Some(session_id) = session_id {
+            self.revoke_peer_generation(session_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn consume_test_termination_failure(&self) -> bool {
+        self.inner
+            .termination_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+    }
 }
 
 fn writer_loop(
     manager: SessionManager,
     session_id: Uuid,
     mut writer: Box<dyn Write + Send>,
-    receiver: Receiver<Vec<u8>>,
+    receiver: Receiver<PtyInput>,
 ) {
-    while let Ok(data) = receiver.recv() {
-        if let Err(error) = writer.write_all(&data).and_then(|()| writer.flush()) {
+    while let Ok(input) = receiver.recv() {
+        if let Err(error) = write_pty_input(&mut writer, input) {
             tracing::error!(
                 error_kind = ?error.kind(),
                 %session_id,
@@ -804,6 +970,53 @@ fn writer_loop(
             break;
         }
     }
+}
+
+fn write_pty_input(writer: &mut dyn Write, input: PtyInput) -> std::io::Result<()> {
+    write_pty_input_with_sleep(writer, input, std::thread::sleep)
+}
+
+fn write_pty_input_with_sleep(
+    writer: &mut dyn Write,
+    input: PtyInput,
+    sleep: impl FnOnce(Duration),
+) -> std::io::Result<()> {
+    match input {
+        PtyInput::Raw(data) => writer.write_all(&data).and_then(|()| writer.flush()),
+        PtyInput::AutomationPrompt { prompt, policy } => {
+            writer.write_all(&prompt)?;
+            writer.flush()?;
+            sleep(policy.settle_delay);
+            writer.write_all(policy.submit_key)?;
+            writer.flush()
+        }
+    }
+}
+
+fn automation_prompt_policy(agent: AgentKind) -> AutomationPromptPolicy {
+    let settle_delay = match agent {
+        AgentKind::Codex => AUTOMATION_PROMPT_SETTLE_DELAY,
+        AgentKind::Claude => AUTOMATION_PROMPT_SETTLE_DELAY,
+        AgentKind::Agy => AUTOMATION_PROMPT_SETTLE_DELAY,
+    };
+    AutomationPromptPolicy {
+        settle_delay,
+        submit_key: b"\r",
+    }
+}
+
+fn encode_automation_prompt(prompt: &str) -> Result<Vec<u8>> {
+    if prompt.trim().is_empty() {
+        bail!("automation prompt must not be empty");
+    }
+    if prompt.len() > MAX_AUTOMATION_PROMPT_SIZE {
+        bail!("automation prompt exceeds the {MAX_AUTOMATION_PROMPT_SIZE} byte limit");
+    }
+    if prompt.chars().any(char::is_control) {
+        bail!("automation prompt must not contain control characters");
+    }
+
+    Ok(prompt.as_bytes().to_vec())
 }
 
 fn reader_loop(manager: SessionManager, session_id: Uuid, mut reader: Box<dyn Read + Send>) {
@@ -836,49 +1049,118 @@ fn child_wait_loop(
 ) {
     #[cfg(not(windows))]
     let _ = pid;
+    let mut wait_error_reported = false;
 
     loop {
         match termination_receiver.recv_timeout(Duration::from_millis(50)) {
             Ok(request) => {
-                #[cfg(windows)]
-                if let Some(pid) = pid
-                    && let Err(error) = terminate_windows_process_tree(pid)
-                {
-                    // The direct portable-pty kill and ConPTY handle closure
-                    // below remain as fallbacks.
-                    tracing::warn!(pid, %error, "Windows process-tree termination failed");
+                #[cfg(test)]
+                if manager.consume_test_termination_failure() {
+                    let _ = request
+                        .acknowledgement
+                        .send(Err("injected process termination failure".to_owned()));
+                    continue;
                 }
 
-                let kill_result = child.kill().map_err(|error| error.to_string());
-                let _ = request.acknowledgement.send(kill_result);
-                match child.wait() {
-                    Ok(status) => {
-                        manager.process_exited(session_id, Some(status.exit_code()), None)
+                #[cfg(windows)]
+                let process_tree_termination_succeeded = if let Some(pid) = pid {
+                    match terminate_windows_process_tree(pid) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            // The direct portable-pty kill and ConPTY handle
+                            // closure below remain as fallbacks.
+                            tracing::warn!(pid, %error, "Windows process-tree termination failed");
+                            false
+                        }
                     }
-                    Err(error) => manager.process_exited(session_id, None, Some(error)),
+                } else {
+                    false
+                };
+
+                let direct_kill_result = child.kill();
+                #[cfg(windows)]
+                let termination_requested =
+                    process_tree_termination_succeeded || direct_kill_result.is_ok();
+                #[cfg(not(windows))]
+                let termination_requested = direct_kill_result.is_ok();
+
+                if !termination_requested {
+                    let message = direct_kill_result.err().map_or_else(
+                        || "process termination was not requested".to_owned(),
+                        |error| error.to_string(),
+                    );
+                    let _ = request.acknowledgement.send(Err(message));
+                    continue;
                 }
-                return;
+                #[cfg(windows)]
+                if process_tree_termination_succeeded && let Err(error) = direct_kill_result {
+                    tracing::debug!(
+                        pid,
+                        %error,
+                        "portable PTY kill reported an error after Windows process-tree termination"
+                    );
+                }
+
+                let deadline = Instant::now() + TERMINATION_CONFIRMATION_TIMEOUT;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            manager.process_exited(session_id, Some(status.exit_code()));
+                            let _ = request.acknowledgement.send(Ok(()));
+                            return;
+                        }
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(TERMINATION_POLL_INTERVAL);
+                        }
+                        Ok(None) => {
+                            let _ = request
+                                .acknowledgement
+                                .send(Err("timed out waiting for the agent PTY process to exit"
+                                    .to_owned()));
+                            break;
+                        }
+                        Err(error) => {
+                            let _ = request.acknowledgement.send(Err(format!(
+                                "failed to confirm the agent PTY process exit: {error}"
+                            )));
+                            break;
+                        }
+                    }
+                }
             }
             Err(RecvTimeoutError::Timeout) => match child.try_wait() {
                 Ok(Some(status)) => {
-                    manager.process_exited(session_id, Some(status.exit_code()), None);
+                    manager.process_exited(session_id, Some(status.exit_code()));
                     return;
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    manager.process_exited(session_id, None, Some(error));
-                    return;
+                    if !wait_error_reported {
+                        manager.record_process_wait_error(session_id, &error);
+                        wait_error_reported = true;
+                    }
                 }
             },
             Err(RecvTimeoutError::Disconnected) => {
-                let _ = child.kill();
+                if let Err(error) = child.kill()
+                    && !wait_error_reported
+                {
+                    manager.record_process_wait_error(session_id, &error);
+                    wait_error_reported = true;
+                }
                 match child.wait() {
                     Ok(status) => {
-                        manager.process_exited(session_id, Some(status.exit_code()), None)
+                        manager.process_exited(session_id, Some(status.exit_code()));
+                        return;
                     }
-                    Err(error) => manager.process_exited(session_id, None, Some(error)),
+                    Err(error) => {
+                        if !wait_error_reported {
+                            manager.record_process_wait_error(session_id, &error);
+                            wait_error_reported = true;
+                        }
+                        std::thread::sleep(TERMINATION_POLL_INTERVAL);
+                    }
                 }
-                return;
             }
         }
     }
@@ -923,6 +1205,86 @@ fn unix_time_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use portable_pty::{Child, ChildKiller, ExitStatus};
+
+    #[derive(Debug, Clone)]
+    struct PollingErrorChild {
+        killed: Arc<AtomicBool>,
+        poll_count: Arc<AtomicUsize>,
+        first_poll_sender: SyncSender<()>,
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingWriter {
+        writes: Vec<Vec<u8>>,
+        flush_count: usize,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.writes.push(buffer.to_vec());
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flush_count += 1;
+            Ok(())
+        }
+    }
+
+    impl ChildKiller for PollingErrorChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl Child for PollingErrorChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            if self.poll_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _ = self.first_poll_sender.send(());
+                return Err(std::io::Error::other("injected passive wait error"));
+            }
+            if self.killed.load(Ordering::SeqCst) {
+                Ok(Some(ExitStatus::with_exit_code(0)))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            if self.killed.load(Ordering::SeqCst) {
+                Ok(ExitStatus::with_exit_code(0))
+            } else {
+                Err(std::io::Error::other(
+                    "wait called before process termination",
+                ))
+            }
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    fn test_session_manager() -> SessionManager {
+        SessionManager::new(TerminalConfig {
+            project_dir: std::path::PathBuf::from("."),
+            command: "codex".to_owned(),
+            arguments: Vec::new(),
+            agent: AgentKind::Codex,
+            shell: crate::config::ShellKind::Powershell,
+        })
+    }
 
     #[test]
     fn accepts_valid_session_state_transitions() {
@@ -945,6 +1307,115 @@ mod tests {
         let mut machine = SessionStateMachine::new();
         assert!(machine.transition(Lifecycle::Running).is_err());
         assert_eq!(machine.state(), Lifecycle::Idle);
+    }
+
+    #[test]
+    fn passive_wait_error_keeps_explicit_termination_retryable() {
+        let manager = test_session_manager();
+        let session_id = Uuid::new_v4();
+        let (first_poll_sender, first_poll_receiver) = sync_channel(1);
+        let child = PollingErrorChild {
+            killed: Arc::new(AtomicBool::new(false)),
+            poll_count: Arc::new(AtomicUsize::new(0)),
+            first_poll_sender,
+        };
+        let (termination_sender, termination_receiver) = sync_channel(1);
+        let waiter = std::thread::spawn(move || {
+            child_wait_loop(
+                manager,
+                session_id,
+                None,
+                Box::new(child),
+                termination_receiver,
+            );
+        });
+
+        first_poll_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("passive wait error was exercised");
+        let (acknowledgement, acknowledgement_receiver) = sync_channel(1);
+        termination_sender
+            .send(TerminationRequest { acknowledgement })
+            .expect("waiter must remain available after a passive poll error");
+
+        assert_eq!(
+            acknowledgement_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("termination acknowledgement"),
+            Ok(())
+        );
+        waiter.join().expect("waiter thread");
+    }
+
+    #[test]
+    fn automation_prompt_is_one_queued_item_with_a_separate_enter_write() {
+        let prompt = "Review the prepared handoff with Claude — safely.";
+        let encoded = encode_automation_prompt(prompt).expect("valid automation prompt");
+        let policy = automation_prompt_policy(AgentKind::Codex);
+        let input = PtyInput::AutomationPrompt {
+            prompt: encoded.clone(),
+            policy,
+        };
+        let mut writer = RecordingWriter::default();
+        let mut observed_delay = None;
+
+        write_pty_input_with_sleep(&mut writer, input, |delay| {
+            observed_delay = Some(delay);
+        })
+        .expect("write automation prompt");
+
+        assert_eq!(encoded, prompt.as_bytes());
+        assert!(!encoded.contains(&b'\r'));
+        assert_eq!(
+            writer.writes,
+            vec![prompt.as_bytes().to_vec(), b"\r".to_vec()]
+        );
+        assert_eq!(writer.flush_count, 2);
+        assert_eq!(observed_delay, Some(policy.settle_delay));
+        assert_eq!(policy.submit_key, b"\r");
+    }
+
+    #[test]
+    fn every_agent_has_an_explicit_automation_submit_policy() {
+        for agent in AgentKind::ALL {
+            let policy = automation_prompt_policy(agent);
+            assert!(policy.settle_delay >= Duration::from_millis(120));
+            assert_eq!(policy.submit_key, b"\r");
+        }
+    }
+
+    #[test]
+    fn automation_prompt_enforces_its_byte_limit() {
+        let maximum = "a".repeat(MAX_AUTOMATION_PROMPT_SIZE);
+        let oversized = "a".repeat(MAX_AUTOMATION_PROMPT_SIZE + 1);
+
+        assert_eq!(
+            encode_automation_prompt(&maximum)
+                .expect("maximum-size automation prompt")
+                .len(),
+            MAX_AUTOMATION_PROMPT_SIZE
+        );
+        assert!(encode_automation_prompt(&oversized).is_err());
+    }
+
+    #[test]
+    fn automation_prompt_rejects_empty_and_control_character_input() {
+        for prompt in [
+            "",
+            "   ",
+            "contains\0nul",
+            "contains\rcarriage-return",
+            "contains\nline-feed",
+            "contains\x1bescape",
+            "contains\ttab",
+            "contains\u{7f}delete",
+            "contains\u{009b}csi",
+        ] {
+            assert!(
+                encode_automation_prompt(prompt).is_err(),
+                "prompt should be rejected: {prompt:?}"
+            );
+        }
     }
 
     #[test]

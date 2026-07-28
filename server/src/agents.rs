@@ -345,6 +345,7 @@ mod tests {
         Config {
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 8787,
+            max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
             project_dir: PathBuf::from("."),
             state_dir: PathBuf::from("."),
             shell: ShellKind::Powershell,

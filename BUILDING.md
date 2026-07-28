@@ -46,6 +46,9 @@ package-directory/
 ├── SECURITY.md
 ├── CODE_OF_CONDUCT.md
 ├── THIRD_PARTY_NOTICES.md
+├── THIRD_PARTY_LICENSES/        # tagged release archives
+│   ├── THIRD_PARTY_LICENSES.txt
+│   └── manifest.json
 ├── docs/
 │   └── screenshots/
 └── LICENSE
@@ -54,12 +57,13 @@ package-directory/
 The `web` directory must remain next to the executable. When the backend is run
 with `cargo run`, it also searches the source tree's `web/dist` directory.
 
-The build scripts create local packages; the repository does not currently
-publish prebuilt binary releases. Before redistributing an executable or
-browser bundle, generate and include the complete upstream license and NOTICE
-texts described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The
-informational notice alone is not a complete binary-redistribution license
-bundle.
+The normal build scripts create local packages and intentionally stop before
+generating redistribution notices. Tagged GitHub Releases add a
+target-specific `THIRD_PARTY_LICENSES` directory and publish only after that
+bundle, Windows/Linux tests, packaged peer regression, archive layout,
+checksums, and provenance all pass. Before sharing a local package, run the
+same generator documented below; `THIRD_PARTY_NOTICES.md` alone is not the
+complete binary-redistribution bundle.
 
 ## Supported and validated platforms
 
@@ -69,6 +73,7 @@ The following paths have been exercised:
 | --- | --- | --- | --- |
 | Windows 10/11 x86-64 | Yes | Yes, GNU toolchain; MSVC is the recommended target | Yes, ConPTY |
 | Arch Linux x86-64 | Yes | Yes, native GNU/Linux target | Yes, Unix PTY |
+| Ubuntu 22.04 x86-64 release runner | Yes | Yes, glibc release package | Yes, synthetic native PTY |
 
 The Unix command construction also applies to macOS, but macOS has not yet had
 a full runtime validation.
@@ -89,7 +94,8 @@ At minimum:
 4. run a native PTY/runtime smoke test on each affected platform when launch,
    process lifecycle, WebSocket I/O, resize, replay, or terminal behavior
    changes;
-5. update every affected Markdown file in the same commit.
+5. generate and validate the target-specific third-party license bundle;
+6. update every affected Markdown file in the same commit.
 
 For workspace browsing, persistence, or selected-directory launch changes,
 the Windows and Linux checks must additionally cover native path-ID round
@@ -145,6 +151,7 @@ Both Windows and Linux builds require:
 - npm
 - a current stable Rust toolchain with Cargo (the locked graph currently
   requires Rust 1.88 or newer)
+- Python 3.11 or newer for regression and redistribution-license scripts
 - enough space for `web/node_modules` and `server/target`
 
 Codex, Claude, and AGY are not needed to compile or run the automated unit
@@ -158,6 +165,7 @@ all three CLIs on the runtime host.
 | Node.js and npm | Needed for the frontend build | Needed only when an installed CLI distribution requires Node |
 | Rust and Cargo | Needed for backend build/tests | Not required |
 | Native C linker/toolchain | Needed for the Rust build | Not required |
+| Python | Needed for regression/release validation | Not required |
 | Agent CLI and login | Needed only for a real smoke test | Primary required; others optional and auto-detected |
 | Browser | Needed only for browser tests | Required on the viewing device |
 
@@ -169,6 +177,7 @@ node --version
 npm --version
 rustc --version
 cargo --version
+python --version
 codex --version
 claude --version
 agy --version
@@ -502,6 +511,130 @@ test -f dist-linux/web/index.html
 ./dist-linux/codex-web --version
 ```
 
+## Redistribution license bundle
+
+`scripts/generate-third-party-licenses.py` uses only the Python standard
+library. It reads the locked non-development Cargo graph for one release
+target, every installed locked npm runtime/build package, and the active Rust
+standard-library notice. It validates exact reviewed license expressions,
+collects top-level LICENSE, LICENCE, COPYING, COPYRIGHT, and NOTICE evidence,
+and asserts the known extra attribution files for `atomic-waker`, `matchit`,
+`unicode-ident`, and ICU4X. It also binds npm packages to their lock paths,
+registry tarball URLs, and SHA-512 integrity values. Missing or unreviewed
+evidence, malformed license expressions, mismatched package metadata, and
+unexpected build-only fallbacks fail the build.
+
+Run it once after a clean package build:
+
+Windows MSVC:
+
+```powershell
+python -B .\scripts\generate-third-party-licenses.py `
+  --target x86_64-pc-windows-msvc `
+  --expected-rust-version 1.95.0 `
+  --output-dir .\dist\THIRD_PARTY_LICENSES
+```
+
+Linux GNU:
+
+```bash
+python3 -B ./scripts/generate-third-party-licenses.py \
+  --target x86_64-unknown-linux-gnu \
+  --expected-rust-version 1.95.0 \
+  --output-dir ./dist-linux/THIRD_PARTY_LICENSES
+```
+
+The generator refuses to replace an existing output directory. Re-run the
+normal clean package build before regenerating. Each bundle contains:
+
+```text
+THIRD_PARTY_LICENSES/
+├── THIRD_PARTY_LICENSES.txt
+└── manifest.json
+```
+
+The manifest records the target, Rust release/host, canonical UTF-8/LF SHA-256
+of both lockfiles, and sorted package, role, locked provenance, license,
+evidence source, filename, and normalized evidence-body digest metadata. The
+output has no timestamp or machine path and must be byte-identical when
+generated twice from the same lockfiles, installed package set, and Rust
+toolchain. Review it whenever dependencies or the release toolchain change.
+Do not hand-edit or commit generated bundles.
+
+The public Windows release is MSVC. A local GNU fallback build has a different
+target dependency graph and is not approved for redistribution by the MSVC
+bundle.
+
+## Maintainer release workflow
+
+`.github/workflows/release.yml` has a non-publishing `workflow_dispatch` dry
+run and a publishing path for strict `vMAJOR.MINOR.PATCH` tags. A publishing
+tag must point at the current `origin/main` tip, not merely an older commit in
+its history. Before a dry run or tag, synchronize the version in:
+
+- `server/Cargo.toml`;
+- the root `codex-web-terminal` entry in `server/Cargo.lock`;
+- `web/package.json`;
+- the top-level and `packages[""]` versions in `web/package-lock.json`.
+
+Run the complete tag-free build first:
+
+```bash
+gh workflow run release.yml --ref main -f version=X.Y.Z
+```
+
+That invocation builds, packages, downloads, safely extracts, and validates
+both archives but cannot attest or publish a GitHub Release.
+
+The workflow uses Node.js 22.23.1 and Rust 1.95.0, repeats the complete
+frontend/Rust validation, builds fresh packages on Windows MSVC and Ubuntu
+22.04, generates the target-specific license bundles, and exercises
+`scripts/peer-review-regression.py` against each packaged executable. It then
+creates exactly:
+
+```text
+codex-web-terminal-vX.Y.Z-windows-x86_64.zip
+codex-web-terminal-vX.Y.Z-linux-x86_64-glibc.tar.gz
+SHA256SUMS.txt
+```
+
+Each archive has one versioned root directory. The release tool tests reject
+absolute paths, traversal, links, special files, case-colliding entries,
+missing files, a wrong license-manifest target, and the wrong PE/ELF
+architecture. Both native jobs safely extract their archive and run the
+extracted binary's `--version`; a later Linux job independently downloads and
+checks both archive layouts. The Linux archive preserves the executable bit
+and targets x86_64 glibc 2.35 or newer. The Windows executable is not yet
+Authenticode-signed.
+
+Only the tag-only final publish job has `contents: write`, `id-token: write`,
+and `attestations: write`, and it is attached to the repository's `release`
+environment. It downloads the two exact validated artifacts, rejects extra
+filenames, writes checksums, creates GitHub provenance attestations, uploads
+to a draft, verifies the draft asset names, and only then publishes the
+release. It refuses to overwrite an existing release or asset.
+
+The maintainer sequence is:
+
+1. complete and record Windows and Linux validation;
+2. review dependency licenses, documentation, and a secret scan of the tree
+   and Git history;
+3. commit and push the reviewed source to `main`;
+4. complete the non-publishing `workflow_dispatch` run;
+5. create and push the matching version tag from the unchanged `main` tip;
+6. monitor the Release workflow and verify the published checksum,
+   attestation, archive layout, and clean-host startup.
+
+Do not upload an old local `dist` directory or create release assets manually.
+Configure the `release` environment and a repository rule for `v*` tag
+creation before the first tag. If a publish run fails after creating its
+draft, inspect that draft and its logs; remove only the failed release while
+preserving the tag before retrying:
+
+```bash
+gh release delete vX.Y.Z --repo bproject07/Codex-web --yes
+```
+
 ## Runtime smoke tests
 
 ### Basic HTTP and PTY check
@@ -625,10 +758,11 @@ creating a Codex conversation.
 ## Optional browser and mobile regression scripts
 
 The Python utilities in `scripts/` are specialized diagnostics rather than the
-normal unit-test path. They require Python 3, Python Playwright, and a matching
-browser installation. Check each script's help for its platform requirements;
-some older mobile diagnostics are Windows-oriented, while the agent-catalog
-and workspace-picker regressions own cross-platform fixtures and cleanup.
+normal unit-test path. They require Python 3. Browser-driving scripts also
+require Python Playwright and a matching browser installation. Check each
+script's help for its platform requirements; some older mobile diagnostics
+are Windows-oriented, while the agent-catalog, workspace-picker, and peer
+regressions own cross-platform fixtures and cleanup.
 
 Use them only on a disposable test port and never point them at a live
 production session. The standard cross-platform validation remains:
@@ -642,6 +776,66 @@ DTO validation. The Rust suite includes native path encoding, bounded
 directory browsing, workspace persistence, registry selected-CWD tests, and
 `server/tests/workspace_api.rs`. Keep these cases in the normal suites rather
 than making the launcher depend on an optional browser utility.
+
+The normal suites also cover the `@cwt` peer state model, strict frontend DTO
+normalization, composer Preview/Return behavior, non-nested close buttons,
+dedicated session metadata, per-generation capability rotation/revocation,
+loopback bridge authorization, helper argument/HTTP bounds, and an
+authenticated API launch of a synthetic second PTY. They also enforce the
+256-active-thread broker boundary, the 32-turn per-thread boundary, configured
+session-capacity conflicts, and rollback when a fresh reviewer cannot reserve
+a slot. Peer changes must keep
+those tests in the standard Windows and Linux runs; a real provider review is
+a manual smoke because provider credentials, model cost, and approval UI are
+not deterministic test dependencies.
+
+That provider smoke must verify that the injected prompt is actually
+submitted, not merely visible in the TUI composer. Automation text and its
+submit key use separate ordered PTY writes with the configured settle interval
+so paste-burst guards cannot consume Enter as part of the pasted text.
+
+The cross-platform peer-review regression owns a disposable server, state
+directory, project, and three synthetic agent profiles. It drives the real
+native PTYs and private helper over HTTP, revises the preview, returns the
+review, confirms that `Recheck` retains the same reviewer terminal and PTY
+generation, then closes and purges the peer without stopping the source. It
+also verifies that WebSocket restart controls cannot rotate either protected
+PTY generation and that the reviewer process tree actually exits. It does not
+require Playwright, provider credentials, a repository, or a real agent CLI,
+and refuses the reserved live ports `8788`, `8789`, and `8790`.
+
+On Windows:
+
+```powershell
+python -B .\scripts\peer-review-regression.py `
+  --server .\dist\codex-web.exe `
+  --port 8804
+```
+
+On Linux:
+
+```bash
+python3 -B ./scripts/peer-review-regression.py \
+  --server ./dist-linux/codex-web \
+  --port 8804
+```
+
+For a disposable manual peer smoke:
+
+1. start a package on an unused port and with an isolated `--state-dir`;
+2. open **@cwt** from a running source tab;
+3. choose a different ready agent and use **Source ready — Prepare handoff**
+   at an empty source prompt;
+4. verify the preview, then use **Reviewer ready — Send** at an empty reviewer
+   prompt;
+5. verify a new linked reviewer tab was created in the source directory;
+6. use **Source ready — Return**, then issue **Recheck** and confirm the same
+   reviewer `terminalId` and `sessionId` remain;
+7. close the reviewer and confirm the source is still running;
+8. stop the disposable server.
+
+Do not run this smoke against ports `8788`, `8789`, or `8790`, and do not use a
+live conversation or private repository as test content.
 
 The workspace-picker regression owns a disposable server, synthetic
 directories, isolated state, a synthetic long-running CLI, and its cleanup. It
@@ -687,7 +881,8 @@ python ./scripts/agent-catalog-regression.py \
 
 The session-tab regression creates four synthetic PTYs and checks desktop
 wheel/arrows, mobile swipe, active-tab switching, responsive header height,
-and the visibility of **+ New** and **Manage**:
+the default `4/20` capacity label, and the visibility of **+ New** and
+**Manage**:
 
 ```powershell
 python .\scripts\session-tabs-regression.py `
@@ -776,6 +971,7 @@ Commit:
 - Rust source and `server/Cargo.lock`
 - frontend source and `web/package-lock.json`
 - build/run scripts
+- release workflow and the third-party license generator
 - tests
 - Markdown documentation
 - `LICENSE`
@@ -790,6 +986,7 @@ Do not commit:
 - runtime logs
 - authentication tokens
 - credential-bearing launch scripts
+- generated `THIRD_PARTY_LICENSES` directories and release archives
 
 Check before committing:
 

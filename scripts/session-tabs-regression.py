@@ -233,7 +233,7 @@ def run_mobile(browser: Browser, port: int) -> dict[str, Any]:
     assert not result["leftArrowVisible"]
     assert not result["rightArrowVisible"]
     assert result["newLabel"].strip() == "+"
-    assert result["manageLabel"].strip() == "4"
+    assert result["manageLabel"].strip() == "4/20"
     assert before["create"]["right"] <= 360
     assert before["manage"]["right"] <= 360
 

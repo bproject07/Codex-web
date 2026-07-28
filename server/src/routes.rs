@@ -20,7 +20,9 @@ use crate::{
     filesystem::{
         DirectoryBrowser, DirectoryError, DirectoryListing, FilesystemRoots, decode_directory_id,
     },
-    registry::{MAX_SESSIONS, RegistryError, SessionRegistry},
+    peer::{PeerBroker, PeerStatus, SessionPurpose},
+    peer_routes,
+    registry::{RegistryError, SessionRegistry},
     session::SessionSnapshot,
     websocket,
     workspaces::{WorkspaceError, WorkspaceLibrary, WorkspaceStore},
@@ -32,6 +34,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub auth: AuthState,
     pub sessions: SessionRegistry,
+    pub peers: PeerBroker,
     pub agents: AgentCatalog,
     pub directories: DirectoryBrowser,
     pub workspaces: WorkspaceStore,
@@ -117,6 +120,7 @@ pub fn build_router(state: AppState, static_directory: Option<PathBuf>) -> Route
         )
         .route("/api/sessions/{id}/restart", post(restart_session))
         .route("/api/sessions/{id}/terminate", post(terminate_session))
+        .merge(peer_routes::protected_router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_http_auth,
@@ -148,7 +152,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         connected_clients: state.sessions.connected_clients(),
         session_count: state.sessions.session_count(),
         running_sessions,
-        max_sessions: MAX_SESSIONS,
+        max_sessions: state.sessions.max_sessions(),
     })
 }
 
@@ -295,7 +299,7 @@ async fn create_session(State(state): State<AppState>, body: Bytes) -> Response 
         Err(RegistryError::LimitReached) => (
             StatusCode::CONFLICT,
             Json(ErrorResponse {
-                error: "The maximum number of terminal sessions is already running.",
+                error: "Managed terminal session capacity has been reached.",
             }),
         )
             .into_response(),
@@ -434,6 +438,28 @@ async fn restart_session(State(state): State<AppState>, Path(terminal_id): Path<
 }
 
 async fn restart_by_id(state: &AppState, terminal_id: Uuid) -> Response {
+    if state
+        .sessions
+        .get(terminal_id)
+        .is_some_and(|session| matches!(session.purpose(), SessionPurpose::Peer { .. }))
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "A dedicated peer terminal cannot be restarted; close its peer thread instead.",
+            }),
+        )
+            .into_response();
+    }
+    if has_open_peer_thread(state, terminal_id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Close this terminal's peer threads before restarting the source session.",
+            }),
+        )
+            .into_response();
+    }
     match state.sessions.restart(terminal_id).await {
         Ok(()) => {
             if let Some(snapshot) = state
@@ -455,6 +481,20 @@ async fn restart_by_id(state: &AppState, terminal_id: Uuid) -> Response {
             StatusCode::NO_CONTENT.into_response()
         }
         Err(RegistryError::NotFound) => session_not_found(),
+        Err(RegistryError::PeerSessionsActive) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Close this terminal's peer threads before restarting the source session.",
+            }),
+        )
+            .into_response(),
+        Err(RegistryError::PeerSessionManaged) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "A dedicated peer terminal cannot be restarted; close its peer thread instead.",
+            }),
+        )
+            .into_response(),
         Err(error) => {
             tracing::error!(%error, %terminal_id, "session restart request failed");
             (
@@ -481,9 +521,45 @@ async fn terminate_session(
 }
 
 async fn terminate_by_id(state: &AppState, terminal_id: Uuid) -> Response {
+    if state
+        .sessions
+        .get(terminal_id)
+        .is_some_and(|session| matches!(session.purpose(), SessionPurpose::Peer { .. }))
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "A dedicated peer terminal is managed by its peer thread; close the thread instead.",
+            }),
+        )
+            .into_response();
+    }
+    if has_open_peer_thread(state, terminal_id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Close this terminal's peer threads before terminating the source session.",
+            }),
+        )
+            .into_response();
+    }
     match state.sessions.terminate(terminal_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(RegistryError::NotFound) => session_not_found(),
+        Err(RegistryError::PeerSessionsActive) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Close this terminal's peer threads before terminating the source session.",
+            }),
+        )
+            .into_response(),
+        Err(RegistryError::PeerSessionManaged) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "A dedicated peer terminal is managed by its peer thread; close the thread instead.",
+            }),
+        )
+            .into_response(),
         Err(error) => {
             tracing::error!(%error, %terminal_id, "session terminate request failed");
             (
@@ -498,6 +574,53 @@ async fn terminate_by_id(state: &AppState, terminal_id: Uuid) -> Response {
 }
 
 async fn delete_session(State(state): State<AppState>, Path(terminal_id): Path<Uuid>) -> Response {
+    if let Some(session) = state.sessions.get(terminal_id) {
+        let snapshot = session.snapshot();
+        match snapshot.purpose {
+            SessionPurpose::Peer {
+                thread_id,
+                parent_terminal_id,
+            } => {
+                return match state.peers.get_thread(thread_id) {
+                    Ok(_) => peer_routes::close_thread_by_id(&state, thread_id).await,
+                    Err(_) => match state
+                        .sessions
+                        .delete_peer(
+                            terminal_id,
+                            thread_id,
+                            parent_terminal_id,
+                            snapshot.session_id,
+                        )
+                        .await
+                    {
+                        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                        Err(RegistryError::NotFound) => session_not_found(),
+                        Err(error) => {
+                            tracing::error!(%error, %terminal_id, "orphaned peer terminal delete failed");
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(ErrorResponse {
+                                    error: "The terminal session could not be deleted.",
+                                }),
+                            )
+                                .into_response()
+                        }
+                    },
+                };
+            }
+            SessionPurpose::Interactive => {
+                if has_open_peer_thread(&state, terminal_id) {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(ErrorResponse {
+                            error: "Close this terminal's peer threads before deleting the source session.",
+                        }),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
     match state.sessions.delete(terminal_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(RegistryError::NotFound) => session_not_found(),
@@ -505,6 +628,20 @@ async fn delete_session(State(state): State<AppState>, Path(terminal_id): Path<U
             StatusCode::CONFLICT,
             Json(ErrorResponse {
                 error: "The primary terminal session cannot be deleted.",
+            }),
+        )
+            .into_response(),
+        Err(RegistryError::PeerSessionsActive) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Close this terminal's peer threads before deleting the source session.",
+            }),
+        )
+            .into_response(),
+        Err(RegistryError::PeerSessionManaged) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "A dedicated peer terminal must be closed through its peer thread.",
             }),
         )
             .into_response(),
@@ -519,6 +656,12 @@ async fn delete_session(State(state): State<AppState>, Path(terminal_id): Path<U
                 .into_response()
         }
     }
+}
+
+fn has_open_peer_thread(state: &AppState, terminal_id: Uuid) -> bool {
+    state.peers.list_threads().iter().any(|thread| {
+        thread.source_terminal_id == terminal_id && thread.status != PeerStatus::Closed
+    })
 }
 
 fn session_not_found() -> Response {

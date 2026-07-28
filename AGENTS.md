@@ -54,6 +54,8 @@ The most important properties are:
 │   ├── desktop-slash-regression.py
 │   ├── mobile-codex-smoke.py  Browser/mobile smoke test
 │   ├── mobile-resize-regression.py
+│   ├── peer-review-regression.py  Native PTY/helper peer workflow
+│   ├── generate-third-party-licenses.py  Release license/NOTICE gate
 │   ├── session-tabs-regression.py
 │   └── workspace-picker-regression.py  Auth/CWD/persistence/mobile regression
 ├── server/
@@ -65,8 +67,11 @@ The most important properties are:
 │   │   ├── config.rs          CLI/environment parsing and static asset lookup
 │   │   ├── filesystem.rs      Native path IDs and bounded directory browsing
 │   │   ├── main.rs            Startup, listener, URLs, graceful Ctrl+C path
+│   │   ├── peer.rs            Bounded peer thread/turn state and capabilities
+│   │   ├── peer_cli.rs        Hidden loopback helper client
+│   │   ├── peer_routes.rs     Public workflow and private bridge routes
 │   │   ├── protocol.rs        Browser control-message limits and parsing
-│   │   ├── registry.rs        Up to four managed terminal entries
+│   │   ├── registry.rs        Configurable managed terminal capacity
 │   │   ├── routes.rs          Protected HTTP API and static serving
 │   │   ├── session.rs         PTY lifecycle, replay buffer, process management
 │   │   ├── terminal.rs        Command resolution and platform-specific PTY launch
@@ -83,6 +88,7 @@ The most important properties are:
         ├── AgentPicker.tsx    Responsive agent discovery/start dialog
         ├── App.tsx            Main UI, sessions, settings, lifecycle actions
         ├── api.ts             Token/session storage and HTTP API client
+        ├── peer/              Peer composer, state, API, and unit tests
         ├── sessions/          Header session tabs and navigation helpers
         ├── workspaces/        Folder picker, model, DTOs, and unit tests
         ├── terminal/
@@ -175,7 +181,15 @@ preflight, PTY startup, or process termination requires:
 
 ## Session invariants
 
-- The registry contains one primary session and at most four total sessions.
+- The registry contains one primary session and at most the configured
+  capacity: 20 by default, accepted range 1 through 256.
+- Capacity includes running, stopped, failed, and exited ordinary entries plus
+  dedicated peer reviewers. Only deletion of a removable entry or closure of
+  a peer thread releases a slot.
+- The validated capacity is immutable for one server generation, is enforced
+  under the registry mutex, and is reported by `/api/health`. The frontend
+  treats malformed/unavailable health as unknown instead of falsely blocking
+  creation, and disables only **+ New** when a known capacity is full.
 - The primary entry cannot be deleted.
 - `terminalId` is stable for the managed entry.
 - `sessionId` identifies one PTY generation and changes on restart.
@@ -195,6 +209,72 @@ preflight, PTY startup, or process termination requires:
 - Terminate stops the process but keeps the managed entry.
 - Deleting a non-primary session terminates it and removes its entry.
 - A browser close or network interruption must not stop the PTY.
+
+## Peer workflow invariants
+
+- A new peer thread always owns a newly created dedicated peer PTY. Never
+  route it to, inspect, or reuse an ordinary session.
+- A follow-up or `Recheck` reuses only that thread's still-running dedicated
+  reviewer. A changed `sessionId`, exit, restart, deletion, or server restart
+  means its conversational context is no longer valid.
+- Peer reviewers count toward the same configured session capacity. Never
+  evict or auto-close another session to make room. Existing follow-ups may
+  remain available at capacity because they reuse their reviewer.
+- Disable only creation of a fresh reviewer when capacity is full; keep
+  existing peer-thread follow-ups usable. One thread is bounded to 32 turns,
+  and active broker threads are bounded by the supported maximum capacity of
+  256. Keep both boundaries documented and covered by tests.
+- The source working directory is decoded, canonicalized, and checked again
+  before the reviewer starts. Git, TFS, or any repository is optional context,
+  never a workflow requirement.
+- Raw PTY output, ANSI text, cursor position, silence, and CPU state are not
+  agent-completion signals. Peer artifacts move only through the bounded
+  private helper protocol.
+- The helper listener remains loopback-only and separate from the configured
+  public listener. It receives no browser bearer token. Remove
+  `CODEX_WEB_TOKEN` from every managed PTY and version-probe environment.
+  Shutdown must disable new capability activation and revoke all capabilities
+  before releasing this listener; an unexpected bridge exit fails the public
+  server closed.
+- Every real PTY generation receives a new random capability. Strip inherited
+  `CWT_PEER_*`, `CWT_TERMINAL_ID`, and `CWT_SESSION_ID` values before launch
+  and version probes; revoke the active capability on spawn failure, exit,
+  terminate, restart, or deletion.
+- A capability authorizes only the active source or reviewer role for its
+  linked current turn. Compare it in constant time and never put it in argv,
+  URLs, API responses, logs, diagnostics, or screenshots.
+- Instructions are bounded to 4 KiB. Handoffs and responses are non-empty
+  UTF-8, bounded to 64 KiB, in memory only, and never logged. Normalize their
+  line endings and reject terminal control characters other than line-feed
+  and tab at both broker input and helper output boundaries.
+- Preview, dispatch, and return remain explicit user actions. Automation
+  requests require `sourceReady: true` or `reviewerReady: true`, are bound to
+  the exact `sessionId`, and must be initiated only at an empty agent prompt.
+  Do not invent a generic PTY "idle" detector or auto-repeat an ambiguous
+  delivery.
+- Restart/terminate is rejected for a peer reviewer. Restart, terminate, and
+  deletion of a source are rejected while it owns an open peer thread.
+- Provisioning and closing a peer thread are cancellation-owned transactions:
+  once started, they finish or perform compensating rollback even if the
+  browser request disconnects. Generic lifecycle paths must never mutate peer
+  sessions; internal cleanup must use the exact thread, source terminal, peer
+  terminal, and PTY generation identity. A provisioning lease owns the
+  reviewer identity before reservation/start and blocks Close until source
+  prompt delivery finishes. Close succeeds only after reviewer process exit is
+  confirmed; a termination failure keeps the exact session and thread
+  retryable.
+- `@cwt` is a normal accessible launcher and composer. Do not intercept,
+  buffer, erase, or replay literal `@cwt` keystrokes in `TerminalView` or the
+  Android IME guard.
+- Treat an automation prompt as one ordered queue transaction, but write and
+  flush its text before a provider settle interval and a separate Enter write.
+  Never concatenate the submit key with fast raw prompt bytes: real TUIs can
+  classify that burst as paste and turn Enter into a newline. Browser input
+  must not interleave between the prompt and its submit key.
+
+Changes to the peer broker, helper, automation prompts, session purpose, or
+peer routes require `scripts/peer-review-regression.py` on both Windows and
+Linux in addition to the normal frontend, Rust, and package checks.
 
 ## Workspace invariants
 
@@ -255,8 +335,9 @@ when changing batching or reconnect behavior.
   and hidden xterm textarea are moving.
 - The mobile toolbar order starts with Enter and arrows, then history/control
   keys.
-- Session tabs remain horizontally scrollable on overflow. **+ New** and
-  **Manage** stay outside the inner tab scroller so they remain discoverable.
+- Session tabs remain horizontally scrollable on overflow. **@cwt**, **+ New**,
+  and **Manage** stay outside the inner tab scroller so they remain
+  discoverable.
 - On desktop, an unmodified `/` pressed outside an editable control or dialog
   is routed to the connected terminal and its browser default is suppressed.
   Do not intercept modified shortcuts, form input, dialogs, IME composition,
@@ -359,7 +440,12 @@ Check:
 - hashed JS and CSS assets referenced by `index.html` exist;
 - root HTTP request returns 200;
 - `/api/health` distinguishes command discovery from a running PTY;
-- WebSocket input produces PTY output.
+- WebSocket input produces PTY output;
+- `scripts/peer-review-regression.py` passes against the packaged executable
+  on Windows and Linux when peer code is present or changed;
+- a redistribution archive contains a target-specific generated
+  `THIRD_PARTY_LICENSES` bundle whose lockfile hashes and package inventory
+  match that build.
 
 ### Documentation validation
 
@@ -403,6 +489,28 @@ one half.
 
 The Windows `dist` and Linux `dist-linux` directories are ignored artifacts.
 Never infer that their contents belong in a commit.
+
+`.github/workflows/release.yml` supports a non-publishing manual dry run.
+Publishing remains tag-only from a strict `vMAJOR.MINOR.PATCH` tag at the
+current `main` tip. The version must match `server/Cargo.toml`, the root Cargo
+lock entry, `web/package.json`, and both package-lock root versions. Release
+archives have one versioned root and exactly one Windows x86_64 or Linux
+x86_64 glibc package.
+
+`scripts/generate-third-party-licenses.py` is a fail-closed release gate.
+Never weaken its reviewed license allowlist, missing-text checks, special
+NOTICE assertions, lockfile hashes, deterministic ordering, or target binding
+to make a dependency update pass. Review the new dependency and its actual
+license files. Generated bundles and archives remain ignored output; commit
+the generator/workflow changes, not the generated result.
+
+Release actions remain pinned to full commit SHAs. Build jobs have read-only
+repository permission. Only the final job may write release contents and
+attestations; it must reject extra assets and existing releases, publish from
+a verified draft, use the `release` environment, and never overwrite an
+asset. Each native archive and both downloaded artifacts must pass
+`scripts/validate-release-archive.py`; keep its safe-path, complete-layout,
+target-manifest, architecture, extraction, and native version checks.
 
 ## Live-server safety
 
@@ -459,8 +567,14 @@ A change is complete only when:
    Changes to workspace browsing or persistence also document `--project` as a
    default rather than a sandbox, bearer-token authority, state locations,
    limits, and stale-entry behavior.
+   Changes to peer coordination document its supervised state transitions,
+   dedicated-session and session-limit behavior, loopback capability boundary,
+   artifact limits, same-account limitation, and Windows/Linux validation.
 6. No secrets, generated artifacts, or unrelated changes are staged.
-7. Live services created for testing are stopped unless the user asked to keep
+7. A release change also passes target-specific license generation, packaged
+   peer regression, archive-layout validation, checksums, and provenance
+   configuration on both supported operating systems.
+8. Live services created for testing are stopped unless the user asked to keep
    them running.
-8. The final report distinguishes source changes, tests, commit/push state,
+9. The final report distinguishes source changes, tests, commit/push state,
    deployment state, and any remaining limitations.

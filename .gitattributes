@@ -3,3 +3,5 @@
 *.cmd text eol=crlf
 *.yml text eol=lf
 *.yaml text eol=lf
+server/Cargo.lock text eol=lf
+web/package-lock.json text eol=lf

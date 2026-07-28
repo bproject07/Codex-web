@@ -5,6 +5,7 @@ import {
   getSession,
   listAgents,
   listSessions,
+  normalizeSessionSnapshot,
   type SessionSnapshot,
 } from "./api";
 
@@ -24,6 +25,7 @@ const PRIMARY_SESSION: SessionSnapshot = {
   project: "C:\\Projects\\my-app",
   directoryId: "w1.QwA6AFwAUAByAG8AagBlAGMAdABzAFwAbQB5AC0AYQBwAHAA",
   lastError: null,
+  purpose: { kind: "interactive" },
 };
 
 const SECONDARY_SESSION: SessionSnapshot = {
@@ -48,6 +50,27 @@ afterEach(() => {
 });
 
 describe("terminal session API selection", () => {
+  it("normalizes dedicated peer-session purpose metadata", () => {
+    const parentTerminalId = PRIMARY_SESSION.terminalId;
+    const peer = normalizeSessionSnapshot(
+      {
+        ...SECONDARY_SESSION,
+        purpose: {
+          kind: "peer",
+          threadId: "33333333-3333-4333-8333-333333333333",
+          parentTerminalId,
+        },
+      },
+      SECONDARY_SESSION.terminalId,
+    );
+
+    expect(peer.purpose).toEqual({
+      kind: "peer",
+      threadId: "33333333-3333-4333-8333-333333333333",
+      parentTerminalId,
+    });
+  });
+
   it("returns the exact requested terminal from the session list", async () => {
     const fetchMock = vi
       .fn()
@@ -85,6 +108,7 @@ describe("terminal session API selection", () => {
       isPrimary: _isPrimary,
       createdAt: _createdAt,
       directoryId: _directoryId,
+      purpose: _purpose,
       ...legacySession
     } = PRIMARY_SESSION;
     const fetchMock = vi

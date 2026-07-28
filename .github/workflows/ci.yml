@@ -39,10 +39,10 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Set up stable Rust
+      - name: Set up Rust 1.95
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.95.0
 
       - name: Install frontend dependencies
         working-directory: web
@@ -58,6 +58,9 @@ jobs:
 
       - name: Check deterministic demo fixture
         run: node --check scripts/fixtures/demo-terminal.js
+
+      - name: Test release tooling
+        run: python -B scripts/release-tools-tests.py
 
       - name: Check Rust formatting
         working-directory: server
@@ -119,6 +122,35 @@ jobs:
           }
           .\dist\codex-web.exe --version
 
+      - name: Validate Windows redistribution licenses
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -B .\scripts\generate-third-party-licenses.py `
+            --target x86_64-pc-windows-msvc `
+            --expected-rust-version 1.95.0 `
+            --output-dir .\dist\THIRD_PARTY_LICENSES
+          if ($LASTEXITCODE -ne 0) {
+            throw "Third-party license generation failed."
+          }
+          $required = @(
+            ".\dist\THIRD_PARTY_LICENSES\THIRD_PARTY_LICENSES.txt",
+            ".\dist\THIRD_PARTY_LICENSES\manifest.json"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing generated license file: $path"
+            }
+          }
+
+      - name: Validate packaged Windows peer workflow
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -B .\scripts\peer-review-regression.py `
+            --server .\dist\codex-web.exe `
+            --port 8814
+
       - name: Validate Linux package script
         if: runner.os == 'Linux'
         shell: bash
@@ -152,6 +184,27 @@ jobs:
             test -f "$path"
           done
           ./dist-linux/codex-web --version
+
+      - name: Validate Linux redistribution licenses
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B ./scripts/generate-third-party-licenses.py \
+            --target x86_64-unknown-linux-gnu \
+            --expected-rust-version 1.95.0 \
+            --output-dir ./dist-linux/THIRD_PARTY_LICENSES
+          test -f ./dist-linux/THIRD_PARTY_LICENSES/THIRD_PARTY_LICENSES.txt
+          test -f ./dist-linux/THIRD_PARTY_LICENSES/manifest.json
+
+      - name: Validate packaged Linux peer workflow
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B ./scripts/peer-review-regression.py \
+            --server ./dist-linux/codex-web \
+            --port 8815
 
   minimum-rust:
     name: Minimum Rust 1.88

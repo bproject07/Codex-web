@@ -2,6 +2,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -12,8 +13,9 @@ use axum::{
 use codex_web_terminal::{
     agents::build_agent_profiles,
     auth::AuthState,
-    config::{AgentKind, Config, ShellKind},
+    config::{AgentKind, Config, DEFAULT_MAX_SESSIONS, ShellKind},
     filesystem::{DirectoryBrowser, encode_directory_id},
+    peer::PeerBroker,
     registry::SessionRegistry,
     routes::{AppState, build_router},
     workspaces::WorkspaceStore,
@@ -23,6 +25,83 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 const TOKEN: &str = "workspace-api-test-token";
+
+#[tokio::test]
+async fn health_reports_the_configured_session_capacity() {
+    let fixture = tempfile::tempdir().expect("temporary project");
+    let (app, _, _) = test_router_with_options(fixture.path(), None, 7).await;
+
+    let health = json_response(
+        app.oneshot(request("GET", "/api/health", None, true))
+            .await
+            .expect("health response"),
+    )
+    .await;
+
+    assert_eq!(health["sessionCount"], 1);
+    assert_eq!(health["maxSessions"], 7);
+}
+
+#[tokio::test]
+async fn session_creation_reports_the_configured_capacity_conflict() {
+    let fixture = tempfile::tempdir().expect("temporary project");
+    let (app, sessions, _) = test_router_with_options(fixture.path(), None, 1).await;
+
+    let response = app
+        .oneshot(request(
+            "POST",
+            "/api/sessions",
+            Some(json!({ "agent": "codex" })),
+            true,
+        ))
+        .await
+        .expect("capacity response");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(response).await["error"],
+        "Managed terminal session capacity has been reached."
+    );
+    assert_eq!(sessions.session_count(), 1);
+}
+
+#[tokio::test]
+async fn peer_provisioning_rolls_back_when_session_capacity_is_full() {
+    let fixture = tempfile::tempdir().expect("temporary project");
+    let command = write_long_running_agent_fixture(fixture.path());
+    let (app, sessions, peers) = test_router_with_options(
+        fixture.path(),
+        Some(command.to_string_lossy().into_owned()),
+        1,
+    )
+    .await;
+    sessions
+        .start_primary()
+        .await
+        .expect("start source terminal");
+    let source = sessions.primary().snapshot();
+
+    let response = app
+        .oneshot(request(
+            "POST",
+            "/api/peer/threads",
+            Some(json!({
+                "sourceTerminalId": source.terminal_id,
+                "targetAgent": "codex",
+                "action": "review",
+                "instruction": "Verify capacity rollback.",
+                "sourceReady": true
+            })),
+            true,
+        ))
+        .await
+        .expect("peer capacity response");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(sessions.session_count(), 1);
+    assert!(peers.list_threads().is_empty());
+    sessions.shutdown().await;
+}
 
 #[tokio::test]
 async fn filesystem_and_workspace_apis_are_authenticated_and_directory_only() {
@@ -169,7 +248,7 @@ async fn successful_session_creation_records_the_selected_directory_and_agent() 
     std::fs::create_dir(&selected).expect("create selected directory");
     let selected = dunce::canonicalize(selected).expect("canonical selected directory");
     let command = write_agent_fixture(fixture.path());
-    let (app, sessions) =
+    let (app, sessions, _) =
         test_router_with_command(fixture.path(), Some(command.to_string_lossy().into_owned()))
             .await;
     let directory_id = encode_directory_id(&selected);
@@ -203,6 +282,254 @@ async fn successful_session_creation_records_the_selected_directory_and_agent() 
     sessions.shutdown().await;
 }
 
+#[tokio::test]
+async fn peer_api_creates_only_a_fresh_linked_reviewer_and_closes_it_cleanly() {
+    let fixture = tempfile::tempdir().expect("temporary project");
+    let command = write_long_running_agent_fixture(fixture.path());
+    let (app, sessions, _) =
+        test_router_with_command(fixture.path(), Some(command.to_string_lossy().into_owned()))
+            .await;
+    sessions
+        .start_primary()
+        .await
+        .expect("start source terminal");
+    let source = sessions.primary().snapshot();
+
+    let unauthorized = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/peer/threads",
+            Some(json!({
+                "sourceTerminalId": source.terminal_id,
+                "targetAgent": "codex",
+                "action": "review",
+                "instruction": "Review without assuming Git.",
+                "sourceReady": true
+            })),
+            false,
+        ))
+        .await
+        .expect("unauthorized peer response");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let readiness_not_acknowledged = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/peer/threads",
+            Some(json!({
+                "sourceTerminalId": source.terminal_id,
+                "targetAgent": "codex",
+                "action": "review",
+                "instruction": "Review without assuming Git.",
+                "sourceReady": false
+            })),
+            true,
+        ))
+        .await
+        .expect("readiness response");
+    assert_eq!(readiness_not_acknowledged.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(sessions.session_count(), 1);
+
+    let created = json_response(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/peer/threads",
+                Some(json!({
+                    "sourceTerminalId": source.terminal_id,
+                    "targetAgent": "codex",
+                    "action": "review",
+                    "instruction": "Review without assuming Git.",
+                    "sourceReady": true
+                })),
+                true,
+            ))
+            .await
+            .expect("peer create response"),
+    )
+    .await;
+    let thread_id = created["id"].as_str().expect("thread id");
+    let reviewer_id = created["reviewerTerminalId"]
+        .as_str()
+        .expect("reviewer terminal id");
+    assert_eq!(created["sourceTerminalId"], source.terminal_id.to_string());
+    assert_eq!(created["status"], "preparing_handoff");
+    assert_ne!(reviewer_id, source.terminal_id.to_string());
+    assert_eq!(sessions.session_count(), 2);
+
+    let listed = json_response(
+        app.clone()
+            .oneshot(request("GET", "/api/sessions", None, true))
+            .await
+            .expect("session list"),
+    )
+    .await;
+    let reviewer = listed
+        .as_array()
+        .expect("session array")
+        .iter()
+        .find(|session| session["terminalId"] == reviewer_id)
+        .expect("dedicated reviewer");
+    assert_eq!(reviewer["purpose"]["kind"], "peer");
+    assert_eq!(
+        reviewer["purpose"]["parentTerminalId"],
+        source.terminal_id.to_string()
+    );
+    assert_eq!(reviewer["purpose"]["threadId"], thread_id);
+
+    let premature_follow_up = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/peer/threads/{thread_id}/turns"),
+            Some(json!({
+                "action": "recheck",
+                "instruction": "This must reuse only a completed peer thread.",
+                "sourceReady": true
+            })),
+            true,
+        ))
+        .await
+        .expect("premature follow-up response");
+    assert_eq!(premature_follow_up.status(), StatusCode::CONFLICT);
+
+    let closed = app
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/peer/threads/{thread_id}"),
+            None,
+            true,
+        ))
+        .await
+        .expect("peer close response");
+    assert_eq!(closed.status(), StatusCode::NO_CONTENT);
+    assert_eq!(sessions.session_count(), 1);
+    assert!(sessions.primary().is_running());
+    sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn peer_provision_and_close_finish_after_request_cancellation() {
+    let fixture = tempfile::tempdir().expect("temporary project");
+    let command = write_slow_start_agent_fixture(fixture.path());
+    let (app, sessions, peers) =
+        test_router_with_command(fixture.path(), Some(command.to_string_lossy().into_owned()))
+            .await;
+    sessions
+        .start_primary()
+        .await
+        .expect("start source terminal");
+    let source = sessions.primary().snapshot();
+
+    let create_app = app.clone();
+    let create_request = request(
+        "POST",
+        "/api/peer/threads",
+        Some(json!({
+            "sourceTerminalId": source.terminal_id,
+            "targetAgent": "codex",
+            "action": "review",
+            "instruction": "Complete provisioning after the browser request disappears.",
+            "sourceReady": true
+        })),
+        true,
+    );
+    let create_task = tokio::spawn(async move { create_app.oneshot(create_request).await });
+
+    let reservation_deadline = Instant::now() + Duration::from_secs(3);
+    while sessions.session_count() < 2 {
+        assert!(
+            Instant::now() < reservation_deadline,
+            "dedicated reviewer was not reserved"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let provisioning_thread = peers
+        .list_threads()
+        .into_iter()
+        .next()
+        .expect("provisioning thread");
+    let reserved_reviewer_id = provisioning_thread
+        .reviewer_terminal_id
+        .expect("provisioning thread already owns the reserved reviewer");
+    assert!(sessions.get(reserved_reviewer_id).is_some());
+    let premature_close = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/peer/threads/{}", provisioning_thread.id),
+            None,
+            true,
+        ))
+        .await
+        .expect("close during provisioning response");
+    assert_eq!(premature_close.status(), StatusCode::CONFLICT);
+    assert!(sessions.get(reserved_reviewer_id).is_some());
+    assert!(peers.get_thread(provisioning_thread.id).is_ok());
+
+    create_task.abort();
+    let _ = create_task.await;
+
+    let provision_deadline = Instant::now() + Duration::from_secs(5);
+    let provisioned = loop {
+        let thread = peers.list_threads().into_iter().next();
+        if let Some(thread) = thread
+            && let Some(reviewer_id) = thread.reviewer_terminal_id
+            && sessions
+                .get(reviewer_id)
+                .is_some_and(|reviewer| reviewer.is_running())
+            && peers.bind_reviewer(thread.id, reviewer_id).is_ok()
+        {
+            break thread;
+        }
+        assert!(
+            Instant::now() < provision_deadline,
+            "owned peer provisioning did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    let close_app = app.clone();
+    let reviewer_shutdown = sessions
+        .get(
+            provisioned
+                .reviewer_terminal_id
+                .expect("provisioned reviewer terminal"),
+        )
+        .expect("reviewer remains registered")
+        .shutdown_signal();
+    let close_request = request(
+        "DELETE",
+        &format!("/api/peer/threads/{}", provisioned.id),
+        None,
+        true,
+    );
+    let close_task = tokio::spawn(async move { close_app.oneshot(close_request).await });
+    let close_started_deadline = Instant::now() + Duration::from_secs(3);
+    while !reviewer_shutdown.is_cancelled() {
+        assert!(
+            Instant::now() < close_started_deadline,
+            "dedicated reviewer close did not start"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    close_task.abort();
+    let _ = close_task.await;
+
+    let close_deadline = Instant::now() + Duration::from_secs(5);
+    while !peers.list_threads().is_empty() || sessions.session_count() != 1 {
+        assert!(
+            Instant::now() < close_deadline,
+            "owned peer close did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(sessions.primary().is_running());
+    sessions.shutdown().await;
+}
+
 async fn test_router(project: &Path) -> axum::Router {
     test_router_with_command(project, None).await.0
 }
@@ -210,12 +537,21 @@ async fn test_router(project: &Path) -> axum::Router {
 async fn test_router_with_command(
     project: &Path,
     command: Option<String>,
-) -> (axum::Router, SessionRegistry) {
+) -> (axum::Router, SessionRegistry, PeerBroker) {
+    test_router_with_options(project, command, DEFAULT_MAX_SESSIONS).await
+}
+
+async fn test_router_with_options(
+    project: &Path,
+    command: Option<String>,
+    max_sessions: usize,
+) -> (axum::Router, SessionRegistry, PeerBroker) {
     let project = dunce::canonicalize(project).expect("canonical project");
     let state_dir = project.join("state");
     let config = Arc::new(Config {
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: 8787,
+        max_sessions,
         project_dir: project.clone(),
         state_dir: state_dir.clone(),
         shell: ShellKind::Powershell,
@@ -233,15 +569,22 @@ async fn test_router_with_command(
         log_level: "info".to_owned(),
     });
     let profiles = build_agent_profiles(&config);
-    let sessions = SessionRegistry::with_agent_configs(
+    let peers = PeerBroker::new(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 45_001)),
+        "codex-web".into(),
+    );
+    let sessions = SessionRegistry::with_agent_configs_and_peer_broker_with_max_sessions(
         profiles.primary,
         profiles.new_session,
         profiles.additional,
+        peers.clone(),
+        max_sessions,
     );
     let state = AppState {
         config,
         auth: AuthState::new(TOKEN.to_owned()),
         sessions: sessions.clone(),
+        peers: peers.clone(),
         agents: profiles.catalog,
         directories: DirectoryBrowser::new(project),
         workspaces: WorkspaceStore::open(state_dir)
@@ -249,7 +592,7 @@ async fn test_router_with_command(
             .expect("workspace store"),
         shutdown: CancellationToken::new(),
     };
-    (build_router(state, None), sessions)
+    (build_router(state, None), sessions, peers)
 }
 
 fn request(method: &str, uri: &str, body: Option<Value>, authenticated: bool) -> Request<Body> {
@@ -274,6 +617,10 @@ async fn json_response(response: axum::response::Response) -> Value {
         "status: {}",
         response.status()
     );
+    response_json(response).await
+}
+
+async fn response_json(response: axum::response::Response) -> Value {
     let bytes = to_bytes(response.into_body(), 1024 * 1024)
         .await
         .expect("response body");
@@ -291,6 +638,28 @@ fn write_agent_fixture(directory: &Path) -> std::path::PathBuf {
     command
 }
 
+#[cfg(windows)]
+fn write_long_running_agent_fixture(directory: &Path) -> std::path::PathBuf {
+    let command = directory.join("workspace-api-peer-agent.cmd");
+    std::fs::write(
+        &command,
+        "@echo off\r\nif \"%~1\"==\"--version\" (\r\n  echo codex 1.2.3\r\n  exit /b 0\r\n)\r\necho PEER-READY\r\n:read\r\nset \"line=\"\r\nset /p \"line=\"\r\nif errorlevel 1 goto read\r\necho INPUT-ACCEPTED\r\ngoto read\r\n",
+    )
+    .expect("write Windows peer agent fixture");
+    command
+}
+
+#[cfg(windows)]
+fn write_slow_start_agent_fixture(directory: &Path) -> std::path::PathBuf {
+    let command = directory.join("workspace-api-slow-peer-agent.cmd");
+    std::fs::write(
+        &command,
+        "@echo off\r\nif \"%~1\"==\"--version\" (\r\n  ping -n 2 127.0.0.1 >nul\r\n  echo codex 1.2.3\r\n  exit /b 0\r\n)\r\necho PEER-READY\r\n:read\r\nset \"line=\"\r\nset /p \"line=\"\r\nif errorlevel 1 goto read\r\necho INPUT-ACCEPTED\r\ngoto read\r\n",
+    )
+    .expect("write slow Windows peer agent fixture");
+    command
+}
+
 #[cfg(unix)]
 fn write_agent_fixture(directory: &Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -301,6 +670,42 @@ fn write_agent_fixture(directory: &Path) -> std::path::PathBuf {
         "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'codex 1.2.3'\n  exit 0\nfi\npwd\n",
     )
     .expect("write Unix agent fixture");
+    let mut permissions = std::fs::metadata(&command)
+        .expect("fixture metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&command, permissions).expect("make fixture executable");
+    command
+}
+
+#[cfg(unix)]
+fn write_long_running_agent_fixture(directory: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let command = directory.join("workspace-api-peer-agent");
+    std::fs::write(
+        &command,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'codex 1.2.3'\n  exit 0\nfi\necho 'PEER-READY'\nwhile IFS= read -r line; do\n  echo 'INPUT-ACCEPTED'\ndone\n",
+    )
+    .expect("write Unix peer agent fixture");
+    let mut permissions = std::fs::metadata(&command)
+        .expect("fixture metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&command, permissions).expect("make fixture executable");
+    command
+}
+
+#[cfg(unix)]
+fn write_slow_start_agent_fixture(directory: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let command = directory.join("workspace-api-slow-peer-agent");
+    std::fs::write(
+        &command,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  sleep 1\n  echo 'codex 1.2.3'\n  exit 0\nfi\necho 'PEER-READY'\nwhile IFS= read -r line; do\n  echo 'INPUT-ACCEPTED'\ndone\n",
+    )
+    .expect("write slow Unix peer agent fixture");
     let mut permissions = std::fs::metadata(&command)
         .expect("fixture metadata")
         .permissions();
