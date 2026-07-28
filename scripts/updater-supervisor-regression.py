@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -14,7 +15,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -105,20 +105,11 @@ def build_fixture(
     return executable.resolve()
 
 
-def package_version(server_directory: Path) -> tuple[int, int, int]:
-    with (server_directory / "Cargo.toml").open("rb") as stream:
-        value = tomllib.load(stream)["package"]["version"]
-    components = value.split(".")
-    if len(components) != 3 or not all(component.isdigit() for component in components):
-        raise RegressionFailure(f"fixture requires a stable numeric package version, got {value}")
-    return tuple(int(component) for component in components)  # type: ignore[return-value]
-
-
-def validate_root_server(executable: Path, expected_version: str) -> None:
+def executable_version(executable: Path, label: str) -> tuple[int, int, int]:
     if not executable.is_file():
-        raise RegressionFailure(f"root server executable does not exist: {executable}")
+        raise RegressionFailure(f"{label} executable does not exist: {executable}")
     if os.name != "nt" and not os.access(executable, os.X_OK):
-        raise RegressionFailure(f"root server is not executable: {executable}")
+        raise RegressionFailure(f"{label} executable is not executable: {executable}")
     try:
         completed = subprocess.run(
             [str(executable), "--version"],
@@ -128,12 +119,27 @@ def validate_root_server(executable: Path, expected_version: str) -> None:
             timeout=10,
         )
     except subprocess.TimeoutExpired as error:
-        raise RegressionFailure("root server --version timed out") from error
-    reported = completed.stdout.strip()
-    expected = f"codex-web {expected_version}"
-    if reported != expected:
+        raise RegressionFailure(f"{label} --version timed out") from error
+    except subprocess.CalledProcessError as error:
         raise RegressionFailure(
-            f"root server version mismatch: expected {expected!r}, got {reported!r}"
+            f"{label} --version exited with status {error.returncode}"
+        ) from error
+
+    reported = completed.stdout.strip()
+    match = re.fullmatch(r"codex-web ([0-9]+)\.([0-9]+)\.([0-9]+)", reported)
+    if match is None:
+        raise RegressionFailure(
+            f"{label} requires a stable numeric codex-web version, got {reported!r}"
+        )
+    return tuple(int(component) for component in match.groups())  # type: ignore[return-value]
+
+
+def validate_root_server(executable: Path, expected_version: str) -> None:
+    reported_version = version_text(executable_version(executable, "root server"))
+    if reported_version != expected_version:
+        raise RegressionFailure(
+            "root server version mismatch: "
+            f"expected {expected_version!r}, got {reported_version!r}"
         )
 
 
@@ -431,12 +437,13 @@ def run_regression(args: argparse.Namespace) -> dict[str, Any]:
     if not fixture.is_file():
         raise RegressionFailure(f"fixture executable does not exist: {fixture}")
 
-    root_version = version_text(package_version(server_directory))
+    fixture_version = executable_version(fixture, "fixture")
+    root_version = version_text(fixture_version)
     packaged_root = args.root_server is not None
     root_server = args.root_server.resolve() if packaged_root else fixture
     if packaged_root:
         validate_root_server(root_server, root_version)
-    first_tuple, second_tuple, failed_tuple = next_versions(package_version(server_directory))
+    first_tuple, second_tuple, failed_tuple = next_versions(fixture_version)
     first_version = version_text(first_tuple)
     second_version = version_text(second_tuple)
     failed_version = version_text(failed_tuple)
