@@ -22,7 +22,7 @@ use crate::{
     routes::AppState,
 };
 
-const MAX_PEER_COMMAND_BODY: usize = 16 * 1024;
+const MAX_PEER_COMMAND_BODY: usize = 256 * 1024;
 const MAX_PEER_DISPATCH_BODY: usize = 256 * 1024;
 const MAX_INTERNAL_PEER_BODY: usize = MAX_PEER_ARTIFACT_BYTES * 6 + 4 * 1024;
 const CAPABILITY_SCHEME: &str = "CWT-Capability ";
@@ -31,6 +31,7 @@ const CAPABILITY_SCHEME: &str = "CWT-Capability ";
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateThreadRequest {
     source_terminal_id: Uuid,
+    directory_id: Option<String>,
     target_agent: AgentKind,
     action: PeerAction,
     instruction: String,
@@ -131,17 +132,24 @@ async fn create_thread(State(state): State<AppState>, body: Bytes) -> Response {
             "The source terminal has no active session generation.",
         );
     };
-    let project = match state
-        .directories
-        .resolve_id(&source_snapshot.directory_id)
-        .await
-    {
+    let reviewer_directory_id = request
+        .directory_id
+        .as_deref()
+        .unwrap_or(&source_snapshot.directory_id);
+    let project = match state.directories.resolve_id(reviewer_directory_id).await {
         Ok(project) => project,
         Err(_) => {
-            return api_error(
-                StatusCode::CONFLICT,
-                "The source terminal working directory is no longer available.",
-            );
+            return if request.directory_id.is_some() {
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    "The selected reviewer working directory is not available.",
+                )
+            } else {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "The source terminal working directory is no longer available.",
+                )
+            };
         }
     };
 

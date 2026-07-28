@@ -603,13 +603,15 @@ highlighted and each tab includes a lifecycle-status dot.
 
 **@cwt** opens a supervised cross-agent composer without changing xterm input
 handling. A new peer thread always starts a fresh dedicated reviewer in the
-source terminal's current, revalidated server directory. It does not reuse a
+selected, revalidated server directory. The picker defaults to the source
+terminal's current directory and can switch to another server folder through
+Favorites, Recent, Browse, or an absolute path. It does not reuse or modify a
 normal tab, even when a matching agent appears idle.
 
 The operational sequence is:
 
-1. choose the reviewer agent and action, then use **Source ready — Prepare
-   handoff** while the source is at an empty agent prompt;
+1. choose the reviewer agent, working folder, and action, then use **Source
+   ready — Prepare handoff** while the source is at an empty agent prompt;
 2. wait for the source agent to submit a bounded handoff;
 3. inspect or edit **Preview handoff**;
 4. use **Reviewer ready — Send** while the reviewer is at an empty agent
@@ -619,11 +621,14 @@ The operational sequence is:
 7. use a follow-up or **Recheck** to retain that same reviewer context.
 
 Concrete example: from a Codex source tab, choose **Verify** with Claude and
-enter `Review the current implementation for correctness, security regressions,
-and missing Windows/Linux tests.` Inspect the generated handoff before
-dispatch. Return Claude's response to the same Codex source, then use
-**Recheck** for another pass that should retain Claude's reviewer context.
-Use **+ New peer** only when a clean reviewer conversation is intentional.
+use **Change folder** when Claude should inspect a different project. Enter
+`Review the current implementation for correctness, security regressions, and
+missing Windows/Linux tests.` Inspect the generated handoff before dispatch.
+The dedicated reviewer starts in the selected directory without changing any
+ordinary tab. Return Claude's response to the same Codex source, then use
+**Recheck** for another pass that retains Claude's reviewer context and
+working directory. Use **+ New peer** only when a clean reviewer conversation
+is intentional.
 It is disabled when session capacity is full, while follow-ups on an existing
 reviewer remain available. One reviewer thread retains at most 32 turns; close
 it and start a clean peer after reaching that boundary. The broker permits at

@@ -54,12 +54,13 @@ describe("peer API", () => {
     ).toThrow("invalid peer agent");
   });
 
-  it("creates a new dedicated thread using an agent kind, not a terminal target", async () => {
+  it("creates a new dedicated thread with an explicit reviewer folder", async () => {
     const fetchMock = vi.fn().mockImplementation(async () => jsonResponse(THREAD));
     vi.stubGlobal("fetch", fetchMock);
 
     await createPeerThread("0123456789abcdef", {
       sourceTerminalId: THREAD.sourceTerminalId,
+      directoryId: "selected-directory",
       targetAgent: "claude",
       action: "review",
       instruction: "Review the architecture.",
@@ -72,6 +73,7 @@ describe("peer API", () => {
         method: "POST",
         body: JSON.stringify({
           sourceTerminalId: THREAD.sourceTerminalId,
+          directoryId: "selected-directory",
           targetAgent: "claude",
           action: "review",
           instruction: "Review the architecture.",

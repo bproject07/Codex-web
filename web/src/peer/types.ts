@@ -41,6 +41,7 @@ export interface PeerThread {
 
 export interface CreatePeerThreadInput {
   sourceTerminalId: string;
+  directoryId: string;
   targetAgent: AgentKind;
   action: Exclude<PeerAction, "recheck">;
   instruction: string;

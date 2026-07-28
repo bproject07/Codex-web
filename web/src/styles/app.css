@@ -930,6 +930,49 @@ button:disabled {
   padding: 0;
 }
 
+.peer-reviewer-folder {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  border: 1px solid #3d444f;
+  border-radius: 0.5rem;
+  padding: 0.7rem;
+  background: #171b21;
+}
+
+.peer-reviewer-folder > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.2rem;
+}
+
+.peer-reviewer-folder span {
+  color: #dce3ec;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.peer-reviewer-folder code {
+  min-width: 0;
+  overflow: hidden;
+  color: #b9c5d3;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peer-reviewer-folder small {
+  color: #8995a4;
+  font-size: 0.68rem;
+  line-height: 1.35;
+}
+
+.peer-reviewer-folder button {
+  min-height: 2.6rem;
+  white-space: nowrap;
+}
+
 .peer-targets {
   display: flex;
   flex-wrap: wrap;
@@ -2388,6 +2431,14 @@ button:disabled {
 
   .peer-actions__grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .peer-reviewer-folder {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .peer-reviewer-folder button {
+    width: 100%;
   }
 
   .peer-composer__actions {

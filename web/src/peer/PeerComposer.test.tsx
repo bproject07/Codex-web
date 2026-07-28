@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentCatalog, SessionSnapshot } from "../api";
+import type { WorkspaceBrowserAdapter } from "../workspaces/types";
 import { PeerComposer } from "./PeerComposer";
 import type { PeerThread } from "./types";
 
@@ -66,7 +67,38 @@ const THREAD: PeerThread = {
   updatedAt: 2_000,
 };
 
+const WORKSPACE_ADAPTER = {
+  loadLibrary: vi.fn(async () => ({ favorites: [], recent: [] })),
+  listRoots: vi.fn(async () => ({
+    current: null,
+    parentId: null,
+    breadcrumbs: [],
+    directories: [],
+    truncated: false,
+  })),
+  listDirectory: vi.fn(async () => ({
+    current: null,
+    parentId: null,
+    breadcrumbs: [],
+    directories: [],
+    truncated: false,
+  })),
+  resolvePath: vi.fn(async () => ({
+    current: null,
+    parentId: null,
+    breadcrumbs: [],
+    directories: [],
+    truncated: false,
+  })),
+  addFavorite: vi.fn(async (directory) => ({
+    id: "favorite",
+    directory,
+  })),
+  removeFavorite: vi.fn(async () => undefined),
+} satisfies WorkspaceBrowserAdapter;
+
 const CALLBACKS = {
+  workspaceAdapter: WORKSPACE_ADAPTER,
   onCreateThread: vi.fn(async () => THREAD),
   onCreateTurn: vi.fn(async () => THREAD),
   onDispatchTurn: vi.fn(async () => THREAD),
@@ -100,6 +132,10 @@ describe("PeerComposer", () => {
 
     expect(html).toContain("@cwt");
     expect(html).toContain("Dedicated reviewer");
+    expect(html).toContain("Reviewer folder");
+    expect(html).toContain("C:\\Projects\\demo");
+    expect(html).toContain("Change folder");
+    expect(html).toContain("Defaults to the source tab folder");
     expect(html).toContain("Claude");
     expect(html).toContain("Review");
     expect(html).toContain("Verify");
@@ -165,6 +201,7 @@ describe("PeerComposer", () => {
     expect(html).toContain("R-123456");
     expect(html).toContain("Source ready — Prepare follow-up");
     expect(html).not.toContain("<legend>Dedicated reviewer</legend>");
+    expect(html).not.toContain("Change folder");
   });
 
   it("blocks only fresh reviewers when terminal capacity is full", () => {

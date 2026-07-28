@@ -735,6 +735,7 @@ def submit_review(sequence: int, turn_id: str) -> None:
             f"reviewer-terminal: {TERMINAL_ID}",
             f"reviewer-session: {SESSION_ID}",
             f"reviewer-process: {os.getpid()}",
+            f"reviewer-workspace: {os.getcwd()}",
             f"approved-preview: {str(approved).lower()}",
             "handoff-sha256: "
             + hashlib.sha256(handoff.encode("utf-8")).hexdigest(),
@@ -1022,6 +1023,10 @@ def run_turn(
     assert artifact_field(response, "sequence") == str(sequence), response
     assert artifact_field(response, "reviewer-terminal") == reviewer["terminalId"]
     assert artifact_field(response, "reviewer-session") == reviewer["sessionId"]
+    assert paths_equal(
+        artifact_field(response, "reviewer-workspace"),
+        reviewer["project"],
+    ), response
     assert artifact_field(response, "approved-preview") == "true", response
     assert artifact_field(response, "handoff-sha256") == sha256_text(
         revised_handoff
@@ -1072,6 +1077,7 @@ def exercise_peer_flow(
     process: subprocess.Popen[bytes],
     events: Path,
     project: Path,
+    reviewer_project: Path,
     attachments: list[WebSocketAttachment],
     owned_processes: list[OwnedProcess],
     *,
@@ -1153,6 +1159,17 @@ def exercise_peer_flow(
         "ordinary synthetic agent",
     )
 
+    reviewer_listing = request_json(
+        port,
+        token,
+        "/api/filesystem/resolve",
+        method="POST",
+        payload={"path": str(reviewer_project)},
+    )
+    reviewer_directory = reviewer_listing["current"]
+    assert isinstance(reviewer_directory, dict), reviewer_listing
+    assert paths_equal(reviewer_directory["path"], reviewer_project)
+
     created = request_json(
         port,
         token,
@@ -1160,6 +1177,7 @@ def exercise_peer_flow(
         method="POST",
         payload={
             "sourceTerminalId": source["terminalId"],
+            "directoryId": reviewer_directory["id"],
             "targetAgent": "claude",
             "action": "review",
             "instruction": "Review the synthetic implementation without assuming Git.",
@@ -1184,7 +1202,8 @@ def exercise_peer_flow(
         "threadId": thread_id,
         "parentTerminalId": source["terminalId"],
     }, reviewer
-    assert paths_equal(reviewer["project"], project), reviewer
+    assert paths_equal(reviewer["project"], reviewer_project), reviewer
+    assert reviewer["directoryId"] == reviewer_directory["id"], reviewer
     reviewer_session_id = reviewer["sessionId"]
     reviewer_pid = reviewer["pid"]
     reviewer_root_process = track_owned_process(
@@ -1349,6 +1368,7 @@ def exercise_peer_flow(
     return {
         "threadPurged": True,
         "freshReviewer": reviewer_terminal_id != ordinary["terminalId"],
+        "selectedReviewerDirectory": True,
         "restartControlsBlocked": True,
         "sourceStayedRunning": True,
         "firstTurn": {
@@ -1495,9 +1515,11 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="codex-web-peer-review-") as temp:
         temporary_root = Path(temp)
         project = temporary_root / "synthetic project"
+        reviewer_project = temporary_root / "reviewer project"
         state_dir = temporary_root / "state"
         events = temporary_root / "events"
         project.mkdir()
+        reviewer_project.mkdir()
         events.mkdir()
         fixture = write_fixture_command(temporary_root)
         stdout_log = temporary_root / "server.stdout.log"
@@ -1556,6 +1578,7 @@ def main() -> int:
                     server,
                     events,
                     project,
+                    reviewer_project,
                     attachments,
                     owned_processes,
                     stdout_log=stdout_log,

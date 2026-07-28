@@ -310,6 +310,11 @@ async fn successful_session_creation_records_the_selected_directory_and_agent() 
 #[tokio::test]
 async fn peer_api_creates_only_a_fresh_linked_reviewer_and_closes_it_cleanly() {
     let fixture = tempfile::tempdir().expect("temporary project");
+    let reviewer_project = fixture.path().join("reviewer-project");
+    std::fs::create_dir(&reviewer_project).expect("create reviewer project");
+    let reviewer_project =
+        dunce::canonicalize(reviewer_project).expect("canonical reviewer project");
+    let reviewer_directory_id = encode_directory_id(&reviewer_project);
     let command = write_long_running_agent_fixture(fixture.path());
     let (app, sessions, _) =
         test_router_with_command(fixture.path(), Some(command.to_string_lossy().into_owned()))
@@ -357,6 +362,49 @@ async fn peer_api_creates_only_a_fresh_linked_reviewer_and_closes_it_cleanly() {
     assert_eq!(readiness_not_acknowledged.status(), StatusCode::BAD_REQUEST);
     assert_eq!(sessions.session_count(), 1);
 
+    let invalid_reviewer_directory = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/peer/threads",
+            Some(json!({
+                "sourceTerminalId": source.terminal_id,
+                "directoryId": "forged",
+                "targetAgent": "codex",
+                "action": "review",
+                "instruction": "Reject the invalid reviewer directory.",
+                "sourceReady": true
+            })),
+            true,
+        ))
+        .await
+        .expect("invalid reviewer directory response");
+    assert_eq!(invalid_reviewer_directory.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(sessions.session_count(), 1);
+
+    let oversized_reviewer_directory = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/peer/threads",
+            Some(json!({
+                "sourceTerminalId": source.terminal_id,
+                "directoryId": "x".repeat(300 * 1024),
+                "targetAgent": "codex",
+                "action": "review",
+                "instruction": "Reject the oversized peer request.",
+                "sourceReady": true
+            })),
+            true,
+        ))
+        .await
+        .expect("oversized peer request response");
+    assert_eq!(
+        oversized_reviewer_directory.status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(sessions.session_count(), 1);
+
     let created = json_response(
         app.clone()
             .oneshot(request(
@@ -364,6 +412,7 @@ async fn peer_api_creates_only_a_fresh_linked_reviewer_and_closes_it_cleanly() {
                 "/api/peer/threads",
                 Some(json!({
                     "sourceTerminalId": source.terminal_id,
+                    "directoryId": reviewer_directory_id,
                     "targetAgent": "codex",
                     "action": "review",
                     "instruction": "Review without assuming Git.",
@@ -403,6 +452,11 @@ async fn peer_api_creates_only_a_fresh_linked_reviewer_and_closes_it_cleanly() {
         source.terminal_id.to_string()
     );
     assert_eq!(reviewer["purpose"]["threadId"], thread_id);
+    assert_eq!(reviewer["directoryId"], reviewer_directory_id);
+    assert_eq!(
+        reviewer["project"],
+        reviewer_project.to_string_lossy().as_ref()
+    );
 
     let premature_follow_up = app
         .clone()

@@ -1632,6 +1632,7 @@ export function App() {
       {peerComposerOpen && peerSourceSession && (
         <PeerComposer
           sourceSession={peerSourceSession}
+          workspaceAdapter={workspaceAdapter}
           initialThreadId={selectedPeerThreadId}
           allowNew={session?.purpose.kind !== "peer"}
           newThreadDisabledReason={newPeerThreadDisabledReason}

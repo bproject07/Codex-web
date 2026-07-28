@@ -402,10 +402,13 @@ does not intercept text typed into xterm, so raw terminal input and Android
 IME handling remain unchanged.
 
 1. Select **Review**, **Verify**, **Ask**, or **Handoff**, choose an installed
-   agent kind, describe the scope, and use **Source ready — Prepare handoff**
-   only while the source is at an empty agent prompt.
-2. The server creates a fresh dedicated reviewer PTY in the source session's
-   revalidated working directory. It never selects an existing ordinary tab.
+   agent kind and reviewer folder, describe the scope, and use **Source ready
+   — Prepare handoff** only while the source is at an empty agent prompt. The
+   reviewer folder defaults to the source tab's folder; **Change folder**
+   reuses the normal Favorites, Recent, Browse, and absolute-path picker.
+2. The server revalidates that selected directory and creates a fresh
+   dedicated reviewer PTY there. It never selects or modifies an existing
+   ordinary tab.
    Catalog **Ready** proves executable discovery and a bounded version probe
    only; complete any first-run sign-in or folder-trust prompt in the linked
    reviewer tab yourself.
@@ -425,13 +428,16 @@ reviewer thread; after that, close it and start a clean peer conversation.
 Active in-memory peer threads are bounded by the server's supported maximum of
 256, while the configured session capacity is normally the tighter limit.
 
-For example, open **@cwt** from a Codex source tab, choose **Verify** and
-Claude, then enter: `Review the current implementation for correctness,
-security regressions, and missing Windows/Linux tests.` The source prepares
-the handoff; you inspect it before sending. After Claude submits its bounded
-response, **Source ready — Return** brings the result back to that exact Codex
-conversation. A later **Recheck** keeps Claude's reviewer context; **+ New
-peer** deliberately starts without it.
+For example, open **@cwt** from a Codex source tab in project A, choose
+**Verify** and Claude, optionally use **Change folder** to select project B,
+then enter: `Review the current implementation for correctness, security
+regressions, and missing Windows/Linux tests.` The source prepares the
+handoff; you inspect it before sending. Claude's fresh reviewer runs in the
+selected project B directory without modifying an ordinary project B tab.
+After Claude submits its bounded response, **Source ready — Return** brings
+the result back to that exact Codex conversation. A later **Recheck** keeps
+Claude's reviewer context and working directory; **+ New peer** deliberately
+starts without that conversation.
 
 Peer and ordinary non-primary tabs have an accessible `×`. Closing a peer tab
 terminates only its dedicated PTY and purges its in-memory thread. A reviewer
@@ -845,6 +851,9 @@ Peer requests that enqueue an automation prompt require an explicit readiness
 acknowledgement: create/follow-up/return bodies include `sourceReady: true`,
 and dispatch includes `reviewerReady: true`. Callers must set it only after
 the named terminal is visibly at an empty agent prompt.
+New-thread creation also accepts `directoryId`; it selects the dedicated
+reviewer's validated server-side working directory. Omitting it remains
+compatible and uses the source terminal's current directory.
 
 No response contains the authentication token, terminal input, terminal
 output, Codex credentials, or Codex authentication files.
@@ -921,7 +930,9 @@ or NUL; an empty label becomes `null`. A new-session body can be
 `agent` remain compatible and use the configured default directory. Unknown
 fields, including browser-supplied commands or arguments, are rejected.
 JSON bodies for session creation, directory list/resolve, and Favorite upsert
-are capped at 256 KiB; larger requests return HTTP 413.
+are capped at 256 KiB; larger requests return HTTP 413. New `@cwt` peer
+requests use the same cap so a valid opaque Windows directory ID still fits;
+their instruction remains independently limited to 4 KiB.
 
 `/api/agent-catalog` uses schema version 1 and reports each known agent as
 `ready`, `missing`, or `misconfigured`. The `configuration` field is `auto` or

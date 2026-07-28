@@ -239,9 +239,11 @@ preflight, PTY startup, or process termination requires:
   existing peer-thread follow-ups usable. One thread is bounded to 32 turns,
   and active broker threads are bounded by the supported maximum capacity of
   256. Keep both boundaries documented and covered by tests.
-- The source working directory is decoded, canonicalized, and checked again
-  before the reviewer starts. Git, TFS, or any repository is optional context,
-  never a workflow requirement.
+- A new peer request may select the dedicated reviewer's working directory and
+  otherwise defaults to the source directory. The selected opaque directory
+  ID is decoded, canonicalized, and checked again immediately before the
+  reviewer starts. Git, TFS, or any repository is optional context, never a
+  workflow requirement.
 - Raw PTY output, ANSI text, cursor position, silence, and CPU state are not
   agent-completion signals. Peer artifacts move only through the bounded
   private helper protocol.
@@ -258,10 +260,12 @@ preflight, PTY startup, or process termination requires:
 - A capability authorizes only the active source or reviewer role for its
   linked current turn. Compare it in constant time and never put it in argv,
   URLs, API responses, logs, diagnostics, or screenshots.
-- Instructions are bounded to 4 KiB. Handoffs and responses are non-empty
-  UTF-8, bounded to 64 KiB, in memory only, and never logged. Normalize their
-  line endings and reject terminal control characters other than line-feed
-  and tab at both broker input and helper output boundaries.
+- New-thread request bodies are bounded to 256 KiB so maximum native Windows
+  directory IDs fit; instructions remain independently bounded to 4 KiB.
+  Handoffs and responses are non-empty UTF-8, bounded to 64 KiB, in memory
+  only, and never logged. Normalize their line endings and reject terminal
+  control characters other than line-feed and tab at both broker input and
+  helper output boundaries.
 - Preview, dispatch, and return remain explicit user actions. Automation
   requests require `sourceReady: true` or `reviewerReady: true`, are bound to
   the exact `sessionId`, and must be initiated only at an empty agent prompt.

@@ -17,6 +17,11 @@ import {
   peerStatusLabel,
   peerThreadDisplayId,
 } from "./actions";
+import { WorkspacePicker } from "../workspaces/WorkspacePicker";
+import type {
+  WorkspaceBrowserAdapter,
+  WorkspaceDirectory,
+} from "../workspaces/types";
 import {
   confirmHandoffDiscard,
   emptyHandoffDraft,
@@ -39,6 +44,7 @@ const MAX_HANDOFF_BYTES = 64 * 1_024;
 
 interface PeerComposerProps {
   sourceSession: SessionSnapshot;
+  workspaceAdapter: WorkspaceBrowserAdapter;
   initialThreadId?: string | null;
   allowNew: boolean;
   newThreadDisabledReason?: string | null;
@@ -70,6 +76,7 @@ interface PeerComposerProps {
 
 export function PeerComposer({
   sourceSession,
+  workspaceAdapter,
   initialThreadId = null,
   allowNew,
   newThreadDisabledReason = null,
@@ -108,6 +115,9 @@ export function PeerComposer({
     initialThreadId ? "recheck" : "review",
   );
   const [targetAgent, setTargetAgent] = useState<AgentKind>("claude");
+  const [reviewerDirectory, setReviewerDirectory] =
+    useState<WorkspaceDirectory>(() => directoryForSession(sourceSession));
+  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [instruction, setInstruction] = useState("");
   const [handoffDraftState, setHandoffDraftState] = useState(() =>
     handoffDraftForTurn(initialThread?.currentTurn),
@@ -145,10 +155,18 @@ export function PeerComposer({
     );
     setSelectedThreadId(initialThreadId);
     setAction(initialThreadId ? "recheck" : "review");
+    setReviewerDirectory(directoryForSession(sourceSession));
+    setWorkspacePickerOpen(false);
     setInstruction("");
     setHandoffDraftState(emptyHandoffDraft());
     setFormError(null);
-  }, [initialThreadId, selectionScope]);
+  }, [
+    initialThreadId,
+    selectionScope,
+    sourceSession.directoryId,
+    sourceSession.name,
+    sourceSession.project,
+  ]);
 
   useEffect(() => {
     if (
@@ -267,6 +285,7 @@ export function PeerComposer({
     setInitializedSelectionScope(selectionScope);
     setSelectedThreadId(null);
     setAction("review");
+    setReviewerDirectory(directoryForSession(sourceSession));
     setInstruction("");
     setFormError(null);
     onClearError();
@@ -303,6 +322,7 @@ export function PeerComposer({
             })
           : await onCreateThread({
               sourceTerminalId: sourceSession.terminalId,
+              directoryId: reviewerDirectory.id,
               targetAgent,
               action: action as Exclude<PeerAction, "recheck">,
               instruction: nextInstruction,
@@ -391,6 +411,31 @@ export function PeerComposer({
       first.focus({ preventScroll: true });
     }
   };
+
+  if (workspacePickerOpen) {
+    return (
+      <div
+        className="dialog-backdrop"
+        role="presentation"
+        onMouseDown={() => setWorkspacePickerOpen(false)}
+      >
+        <WorkspacePicker
+          adapter={workspaceAdapter}
+          initialDirectoryId={reviewerDirectory.id}
+          title="Choose reviewer folder"
+          description="Start the dedicated reviewer in this server folder."
+          chooseLabel="Use for reviewer"
+          disabled={pending}
+          onChoose={(directory, transition) => {
+            transition.suppressFocusReturn();
+            setReviewerDirectory(directory);
+            setWorkspacePickerOpen(false);
+          }}
+          onCancel={() => setWorkspacePickerOpen(false)}
+        />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -690,6 +735,27 @@ export function PeerComposer({
                   </p>
                 )}
                 {!selectedThread && (
+                  <div className="peer-reviewer-folder">
+                    <div>
+                      <span>Reviewer folder</span>
+                      <code title={reviewerDirectory.path}>
+                        {reviewerDirectory.path}
+                      </code>
+                      <small>
+                        Defaults to the source tab folder. Choose another
+                        project when the review belongs elsewhere.
+                      </small>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={pending || freshThreadBlocked}
+                      onClick={() => setWorkspacePickerOpen(true)}
+                    >
+                      Change folder
+                    </button>
+                  </div>
+                )}
+                {!selectedThread && (
                   <fieldset
                     className="peer-targets"
                     disabled={pending || catalogLoading || freshThreadBlocked}
@@ -801,4 +867,14 @@ export function PeerComposer({
 
 function utf8Length(value: string): number {
   return new TextEncoder().encode(value).byteLength;
+}
+
+function directoryForSession(
+  session: SessionSnapshot,
+): WorkspaceDirectory {
+  return {
+    id: session.directoryId,
+    name: session.name,
+    path: session.project,
+  };
 }

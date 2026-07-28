@@ -932,11 +932,13 @@ For a disposable manual peer smoke:
 
 1. start a package on an unused port and with an isolated `--state-dir`;
 2. open **@cwt** from a running source tab;
-3. choose a different ready agent and use **Source ready — Prepare handoff**
-   at an empty source prompt;
+3. choose a different ready agent and a disposable reviewer directory that is
+   not the source directory, then use **Source ready — Prepare handoff** at an
+   empty source prompt;
 4. verify the preview, then use **Reviewer ready — Send** at an empty reviewer
    prompt;
-5. verify a new linked reviewer tab was created in the source directory;
+5. verify a new linked reviewer tab was created in the selected reviewer
+   directory and the source directory did not change;
 6. use **Source ready — Return**, then issue **Recheck** and confirm the same
    reviewer `terminalId` and `sessionId` remain;
 7. close the reviewer and confirm the source is still running;

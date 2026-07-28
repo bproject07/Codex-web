@@ -45,6 +45,8 @@ export interface WorkspacePickerProps {
   initialDirectoryId?: string | null;
   initialLibrary?: WorkspaceLibrary;
   initialListing?: WorkspaceDirectoryListing | null;
+  title?: string;
+  description?: string;
   chooseLabel?: string;
   disabled?: boolean;
 }
@@ -67,6 +69,8 @@ export function WorkspacePicker({
   initialDirectoryId = null,
   initialLibrary,
   initialListing = null,
+  title = "Choose a project folder",
+  description = "Browse folders on the server where the terminal will run.",
   chooseLabel = "Use folder",
   disabled = false,
 }: WorkspacePickerProps) {
@@ -468,10 +472,8 @@ export function WorkspacePicker({
     >
       <header className="workspace-picker__header">
         <div>
-          <h2 id={titleId}>Choose a project folder</h2>
-          <p id={descriptionId}>
-            Browse folders on the server where the terminal will run.
-          </p>
+          <h2 id={titleId}>{title}</h2>
+          <p id={descriptionId}>{description}</p>
         </div>
         {onCancel && (
           <button
