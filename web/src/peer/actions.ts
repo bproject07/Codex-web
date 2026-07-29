@@ -58,7 +58,7 @@ export function peerThreadDisplayId(threadId: string): string {
 export function peerStatusLabel(status: PeerStatus): string {
   switch (status) {
     case "preparing_handoff":
-      return "Preparing handoff";
+      return "Preparing summary";
     case "awaiting_preview":
       return "Preview ready";
     case "reviewing":

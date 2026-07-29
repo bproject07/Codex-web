@@ -502,7 +502,8 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         scrollback: settings.scrollback,
         scrollOnUserInput: false,
         smoothScrollDuration: 0,
-        fontFamily: '"Cascadia Mono", "Cascadia Code", Consolas, monospace',
+        fontFamily:
+          '"Cascadia Mono", "Cascadia Code", Consolas, "Roboto Mono", "Noto Sans Mono", "Droid Sans Mono", monospace',
         fontSize: settings.fontSize,
         theme: TERMINAL_THEMES[settings.theme],
         allowProposedApi: false,

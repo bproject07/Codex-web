@@ -15,8 +15,82 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-24.04
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Classify documentation-only changes
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$BASE_SHA"
+          else
+            base="$BEFORE_SHA"
+          fi
+
+          if [[ -z "$base" || "$base" =~ ^0+$ ]] ||
+             ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mapfile -d '' changed_files < <(
+            git diff --name-only -z "$base" "$HEAD_SHA"
+          )
+          if [[ "${#changed_files[@]}" -eq 0 ]]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          docs_only=true
+          for path in "${changed_files[@]}"; do
+            lowercase_path="${path,,}"
+            case "$lowercase_path" in
+              *.md | docs/*)
+                ;;
+              *)
+                docs_only=false
+                break
+                ;;
+            esac
+          done
+
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
+  documentation:
+    name: Documentation only
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Confirm documentation-only change
+        run: echo "Only Markdown or docs/ files changed; build jobs are skipped."
+
   validate:
     name: ${{ matrix.name }}
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -208,6 +282,8 @@ jobs:
 
   minimum-rust:
     name: Minimum Rust 1.88
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 

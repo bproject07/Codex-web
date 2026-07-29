@@ -34,6 +34,7 @@ import {
 } from "./api";
 import { agentLabel } from "./agents";
 import { AgentPicker } from "./AgentPicker";
+import { useHorizontalScrollFade } from "./scrollFade";
 import {
   TerminalView,
   type TerminalViewHandle,
@@ -137,7 +138,12 @@ export function App() {
     useState(false);
   const [viewportDiagnosticsCopyNotice, setViewportDiagnosticsCopyNotice] =
     useState<string | null>(null);
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(
+    null,
+  );
+  const [announcement, setAnnouncement] = useState({ nonce: 0, text: "" });
   const terminalRef = useRef<TerminalViewHandle>(null);
+  const headerActionsRef = useHorizontalScrollFade<HTMLDivElement>();
   const selectedTerminalIdRef = useRef(selectedTerminalId);
   const sessionsRequestEpochRef = useRef(0);
   const capacityRequestEpochRef = useRef(0);
@@ -210,6 +216,60 @@ export function App() {
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  const requestConfirmation = useCallback(
+    (options: Omit<ConfirmRequest, "resolve">) =>
+      new Promise<boolean>((resolve) => {
+        setConfirmRequest({ ...options, resolve });
+      }),
+    [],
+  );
+
+  const settleConfirmation = useCallback(
+    (confirmed: boolean) => {
+      setConfirmRequest((current) => {
+        current?.resolve(confirmed);
+        return null;
+      });
+    },
+    [],
+  );
+
+  // One persistent polite live region announces meaningful async changes
+  // (connection transitions, ready reviewer responses) to assistive tech.
+  // The nonce keeps repeated identical messages observable: the rendered node
+  // is keyed by it, so every announcement produces a DOM mutation.
+  const announce = useCallback((text: string) => {
+    setAnnouncement((previous) => ({ nonce: previous.nonce + 1, text }));
+  }, []);
+
+  const previousStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const label = STATUS_LABELS[effectiveStatus];
+    if (previousStatusRef.current === null) {
+      previousStatusRef.current = label;
+      return;
+    }
+    if (previousStatusRef.current !== label) {
+      previousStatusRef.current = label;
+      announce(`Connection: ${label}`);
+    }
+  }, [announce, effectiveStatus]);
+
+  const readyResponseCount = peerController.threads.filter(
+    (thread) => thread.status === "response_ready",
+  ).length;
+  const previousReadyRef = useRef(0);
+  useEffect(() => {
+    if (readyResponseCount > previousReadyRef.current) {
+      announce(
+        readyResponseCount === 1
+          ? "A reviewer response is ready."
+          : `${readyResponseCount} reviewer responses are ready.`,
+      );
+    }
+    previousReadyRef.current = readyResponseCount;
+  }, [announce, readyResponseCount]);
 
   const beginUpdateReconnect = useCallback(
     async (expectedVersion: string) => {
@@ -1029,9 +1089,12 @@ export function App() {
       return;
     }
     if (
-      !window.confirm(
-        `Restart ${selectedAgentLabel}? The current process will be terminated.`,
-      )
+      !(await requestConfirmation({
+        title: `Restart ${selectedAgentLabel}?`,
+        body: "The current process will be terminated and started again.",
+        confirmLabel: "Restart",
+        danger: true,
+      }))
     ) {
       return;
     }
@@ -1056,7 +1119,14 @@ export function App() {
       setMessage("No terminal session is selected.");
       return;
     }
-    if (!window.confirm(`Terminate the active ${selectedAgentLabel} process?`)) {
+    if (
+      !(await requestConfirmation({
+        title: `Terminate ${selectedAgentLabel}?`,
+        body: "The active process will be stopped. Its tab stays available.",
+        confirmLabel: "Terminate",
+        danger: true,
+      }))
+    ) {
       return;
     }
     setBusy(true);
@@ -1120,6 +1190,17 @@ export function App() {
     suppressTerminalFocusOnceRef.current = true;
     setWorkspacePickerOpen(false);
     setLaunchDirectory(null);
+  };
+
+  const openWorkspaceLauncher = () => {
+    setPeerComposerOpen(false);
+    setSessionsOpen(false);
+    setSettingsOpen(false);
+    setAgentPickerOpen(false);
+    setLaunchDirectory(null);
+    setWorkspacePickerOpen(true);
+    setAgentCatalogError(null);
+    void refreshAgentCatalog(true);
   };
 
   const chooseLaunchDirectory = (
@@ -1222,9 +1303,12 @@ export function App() {
       return;
     }
     if (
-      !window.confirm(
-        `Remove "${target.name}"? Its ${agentLabel(target.agent)} process will be terminated.`,
-      )
+      !(await requestConfirmation({
+        title: `Remove "${target.name}"?`,
+        body: `Its ${agentLabel(target.agent)} process will be terminated.`,
+        confirmLabel: "Remove",
+        danger: true,
+      }))
     ) {
       return;
     }
@@ -1272,9 +1356,12 @@ export function App() {
           ? "The peer task is still in progress."
           : "Its dedicated reviewer process will be terminated.";
     if (
-      !window.confirm(
-        `Close "${target.name}"? ${warning}`,
-      )
+      !(await requestConfirmation({
+        title: `Close "${target.name}"?`,
+        body: warning,
+        confirmLabel: "Close review",
+        danger: true,
+      }))
     ) {
       return;
     }
@@ -1446,7 +1533,7 @@ export function App() {
             <span>Project:</span> {session?.project ?? "Loading…"}
           </div>
         </div>
-        <div className="header-actions">
+        <div className="header-actions" ref={headerActionsRef}>
           <SessionTabs
             sessions={sessions}
             maxSessions={maxSessions}
@@ -1457,16 +1544,7 @@ export function App() {
             onSelect={attachSession}
             onClose={(target) => void handleCloseSessionTab(target)}
             onPeer={openPeerComposer}
-            onCreate={() => {
-              setPeerComposerOpen(false);
-              setSessionsOpen(false);
-              setSettingsOpen(false);
-              setAgentPickerOpen(false);
-              setLaunchDirectory(null);
-              setWorkspacePickerOpen(true);
-              setAgentCatalogError(null);
-              void refreshAgentCatalog(true);
-            }}
+            onCreate={openWorkspaceLauncher}
             onManage={() => {
               setPeerComposerOpen(false);
               setWorkspacePickerOpen(false);
@@ -1502,6 +1580,30 @@ export function App() {
           </button>
           <button
             type="button"
+            title={
+              updateStatus?.state === "available"
+                ? "Open settings — update available"
+                : "Open terminal settings"
+            }
+            onClick={() => {
+              setPeerComposerOpen(false);
+              setWorkspacePickerOpen(false);
+              setLaunchDirectory(null);
+              setAgentPickerOpen(false);
+              setSessionsOpen(false);
+              setSettingsOpen(true);
+            }}
+          >
+            <span className="action-label action-label--full">Settings</span>
+            <span className="action-label action-label--compact">Setup</span>
+            {updateStatus?.state === "available" && (
+              <span className="header-update-badge" aria-label="Update available">
+                ↑
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
             title={`Restart ${selectedAgentLabel}`}
             disabled={busy || session?.purpose.kind === "peer"}
             onClick={() => void handleRestart()}
@@ -1528,32 +1630,12 @@ export function App() {
             <span className="action-label action-label--full">Mobile keys</span>
             <span className="action-label action-label--compact">Keys</span>
           </button>
-          <button
-            type="button"
-            title={
-              updateStatus?.state === "available"
-                ? "Open settings — update available"
-                : "Open terminal settings"
-            }
-            onClick={() => {
-              setPeerComposerOpen(false);
-              setWorkspacePickerOpen(false);
-              setLaunchDirectory(null);
-              setAgentPickerOpen(false);
-              setSessionsOpen(false);
-              setSettingsOpen(true);
-            }}
-          >
-            <span className="action-label action-label--full">Settings</span>
-            <span className="action-label action-label--compact">Setup</span>
-            {updateStatus?.state === "available" && (
-              <span className="header-update-badge" aria-label="Update available">
-                ↑
-              </span>
-            )}
-          </button>
         </div>
       </header>
+
+      <div className="visually-hidden" role="status" aria-live="polite">
+        <span key={announcement.nonce}>{announcement.text}</span>
+      </div>
 
       {message && (
         <div className="message-banner" role="alert">
@@ -1581,10 +1663,21 @@ export function App() {
             onError={handleError}
           />
         ) : (
-          <div className="terminal-empty" role="status" aria-live="polite">
-            {sessionsLoading
-              ? "Loading terminal sessions…"
-              : "No terminal session is available. Start a new one to continue."}
+          <div className="terminal-empty">
+            <p role="status" aria-live="polite">
+              {sessionsLoading
+                ? "Loading terminal sessions…"
+                : "No terminal session is available."}
+            </p>
+            {!sessionsLoading && (
+              <button
+                type="button"
+                className="terminal-empty-action"
+                onClick={openWorkspaceLauncher}
+              >
+                + Start a terminal
+              </button>
+            )}
           </div>
         )}
       </section>
@@ -1727,7 +1820,87 @@ export function App() {
           onClose={closeSessions}
         />
       )}
+
+      {confirmRequest && (
+        <ConfirmDialog
+          request={confirmRequest}
+          onSettle={settleConfirmation}
+        />
+      )}
     </main>
+  );
+}
+
+interface ConfirmRequest {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  danger?: boolean;
+  resolve: (confirmed: boolean) => void;
+}
+
+function ConfirmDialog({
+  request,
+  onSettle,
+}: {
+  request: ConfirmRequest;
+  onSettle: (confirmed: boolean) => void;
+}) {
+  const panelRef = useRef<HTMLElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    returnFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    return () => {
+      const origin = returnFocusRef.current;
+      if (origin?.isConnected) {
+        origin.focus({ preventScroll: true });
+      }
+    };
+  }, []);
+
+  return (
+    <div
+      className="dialog-backdrop confirm-backdrop"
+      role="presentation"
+      onMouseDown={() => onSettle(false)}
+    >
+      <section
+        ref={panelRef}
+        className="confirm-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-title"
+        aria-describedby="confirm-body"
+        tabIndex={-1}
+        onKeyDown={(event) =>
+          handleModalKeyDown(event, panelRef.current, () => onSettle(false))
+        }
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <h2 id="confirm-title">{request.title}</h2>
+        <p id="confirm-body">{request.body}</p>
+        <div className="confirm-dialog__actions">
+          <button type="button" autoFocus onClick={() => onSettle(false)}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className={
+              request.danger
+                ? "confirm-dialog__confirm confirm-dialog__confirm--danger"
+                : "confirm-dialog__confirm"
+            }
+            onClick={() => onSettle(true)}
+          >
+            {request.confirmLabel}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 

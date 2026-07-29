@@ -44,6 +44,12 @@ const EMPTY_SCROLL_STATE: ScrollState = {
   right: false,
 };
 
+function scrollBehavior(): ScrollBehavior {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ? "auto"
+    : "smooth";
+}
+
 export function SessionTabs({
   sessions,
   maxSessions,
@@ -111,11 +117,16 @@ export function SessionTabs({
     }
 
     const maximum = Math.max(0, tabList.scrollWidth - tabList.clientWidth);
-    setScrollState({
+    const nextState = {
       overflow: maximum > 2,
       left: tabList.scrollLeft > 2,
       right: tabList.scrollLeft < maximum - 2,
-    });
+    };
+    tabList.dataset.fadeLeft =
+      nextState.overflow && nextState.left ? "true" : "false";
+    tabList.dataset.fadeRight =
+      nextState.overflow && nextState.right ? "true" : "false";
+    setScrollState(nextState);
   }, []);
 
   useEffect(() => {
@@ -149,16 +160,17 @@ export function SessionTabs({
 
       const tabRect = activeTabShell.getBoundingClientRect();
       const listRect = tabList.getBoundingClientRect();
+      const behavior = scrollBehavior();
 
       if (tabRect.left < listRect.left) {
         tabList.scrollTo({
           left: tabList.scrollLeft + tabRect.left - listRect.left,
-          behavior: "smooth",
+          behavior,
         });
       } else if (tabRect.right > listRect.right) {
         tabList.scrollTo({
           left: tabList.scrollLeft + tabRect.right - listRect.right,
-          behavior: "smooth",
+          behavior,
         });
       }
       measureScroll();
@@ -178,7 +190,7 @@ export function SessionTabs({
       return;
     }
     const distance = Math.max(120, Math.round(tabList.clientWidth * 0.8));
-    tabList.scrollBy({ left: distance * direction, behavior: "smooth" });
+    tabList.scrollBy({ left: distance * direction, behavior: scrollBehavior() });
   };
 
   const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
@@ -262,11 +274,11 @@ export function SessionTabs({
               <button
                 type="button"
                 role="tab"
-                className={
-                  selected ? "session-tab session-tab--active" : "session-tab"
-                }
+                className={`session-tab session-tab--agent-${candidate.agent}${
+                  selected ? " session-tab--active" : ""
+                }`}
                 aria-selected={selected}
-                title={`Open ${fullLabel} — ${
+                title={`Open ${fullLabel} (${AGENT_LABELS[candidate.agent]}) — ${
                   peerState ? peerStatusLabel(peerState) : candidate.status
                 }`}
                 onClick={() => onSelect(candidate)}
@@ -277,6 +289,11 @@ export function SessionTabs({
                   }`}
                   aria-hidden="true"
                 />
+                <span className="visually-hidden">
+                  {peerState ? peerStatusLabel(peerState) : candidate.status}
+                  {", "}
+                  {AGENT_LABELS[candidate.agent]}
+                </span>
                 {reviewerThread && (
                   <span className="session-tab-peer-arrow" aria-hidden="true">
                     ↳

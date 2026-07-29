@@ -106,8 +106,8 @@ export function UpdatePanel({
       {canApply && expectedVersion && (
         <div className="update-settings__confirmation">
           <p role="alert">
-            Updating restarts this server and ends every running PTY and @cwt
-            reviewer session. Favorites and Recent folders remain saved.
+            Updating restarts this server and ends every running terminal and
+            @cwt reviewer session. Favorites and Recent folders remain saved.
           </p>
           <label className="checkbox-row">
             <input

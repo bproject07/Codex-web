@@ -402,8 +402,8 @@ does not intercept text typed into xterm, so raw terminal input and Android
 IME handling remain unchanged.
 
 1. Select **Review**, **Verify**, **Ask**, or **Handoff**, choose an installed
-   agent kind and reviewer folder, describe the scope, and use **Source ready
-   — Prepare handoff** only while the source is at an empty agent prompt. The
+   agent kind and reviewer folder, describe the scope, and use **Prepare
+   summary** only while the source is at an empty agent prompt. The
    reviewer folder defaults to the source tab's folder; **Change folder**
    reuses the normal Favorites, Recent, Browse, and absolute-path picker.
 2. The server revalidates that selected directory and creates a fresh
@@ -414,14 +414,14 @@ IME handling remain unchanged.
    reviewer tab yourself.
 3. The source agent prepares a bounded Markdown handoff through a private
    local bridge. The browser shows it for review and optional editing.
-4. **Reviewer ready — Send** releases the approved handoff after the dedicated
+4. **Send to reviewer** releases the approved handoff after the dedicated
    reviewer is at an empty agent prompt.
-5. When the response is ready, **Source ready — Return** asks the source agent
+5. When the response is ready, **Return to source** asks the source agent
    to retrieve it and present the useful conclusion in its existing context.
 6. A later **Recheck** or follow-up uses the same live reviewer PTY. **+ New
-   peer** always creates a clean reviewer context.
+   reviewer** always creates a clean reviewer context.
 
-A new reviewer also consumes one session slot, so **+ New peer** is disabled
+A new reviewer also consumes one session slot, so **+ New reviewer** is disabled
 when the configured capacity is full. Existing follow-ups remain enabled
 because they reuse their reviewer. The broker retains at most 32 turns in one
 reviewer thread; after that, close it and start a clean peer conversation.
@@ -434,10 +434,10 @@ then enter: `Review the current implementation for correctness, security
 regressions, and missing Windows/Linux tests.` The source prepares the
 handoff; you inspect it before sending. Claude's fresh reviewer runs in the
 selected project B directory without modifying an ordinary project B tab.
-After Claude submits its bounded response, **Source ready — Return** brings
+After Claude submits its bounded response, **Return to source** brings
 the result back to that exact Codex conversation. A later **Recheck** keeps
-Claude's reviewer context and working directory; **+ New peer** deliberately
-starts without that conversation.
+Claude's reviewer context and working directory; **+ New reviewer**
+deliberately starts without that conversation.
 
 Peer and ordinary non-primary tabs have an accessible `×`. Closing a peer tab
 terminates only its dedicated PTY and purges its in-memory thread. A reviewer
@@ -460,8 +460,9 @@ writes an artifact.
 
 This is supervised coordination, not an autonomous scheduler. Generic CLI
 TUIs expose no reliable cross-provider "idle" signal, so Preview, Send, Return,
-and retry decisions stay explicit. The readiness-labelled buttons are the
-operator's acknowledgement; the matching API requests require
+and retry decisions stay explicit. **Prepare summary**, **Send to reviewer**,
+and **Return to source** are the operator's acknowledgement that the named
+terminal is at an empty prompt; the matching API requests require
 `sourceReady: true` or `reviewerReady: true`. Delivery is bound to the exact
 PTY `sessionId` generation, but the server intentionally does not guess
 whether a CLI is showing its normal prompt, a confirmation, or first-run
@@ -1001,7 +1002,8 @@ terminal byte stream.
 xterm.js is configured with:
 
 - ANSI/VT parsing and original Codex colors
-- Cascadia Mono/Cascadia Code/Consolas font fallback
+- Cascadia Mono/Cascadia Code/Consolas font fallback, then Roboto Mono, Noto
+  Sans Mono, and Droid Sans Mono before generic monospace
 - 10,000 lines of client scrollback by default
 - FitAddon resize using `ResizeObserver`
 - debounced PTY resize messages
@@ -1018,8 +1020,9 @@ so Firefox Quick Find does not replace terminal input. Form fields, dialogs,
 mobile/coarse-pointer input, IME composition, and modified shortcuts keep their
 normal behavior.
 
-The mobile toolbar begins with Enter and the arrow keys, followed by Page
-Up/Down, Ctrl mode, Esc, Tab, Ctrl+C, Ctrl+L, Top, Live, and Hide. Its Ctrl mode
+The mobile toolbar begins with Enter and the arrow keys, followed by Esc,
+Ctrl+C, Tab, Ctrl mode, Page Up/Down, Ctrl+L, Top, Live, and Hide, keeping the
+interrupt keys inside the first screenful on a narrow phone. Its Ctrl mode
 converts the next typed ASCII letter to the matching control character, then
 automatically turns off.
 

@@ -17,6 +17,7 @@ import {
   peerStatusLabel,
   peerThreadDisplayId,
 } from "./actions";
+import { useHorizontalScrollFade } from "../scrollFade";
 import { WorkspacePicker } from "../workspaces/WorkspacePicker";
 import type {
   WorkspaceBrowserAdapter,
@@ -123,6 +124,7 @@ export function PeerComposer({
     handoffDraftForTurn(initialThread?.currentTurn),
   );
   const [formError, setFormError] = useState<string | null>(null);
+  const threadPickerRef = useHorizontalScrollFade<HTMLDivElement>();
 
   const activeThreads = useMemo(
     () =>
@@ -243,7 +245,7 @@ export function PeerComposer({
       previewHandoff,
       () =>
         window.confirm(
-          "Discard the unsent changes to this handoff preview?",
+          "Discard your unsent edits to this summary?",
         ),
     );
     if (!discarded) {
@@ -254,7 +256,9 @@ export function PeerComposer({
   };
 
   const requestClose = () => {
-    if (!pending && confirmAndDiscardPreview()) {
+    // Closing stays available while an operation is pending: the peer turn
+    // continues server-side and this panel can be reopened to check on it.
+    if (confirmAndDiscardPreview()) {
       onClose();
     }
   };
@@ -341,11 +345,11 @@ export function PeerComposer({
       return;
     }
     if (!handoffDraft.trim()) {
-      setFormError("The handoff cannot be empty.");
+      setFormError("The summary cannot be empty.");
       return;
     }
     if (utf8Length(handoffDraft) > MAX_HANDOFF_BYTES) {
-      setFormError("The handoff is too long.");
+      setFormError("The summary is too long.");
       return;
     }
     setFormError(null);
@@ -382,7 +386,7 @@ export function PeerComposer({
   };
 
   const handleDialogKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (event.key === "Escape" && !pending) {
+    if (event.key === "Escape") {
       event.preventDefault();
       requestClose();
       return;
@@ -392,7 +396,7 @@ export function PeerComposer({
     }
     const focusable = Array.from(
       dialogRef.current?.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
       ) ?? [],
     ).filter(
       (element) =>
@@ -470,7 +474,6 @@ export function PeerComposer({
             type="button"
             className="peer-composer__close"
             aria-label="Close peer composer"
-            disabled={pending}
             onClick={requestClose}
           >
             ×
@@ -482,20 +485,26 @@ export function PeerComposer({
           <strong>{sourceSession.name}</strong>
           <code title={sourceSession.project}>{sourceSession.project}</code>
         </div>
-        <p className="peer-composer__readiness">
-          Before a readiness action, make sure the named terminal is showing an
-          empty agent prompt. Catalog Ready checks the executable and version;
-          a fresh terminal may still require sign-in or folder trust. @cwt never
-          accepts those prompts for you.
-        </p>
+        <details className="peer-composer__readiness">
+          <summary>
+            Each step needs the named terminal at an idle, empty prompt.
+          </summary>
+          <p>
+            Before you prepare, send, or return, check that the named terminal
+            is showing an empty agent prompt. Catalog Ready checks the
+            executable and version, so a fresh terminal may still require
+            sign-in or folder trust. @cwt never accepts those prompts for you.
+          </p>
+        </details>
 
         {threadsReady &&
           !waitingForInitialThread &&
           (activeThreads.length > 0 || allowNew) && (
           <div
+            ref={threadPickerRef}
             className="peer-thread-picker"
             role="tablist"
-            aria-label="Peer conversations"
+            aria-label="Reviewer conversations"
           >
             {activeThreads.map((thread) => {
               const selected = thread.id === selectedThread?.id;
@@ -511,11 +520,16 @@ export function PeerComposer({
                       : "peer-thread-picker__item"
                   }
                   disabled={pending}
+                  title={`${AGENT_LABELS[thread.targetAgent]} review ${peerThreadDisplayId(
+                    thread.id,
+                  )} — ${peerStatusLabel(thread.status)}`}
                   onClick={() => chooseThread(thread)}
                 >
-                  {AGENT_LABELS[thread.targetAgent]}{" "}
-                  {peerThreadDisplayId(thread.id)}
-                  <small>{peerStatusLabel(thread.status)}</small>
+                  {AGENT_LABELS[thread.targetAgent]} review
+                  <small>
+                    {peerThreadDisplayId(thread.id)} ·{" "}
+                    {peerStatusLabel(thread.status)}
+                  </small>
                 </button>
               );
             })}
@@ -533,8 +547,8 @@ export function PeerComposer({
                 title={newThreadDisabledReason ?? undefined}
                 onClick={chooseNew}
               >
-                + New peer
-                <small>Clean context</small>
+                + New reviewer
+                <small>Starts fresh</small>
               </button>
             )}
           </div>
@@ -571,7 +585,7 @@ export function PeerComposer({
                     >
                       Retry
                     </button>
-                    <button type="button" disabled={pending} onClick={requestClose}>
+                    <button type="button" onClick={requestClose}>
                       Close
                     </button>
                   </div>
@@ -603,7 +617,7 @@ export function PeerComposer({
                     >
                       Retry
                     </button>
-                    <button type="button" disabled={pending} onClick={requestClose}>
+                    <button type="button" onClick={requestClose}>
                       Close
                     </button>
                   </div>
@@ -614,7 +628,7 @@ export function PeerComposer({
             <section className="peer-preview" aria-labelledby="peer-preview-title">
               <div className="peer-section-heading">
                 <div>
-                  <h3 id="peer-preview-title">Preview handoff</h3>
+                  <h3 id="peer-preview-title">Preview summary</h3>
                   <p>
                     Review or edit the summary before it reaches the dedicated{" "}
                     {AGENT_LABELS[selectedThread.targetAgent]} session.
@@ -622,7 +636,7 @@ export function PeerComposer({
                 </div>
                 <span>{peerThreadDisplayId(selectedThread.id)}</span>
               </div>
-              <label htmlFor="peer-handoff">Prepared context</label>
+              <label htmlFor="peer-handoff">Summary for the reviewer</label>
               <textarea
                 id="peer-handoff"
                 value={handoffDraft}
@@ -636,8 +650,11 @@ export function PeerComposer({
                   }))
                 }
               />
+              <p className="peer-instruction-form__hint">
+                Sending needs the reviewer tab at an idle, empty prompt.
+              </p>
               <div className="peer-composer__actions">
-                <button type="button" disabled={pending} onClick={requestClose}>
+                <button type="button" onClick={requestClose}>
                   {previewDirty ? "Discard edits" : "Keep for later"}
                 </button>
                 <button
@@ -646,7 +663,7 @@ export function PeerComposer({
                   disabled={pending || !handoffDraft.trim()}
                   onClick={() => void dispatch()}
                 >
-                  {pending ? "Sending…" : "Reviewer ready — Send"}
+                  {pending ? "Sending…" : "Send to reviewer"}
                 </button>
               </div>
             </section>
@@ -661,8 +678,8 @@ export function PeerComposer({
                 </strong>
                 <p>
                   {selectedThread.currentTurn.status === "preparing_handoff"
-                    ? `${sourceSession.name} is preparing a concise handoff for preview.`
-                    : `${AGENT_LABELS[selectedThread.targetAgent]} is reviewing the approved handoff.`}
+                    ? `${sourceSession.name} is preparing a concise summary for preview.`
+                    : `${AGENT_LABELS[selectedThread.targetAgent]} is reviewing the approved summary.`}
                 </p>
                 <p>
                   {selectedThread.currentTurn.status === "preparing_handoff"
@@ -710,7 +727,10 @@ export function PeerComposer({
 
               {selectedThread?.currentTurn.status === "response_ready" ? (
                 <div className="peer-composer__actions">
-                  <button type="button" disabled={pending} onClick={requestClose}>
+                  <p className="peer-instruction-form__hint">
+                    Returning needs the source tab at an idle, empty prompt.
+                  </p>
+                  <button type="button" onClick={requestClose}>
                     Keep for later
                   </button>
                   <button
@@ -721,7 +741,7 @@ export function PeerComposer({
                     }
                     onClick={() => void returnResponse()}
                   >
-                    {pending ? "Returning…" : "Source ready — Return"}
+                    {pending ? "Returning…" : "Return to source"}
                   </button>
                 </div>
               ) : (
@@ -834,7 +854,7 @@ export function PeerComposer({
                 </p>
 
                 <div className="peer-composer__actions">
-                  <button type="button" disabled={pending} onClick={requestClose}>
+                  <button type="button" onClick={requestClose}>
                     Close
                   </button>
                   <button
@@ -851,8 +871,8 @@ export function PeerComposer({
                     {pending
                       ? "Preparing…"
                       : selectedThread
-                        ? "Source ready — Prepare follow-up"
-                        : "Source ready — Prepare handoff"}
+                        ? "Prepare follow-up"
+                        : "Prepare summary"}
                   </button>
                 </div>
                 </form>

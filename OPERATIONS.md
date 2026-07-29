@@ -610,14 +610,14 @@ normal tab, even when a matching agent appears idle.
 
 The operational sequence is:
 
-1. choose the reviewer agent, working folder, and action, then use **Source
-   ready — Prepare handoff** while the source is at an empty agent prompt;
+1. choose the reviewer agent, working folder, and action, then use **Prepare
+   summary** while the source is at an empty agent prompt;
 2. wait for the source agent to submit a bounded handoff;
-3. inspect or edit **Preview handoff**;
-4. use **Reviewer ready — Send** while the reviewer is at an empty agent
+3. inspect or edit **Preview summary**;
+4. use **Send to reviewer** while the reviewer is at an empty agent
    prompt;
 5. wait for **Response ready**;
-6. use **Source ready — Return** while the source is at an empty agent prompt;
+6. use **Return to source** while the source is at an empty agent prompt;
 7. use a follow-up or **Recheck** to retain that same reviewer context.
 
 Concrete example: from a Codex source tab, choose **Verify** with Claude and
@@ -627,8 +627,8 @@ missing Windows/Linux tests.` Inspect the generated handoff before dispatch.
 The dedicated reviewer starts in the selected directory without changing any
 ordinary tab. Return Claude's response to the same Codex source, then use
 **Recheck** for another pass that retains Claude's reviewer context and
-working directory. Use **+ New peer** only when a clean reviewer conversation
-is intentional.
+working directory. Use **+ New reviewer** only when a clean reviewer
+conversation is intentional.
 It is disabled when session capacity is full, while follow-ups on an existing
 reviewer remain available. One reviewer thread retains at most 32 turns; close
 it and start a clean peer after reaching that boundary. The broker permits at
@@ -660,8 +660,10 @@ shutdown disables new capabilities and revokes existing ones before releasing
 the private listener; an unexpected private-listener exit also stops the
 public service.
 
-The readiness-labelled buttons are an explicit operator acknowledgement, not
-an inferred state. The corresponding API requests require `sourceReady: true`
+**Prepare summary**, **Send to reviewer**, and **Return to source** are an
+explicit operator acknowledgement that the named terminal is at an empty
+prompt, not an inferred state. The corresponding API requests require
+`sourceReady: true`
 or `reviewerReady: true`, and delivery is rejected if the PTY generation has
 changed. Do not confirm readiness while the CLI is showing a permission,
 login, trust, or first-run prompt, or while text is partially entered.
@@ -777,8 +779,9 @@ left to the browser or operating system.
 ### Mobile keys
 
 Shows or hides the mobile toolbar. Its order begins with Enter and the arrow
-keys, followed by Page Up/Down, Ctrl mode, Esc, Tab, Ctrl+C, Ctrl+L, Top, Live,
-and Hide.
+keys, followed by Esc, Ctrl+C, Tab, Ctrl mode, Page Up/Down, Ctrl+L, Top, Live,
+and Hide, so the interrupt keys stay inside the first screenful on a narrow
+phone.
 
 - **PgUp/PgDn** moves through xterm's client-side scrollback.
 - **Top** moves to the oldest retained client-side line.

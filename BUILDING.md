@@ -109,6 +109,13 @@ If the local machine cannot run Linux, use GitHub Actions, a Linux VM, or a
 Linux host you control. Do not mark the change complete or describe it as
 Linux-supported until that validation has actually passed.
 
+The CI workflow classifies every push and pull request before starting the
+build matrix. When every changed path is either a Markdown file or is under
+`docs/`, CI records a successful documentation-only job and skips the Node,
+Rust, Windows, and Linux build jobs. Any source, script, workflow,
+configuration, lockfile, or other non-documentation change runs the complete
+matrix. A manual `workflow_dispatch` always runs the complete matrix.
+
 Documentation must describe the current source and verified behavior. Check
 CLI flags, environment variables, dependency versions, build commands,
 package contents, UI labels, platform support, and known limitations instead
@@ -933,13 +940,13 @@ For a disposable manual peer smoke:
 1. start a package on an unused port and with an isolated `--state-dir`;
 2. open **@cwt** from a running source tab;
 3. choose a different ready agent and a disposable reviewer directory that is
-   not the source directory, then use **Source ready — Prepare handoff** at an
+   not the source directory, then use **Prepare summary** at an
    empty source prompt;
-4. verify the preview, then use **Reviewer ready — Send** at an empty reviewer
+4. verify the preview, then use **Send to reviewer** at an empty reviewer
    prompt;
 5. verify a new linked reviewer tab was created in the selected reviewer
    directory and the source directory did not change;
-6. use **Source ready — Return**, then issue **Recheck** and confirm the same
+6. use **Return to source**, then issue **Recheck** and confirm the same
    reviewer `terminalId` and `sessionId` remain;
 7. close the reviewer and confirm the source is still running;
 8. stop the disposable server.

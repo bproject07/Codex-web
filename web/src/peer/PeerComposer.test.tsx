@@ -144,8 +144,8 @@ describe("PeerComposer", () => {
     expect(html).not.toContain(">Recheck<");
     expect(html).not.toContain("terminal target");
     expect(html).toContain("Enter adds a new line");
-    expect(html).toContain("Source ready — Prepare handoff");
-    expect(html).toContain("Catalog Ready checks the executable and version");
+    expect(html).toContain("Prepare summary");
+    expect(html).toContain("Catalog Ready checks the");
     expect(html).toContain("@cwt never accepts those prompts for you");
   });
 
@@ -199,7 +199,7 @@ describe("PeerComposer", () => {
     expect(html).toContain("Looks good.");
     expect(html).toContain("Recheck");
     expect(html).toContain("R-123456");
-    expect(html).toContain("Source ready — Prepare follow-up");
+    expect(html).toContain("Prepare follow-up");
     expect(html).not.toContain("<legend>Dedicated reviewer</legend>");
     expect(html).not.toContain("Change folder");
   });
@@ -223,9 +223,9 @@ describe("PeerComposer", () => {
     );
 
     expect(html).toContain(reason);
-    expect(html).toContain("+ New peer");
+    expect(html).toContain("+ New reviewer");
     expect(html).toContain('<fieldset class="peer-targets" disabled="">');
-    expect(html).not.toContain("Source ready — Prepare follow-up");
+    expect(html).not.toContain("Prepare follow-up");
   });
 
   it("keeps existing reviewer follow-ups available at terminal capacity", () => {
@@ -245,7 +245,7 @@ describe("PeerComposer", () => {
       />,
     );
 
-    expect(html).toContain("Source ready — Prepare follow-up");
+    expect(html).toContain("Prepare follow-up");
     expect(html).toContain('<fieldset class="peer-actions">');
     expect(html).toContain('title="Session capacity reached (20 of 20)."');
   });
@@ -276,9 +276,9 @@ describe("PeerComposer", () => {
       />,
     );
 
-    expect(html).toContain("Preview handoff");
+    expect(html).toContain("Preview summary");
     expect(html).toContain("Prepared summary.");
-    expect(html).toContain("Reviewer ready — Send");
+    expect(html).toContain("Send to reviewer");
   });
 
   it("requires an explicit return before starting another turn", () => {
@@ -305,7 +305,7 @@ describe("PeerComposer", () => {
       />,
     );
 
-    expect(html).toContain("Source ready — Return");
+    expect(html).toContain("Return to source");
     expect(html).not.toContain("Prepare follow-up");
   });
 
@@ -327,8 +327,8 @@ describe("PeerComposer", () => {
     );
 
     expect(html).toContain("Loading peer conversations");
-    expect(html).not.toContain("Prepare handoff");
-    expect(html).not.toContain("+ New peer");
+    expect(html).not.toContain("Prepare summary");
+    expect(html).not.toContain("+ New reviewer");
   });
 
   it("shows a recoverable thread-list error without offering a duplicate reviewer", () => {
@@ -350,7 +350,7 @@ describe("PeerComposer", () => {
 
     expect(html).toContain("Could not load peer conversations.");
     expect(html).toContain("Retry");
-    expect(html).not.toContain("Prepare handoff");
+    expect(html).not.toContain("Prepare summary");
   });
 
   it("waits for an explicitly requested thread without exposing a sibling", () => {
@@ -376,8 +376,8 @@ describe("PeerComposer", () => {
     expect(html).toContain("without selecting another conversation");
     expect(html).toContain("Retry");
     expect(html).not.toContain("Looks good.");
-    expect(html).not.toContain("Source ready — Prepare follow-up");
-    expect(html).not.toContain("+ New peer");
+    expect(html).not.toContain("Prepare follow-up");
+    expect(html).not.toContain("+ New reviewer");
   });
 
   it("surfaces agent discovery failures instead of reporting an empty catalog", () => {
