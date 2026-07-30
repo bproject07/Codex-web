@@ -34,7 +34,6 @@ import {
 } from "./api";
 import { agentLabel } from "./agents";
 import { AgentPicker } from "./AgentPicker";
-import { useHorizontalScrollFade } from "./scrollFade";
 import {
   TerminalView,
   type TerminalViewHandle,
@@ -47,6 +46,7 @@ import {
   type TerminalSettings,
   type ThemeName,
 } from "./terminal/settings";
+import { HeaderMenu, type HeaderMenuItem } from "./menu/HeaderMenu";
 import { SessionTabs } from "./sessions/SessionTabs";
 import { shouldRouteDesktopSlash } from "./terminal/desktopSlash";
 import {
@@ -87,18 +87,6 @@ const STATUS_LABELS: Record<ConnectionStatus | "codex_exited", string> = {
   codex_exited: "Agent exited",
 };
 
-const COMPACT_STATUS_LABELS: Record<
-  ConnectionStatus | "codex_exited",
-  string
-> = {
-  connecting: "Connecting",
-  connected: "Online",
-  reconnecting: "Retrying",
-  disconnected: "Offline",
-  authentication_failed: "Auth failed",
-  codex_exited: "Exited",
-};
-
 export function App() {
   const [token, setToken] = useState(consumeTokenFromUrl);
   const [connectionStatus, setConnectionStatus] =
@@ -112,6 +100,7 @@ export function App() {
   const [ctrlMode, setCtrlMode] = useState(false);
   const [reconnectNonce, setReconnectNonce] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [launchDirectory, setLaunchDirectory] =
@@ -143,7 +132,6 @@ export function App() {
   );
   const [announcement, setAnnouncement] = useState({ nonce: 0, text: "" });
   const terminalRef = useRef<TerminalViewHandle>(null);
-  const headerActionsRef = useHorizontalScrollFade<HTMLDivElement>();
   const selectedTerminalIdRef = useRef(selectedTerminalId);
   const sessionsRequestEpochRef = useRef(0);
   const capacityRequestEpochRef = useRef(0);
@@ -504,6 +492,7 @@ export function App() {
       connectionStatus !== "connected" ||
       !selectedTerminalId ||
       settingsOpen ||
+      headerMenuOpen ||
       sessionsOpen ||
       workspacePickerOpen ||
       agentPickerOpen ||
@@ -523,6 +512,7 @@ export function App() {
     selectedTerminalId,
     sessionsOpen,
     settingsOpen,
+    headerMenuOpen,
     workspacePickerOpen,
     agentPickerOpen,
     peerComposerOpen,
@@ -551,6 +541,7 @@ export function App() {
           coarsePointer: window.matchMedia("(pointer: coarse)").matches,
           dialogOpen:
             settingsOpen ||
+            headerMenuOpen ||
             sessionsOpen ||
             workspacePickerOpen ||
             agentPickerOpen ||
@@ -601,6 +592,7 @@ export function App() {
     selectedTerminalId,
     sessionsOpen,
     settingsOpen,
+    headerMenuOpen,
     workspacePickerOpen,
     agentPickerOpen,
     peerComposerOpen,
@@ -1203,6 +1195,25 @@ export function App() {
     void refreshAgentCatalog(true);
   };
 
+  const openSessionsManager = () => {
+    setPeerComposerOpen(false);
+    setWorkspacePickerOpen(false);
+    setLaunchDirectory(null);
+    setAgentPickerOpen(false);
+    setSettingsOpen(false);
+    setSessionsOpen(true);
+    void refreshSessions();
+  };
+
+  const openSettings = () => {
+    setPeerComposerOpen(false);
+    setWorkspacePickerOpen(false);
+    setLaunchDirectory(null);
+    setAgentPickerOpen(false);
+    setSessionsOpen(false);
+    setSettingsOpen(true);
+  };
+
   const chooseLaunchDirectory = (
     directory: WorkspaceDirectory,
     transition: WorkspacePickerTransition,
@@ -1516,27 +1527,88 @@ export function App() {
     );
   }
 
+  const updateAvailable = updateStatus?.state === "available";
+  const configuredMaxSessions =
+    maxSessions !== null &&
+    Number.isSafeInteger(maxSessions) &&
+    maxSessions > 0
+      ? maxSessions
+      : null;
+  const capacityReached =
+    configuredMaxSessions !== null &&
+    sessions.length >= configuredMaxSessions;
+  const sessionCountLabel =
+    configuredMaxSessions === null
+      ? `${sessions.length}`
+      : `${sessions.length}/${configuredMaxSessions}`;
+  const headerMenuItems: HeaderMenuItem[] = [
+    {
+      key: "new-terminal",
+      className: "session-new-button",
+      label: "New terminal",
+      title: capacityReached
+        ? `Session capacity reached (${sessions.length} of ${configuredMaxSessions})`
+        : "Choose an agent for a new terminal",
+      disabled: busy || capacityReached,
+      onSelect: openWorkspaceLauncher,
+    },
+    {
+      key: "settings",
+      label: "Settings",
+      title: updateAvailable
+        ? "Open settings — update available"
+        : "Open terminal settings",
+      badge: updateAvailable ? "↑" : undefined,
+      badgeLabel: updateAvailable ? "Update available" : undefined,
+      onSelect: openSettings,
+    },
+    {
+      key: "manage-sessions",
+      className: "session-manage-button",
+      label: `Manage sessions (${sessionCountLabel})`,
+      title:
+        configuredMaxSessions === null
+          ? `Manage ${sessions.length} terminal ${
+              sessions.length === 1 ? "session" : "sessions"
+            }`
+          : `Manage ${sessions.length} of ${configuredMaxSessions} terminal sessions`,
+      onSelect: openSessionsManager,
+    },
+    {
+      key: "fullscreen",
+      label: "Full screen",
+      title: "Toggle fullscreen",
+      onSelect: () => void toggleFullscreen(),
+    },
+  ];
+
   return (
     <main className="app-shell">
       <header className="app-header">
-        <div className="app-identity">
-          <h1>
-            Codex Web Terminal
-            <span className="community-label">Unofficial</span>
-            {session && (
-              <span className={`active-agent active-agent--${session.agent}`}>
-                {selectedAgentLabel}
-              </span>
-            )}
-          </h1>
-          <div className="project-path" title={session?.project}>
-            <span>Project:</span> {session?.project ?? "Loading…"}
-          </div>
+        <div className="header-context">
+          <AppIdentity
+            session={session}
+            sessionsLoading={sessionsLoading}
+            effectiveStatus={effectiveStatus}
+          />
+          <HeaderMenu
+            items={headerMenuItems}
+            onOpenChange={(open) => {
+              if (!open) {
+                // Closing the menu hands focus back to its trigger (or to
+                // whatever surface an item opened); the automatic terminal
+                // refocus must not snatch it away one frame later.
+                suppressTerminalFocusOnceRef.current = true;
+              }
+              setHeaderMenuOpen(open);
+            }}
+            triggerBadge={updateAvailable ? "↑" : undefined}
+            triggerBadgeLabel={updateAvailable ? "Update available" : undefined}
+          />
         </div>
-        <div className="header-actions" ref={headerActionsRef}>
+        <div className="header-actions">
           <SessionTabs
             sessions={sessions}
-            maxSessions={maxSessions}
             selectedTerminalId={selectedTerminalId}
             busy={busy || peerController.operation !== null}
             peerThreads={peerController.threads}
@@ -1544,92 +1616,7 @@ export function App() {
             onSelect={attachSession}
             onClose={(target) => void handleCloseSessionTab(target)}
             onPeer={openPeerComposer}
-            onCreate={openWorkspaceLauncher}
-            onManage={() => {
-              setPeerComposerOpen(false);
-              setWorkspacePickerOpen(false);
-              setLaunchDirectory(null);
-              setAgentPickerOpen(false);
-              setSettingsOpen(false);
-              setSessionsOpen(true);
-              void refreshSessions();
-            }}
           />
-          <span className={`status status--${effectiveStatus}`}>
-            <span className="status-dot" aria-hidden="true" />
-            <span className="status-label status-label--full">
-              {STATUS_LABELS[effectiveStatus]}
-            </span>
-            <span className="status-label status-label--compact">
-              {COMPACT_STATUS_LABELS[effectiveStatus]}
-            </span>
-          </span>
-          <button
-            type="button"
-            title="Reconnect the browser terminal"
-            onClick={() => {
-              if (selectedTerminalIdRef.current) {
-                setReconnectNonce((value) => value + 1);
-              } else {
-                void refreshSessions();
-              }
-            }}
-          >
-            <span className="action-label action-label--full">Reconnect</span>
-            <span className="action-label action-label--compact">Connect</span>
-          </button>
-          <button
-            type="button"
-            title={
-              updateStatus?.state === "available"
-                ? "Open settings — update available"
-                : "Open terminal settings"
-            }
-            onClick={() => {
-              setPeerComposerOpen(false);
-              setWorkspacePickerOpen(false);
-              setLaunchDirectory(null);
-              setAgentPickerOpen(false);
-              setSessionsOpen(false);
-              setSettingsOpen(true);
-            }}
-          >
-            <span className="action-label action-label--full">Settings</span>
-            <span className="action-label action-label--compact">Setup</span>
-            {updateStatus?.state === "available" && (
-              <span className="header-update-badge" aria-label="Update available">
-                ↑
-              </span>
-            )}
-          </button>
-          <button
-            type="button"
-            title={`Restart ${selectedAgentLabel}`}
-            disabled={busy || session?.purpose.kind === "peer"}
-            onClick={() => void handleRestart()}
-          >
-            <span className="action-label action-label--full">
-              Restart {selectedAgentLabel}
-            </span>
-            <span className="action-label action-label--compact">Restart</span>
-          </button>
-          <button
-            type="button"
-            title="Toggle fullscreen"
-            onClick={() => void toggleFullscreen()}
-          >
-            <span className="action-label action-label--full">Fullscreen</span>
-            <span className="action-label action-label--compact">Full</span>
-          </button>
-          <button
-            type="button"
-            title="Show or hide terminal keys"
-            aria-pressed={settings.mobileKeys}
-            onClick={() => updateSettings({ mobileKeys: !settings.mobileKeys })}
-          >
-            <span className="action-label action-label--full">Mobile keys</span>
-            <span className="action-label action-label--compact">Keys</span>
-          </button>
         </div>
       </header>
 
@@ -1771,6 +1758,8 @@ export function App() {
           settings={settings}
           busy={busy}
           agentLabel={selectedAgentLabel}
+          restartDisabled={busy || session?.purpose.kind === "peer"}
+          onRestart={() => void handleRestart()}
           onChange={updateSettings}
           updateStatus={updateStatus}
           updateLoading={updateLoading}
@@ -1828,6 +1817,49 @@ export function App() {
         />
       )}
     </main>
+  );
+}
+
+export interface AppIdentityProps {
+  session: SessionSnapshot | null;
+  sessionsLoading: boolean;
+  effectiveStatus: ConnectionStatus | "codex_exited";
+}
+
+/** Compact header identity: active project path, the selected session's
+ * agent, and the connection dot. Pure information — reconnection is
+ * automatic, so no manual control lives here. The backend exposes no
+ * structured LLM model field, so the agent label is the most specific
+ * truthful identity. The path may visually ellipsize on narrow screens; the
+ * complete value stays in the DOM text and the heading title. */
+export function AppIdentity({
+  session,
+  sessionsLoading,
+  effectiveStatus,
+}: AppIdentityProps) {
+  const projectPath = session?.project
+    ? session.project
+    : sessionsLoading
+      ? "Loading…"
+      : "No session";
+
+  return (
+    <div className="app-identity">
+      <h1 className="app-context" title={session?.project || undefined}>
+        <span className="app-context-project">{projectPath}</span>
+        {session && (
+          <span className={`active-agent active-agent--${session.agent}`}>
+            {agentLabel(session.agent)}
+          </span>
+        )}
+        <span className={`app-status status--${effectiveStatus}`}>
+          <span className="status-dot" aria-hidden="true" />
+          <span className="visually-hidden">
+            Connection: {STATUS_LABELS[effectiveStatus]}.
+          </span>
+        </span>
+      </h1>
+    </div>
   );
 }
 
@@ -2117,10 +2149,12 @@ function AuthenticationScreen({ onToken }: { onToken: (token: string) => void })
   );
 }
 
-interface SettingsPanelProps {
+export interface SettingsPanelProps {
   settings: TerminalSettings;
   busy: boolean;
   agentLabel: string;
+  restartDisabled: boolean;
+  onRestart: () => void;
   onChange: (patch: Partial<TerminalSettings>) => void;
   updateStatus: UpdateStatus | null;
   updateLoading: boolean;
@@ -2137,10 +2171,12 @@ interface SettingsPanelProps {
   onCopyViewportDiagnostics: () => void;
 }
 
-function SettingsPanel({
+export function SettingsPanel({
   settings,
   busy,
   agentLabel,
+  restartDisabled,
+  onRestart,
   onChange,
   updateStatus,
   updateLoading,
@@ -2285,6 +2321,14 @@ function SettingsPanel({
         </div>
 
         <div className="settings-danger">
+          <button
+            type="button"
+            disabled={restartDisabled}
+            title={`Restart ${agentLabel}`}
+            onClick={onRestart}
+          >
+            Restart {agentLabel}
+          </button>
           <button type="button" disabled={busy} onClick={onTerminate}>
             Terminate {agentLabel}
           </button>

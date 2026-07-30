@@ -278,8 +278,8 @@ Start the packaged build:
 ```
 
 The `-Project` directory is the canonicalized default. The primary agent
-starts there; **+ New** may choose another directory readable by the server
-account for that new managed session.
+starts there; **New terminal** in the header Menu may choose another directory
+readable by the server account for that new managed session.
 
 `run.ps1` searches `dist/codex-web.exe` before the release and debug binaries
 under `server/target`. If `dist` contains an older package, rebuild it or run
@@ -738,8 +738,8 @@ has all of these properties:
 - `/api/health` reports `sessionRunning: true`;
 - the terminal shows the real Codex TUI;
 - keyboard input reaches Codex;
-- **+ New** can browse a disposable server directory and start the selected
-  agent there;
+- **New terminal** in the header Menu can browse a disposable server directory
+  and start the selected agent there;
 - the created session snapshot reports that directory in both `project` and
   `directoryId`;
 - the directory appears in **Recent**, can be starred in **Favorites**, and
@@ -996,10 +996,19 @@ python ./scripts/agent-catalog-regression.py \
   --port 8797
 ```
 
-The session-tab regression creates four synthetic PTYs and checks desktop
-wheel/arrows, mobile swipe, active-tab switching, responsive header height,
-the default `4/20` capacity label, and the visibility of **+ New** and
-**Manage**:
+The session-tab regression creates four synthetic PTYs (growing to twelve for
+the overflow phases) and checks that the desktop strip uses the full remaining
+header width, that the overlay scroll arrows appear only on real measured
+overflow (and disappear again on resize, without reserving width), arrow
+paging and edge-disable states, wheel scrolling, mobile swipe, active-tab
+switching, responsive header height,
+the left-to-right header order (identity with full project path, agent, and
+status dot — no `Codex Web Terminal` branding, no reconnect button, and no
+far-right Settings button — then the ellipsis **Menu** trigger, then the
+left-aligned tabs and **@cwt**), and the Menu itself: item order
+(**New terminal**, **Settings**, **Manage sessions** with the default `4/20`
+capacity label, **Full screen**), viewport fit, Escape/focus return, and that
+its Settings entry opens the Settings panel:
 
 ```powershell
 python .\scripts\session-tabs-regression.py `

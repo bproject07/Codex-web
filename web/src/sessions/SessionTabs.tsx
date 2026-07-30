@@ -20,14 +20,11 @@ import {
 
 interface SessionTabsProps {
   sessions: SessionSnapshot[];
-  maxSessions: number | null;
   selectedTerminalId: string;
   busy: boolean;
   onSelect: (session: SessionSnapshot) => void;
   onClose: (session: SessionSnapshot) => void;
-  onCreate: () => void;
   onPeer: () => void;
-  onManage: () => void;
   peerThreads: PeerThread[];
   peerDisabledReason: string | null;
 }
@@ -52,14 +49,11 @@ function scrollBehavior(): ScrollBehavior {
 
 export function SessionTabs({
   sessions,
-  maxSessions,
   selectedTerminalId,
   busy,
   onSelect,
   onClose,
-  onCreate,
   onPeer,
-  onManage,
   peerThreads,
   peerDisabledReason,
 }: SessionTabsProps) {
@@ -86,28 +80,6 @@ export function SessionTabs({
       : busy
         ? "Wait for the current terminal operation before opening @cwt."
         : "Open @cwt peer collaboration");
-  const configuredMaxSessions =
-    maxSessions !== null &&
-    Number.isSafeInteger(maxSessions) &&
-    maxSessions > 0
-      ? maxSessions
-      : null;
-  const capacityReached =
-    configuredMaxSessions !== null &&
-    sessions.length >= configuredMaxSessions;
-  const sessionCountLabel =
-    configuredMaxSessions === null
-      ? `${sessions.length}`
-      : `${sessions.length}/${configuredMaxSessions}`;
-  const createButtonDescription = capacityReached
-    ? `Session capacity reached (${sessions.length} of ${configuredMaxSessions})`
-    : "Choose an agent for a new terminal";
-  const manageButtonDescription =
-    configuredMaxSessions === null
-      ? `Manage ${sessions.length} terminal ${
-          sessions.length === 1 ? "session" : "sessions"
-        }`
-      : `Manage ${sessions.length} of ${configuredMaxSessions} terminal sessions`;
 
   const measureScroll = useCallback(() => {
     const tabList = tabListRef.current;
@@ -209,26 +181,30 @@ export function SessionTabs({
 
   return (
     <nav className="session-switcher" aria-label="Terminal sessions">
-      {scrollState.overflow && (
-        <button
-          type="button"
-          className="session-scroll-button session-scroll-button--left"
-          title="Scroll sessions left"
-          aria-label="Scroll sessions left"
-          disabled={!scrollState.left}
-          onClick={() => scrollByPage(-1)}
+      {/* The arrows overlay the strip's edges instead of flanking it, so
+          showing them never shrinks the measured width — arrow visibility
+          therefore flips at one stable overflow threshold. */}
+      <div className="session-tab-scroller">
+        {scrollState.overflow && (
+          <button
+            type="button"
+            className="session-scroll-button session-scroll-button--left"
+            title="Scroll sessions left"
+            aria-label="Scroll sessions left"
+            disabled={!scrollState.left}
+            onClick={() => scrollByPage(-1)}
+          >
+            ‹
+          </button>
+        )}
+        <div
+          ref={tabListRef}
+          className="session-tabs"
+          role="tablist"
+          aria-label="Open terminal sessions"
+          onScroll={measureScroll}
+          onWheel={handleWheel}
         >
-          ‹
-        </button>
-      )}
-      <div
-        ref={tabListRef}
-        className="session-tabs"
-        role="tablist"
-        aria-label="Open terminal sessions"
-        onScroll={measureScroll}
-        onWheel={handleWheel}
-      >
         {sessions.map((candidate, index) => {
           const selected = candidate.terminalId === selectedTerminalId;
           const purpose = candidate.purpose;
@@ -341,19 +317,20 @@ export function SessionTabs({
             </div>
           );
         })}
+        </div>
+        {scrollState.overflow && (
+          <button
+            type="button"
+            className="session-scroll-button session-scroll-button--right"
+            title="Scroll sessions right"
+            aria-label="Scroll sessions right"
+            disabled={!scrollState.right}
+            onClick={() => scrollByPage(1)}
+          >
+            ›
+          </button>
+        )}
       </div>
-      {scrollState.overflow && (
-        <button
-          type="button"
-          className="session-scroll-button session-scroll-button--right"
-          title="Scroll sessions right"
-          aria-label="Scroll sessions right"
-          disabled={!scrollState.right}
-          onClick={() => scrollByPage(1)}
-        >
-          ›
-        </button>
-      )}
       <button
         type="button"
         className="header-action--peer session-peer-button"
@@ -363,31 +340,6 @@ export function SessionTabs({
         onClick={onPeer}
       >
         @cwt
-      </button>
-      <button
-        type="button"
-        className="header-action--new session-new-button"
-        title={createButtonDescription}
-        aria-label={createButtonDescription}
-        disabled={busy || capacityReached}
-        onClick={onCreate}
-      >
-        <span className="session-new-label--full">+ New</span>
-        <span className="session-new-label--compact">+</span>
-      </button>
-      <button
-        type="button"
-        className="header-action--sessions session-manage-button"
-        title={manageButtonDescription}
-        aria-label={manageButtonDescription}
-        onClick={onManage}
-      >
-        <span className="session-manage-label--full">
-          Manage {sessionCountLabel}
-        </span>
-        <span className="session-manage-label--compact">
-          {sessionCountLabel}
-        </span>
       </button>
     </nav>
   );

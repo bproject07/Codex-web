@@ -95,7 +95,11 @@ def begin_diagnostics(page: Page) -> None:
 
 
 def read_diagnostics(page: Page) -> dict[str, Any]:
-    page.locator('[title="Open terminal settings"]').click()
+    # Settings now opens from the header's ellipsis Menu.
+    page.locator(".header-menu-trigger").click()
+    page.locator("[role='menu']").wait_for(state="visible")
+    page.locator(".header-menu-item--settings").click()
+    page.locator(".settings-panel").wait_for(state="visible")
     details = page.locator("details.diagnostics-manual-copy")
     details.wait_for(state="attached")
     details.evaluate("element => { element.open = true; }")
@@ -384,15 +388,18 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                     KEYBOARD_CLOSED_HEIGHT,
                 ]
                 assert result["rows"][0] <= 16
-                assert result["rows"][1] >= 30
+                # The stacked mobile header carries the 44px ellipsis Menu
+                # trigger (the only route to Settings), which costs one
+                # terminal row at rest versus the pre-menu layout.
+                assert result["rows"][1] >= 29
                 assert result["pageScrollY"] == [0]
                 assert result["replayCount"][0] == result["replayCount"][1]
                 assert len(result["openResizeFrames"]) == 1
                 assert result["openResizeFrames"][0]["rows"] <= 16
                 assert len(result["closeResizeFrames"]) == 1
-                assert result["closeResizeFrames"][0]["rows"] >= 30
+                assert result["closeResizeFrames"][0]["rows"] >= 29
                 assert result["ptyRows"][0] <= 16
-                assert result["ptyRows"][1] >= 30
+                assert result["ptyRows"][1] >= 29
                 assert (
                     result["atomicMobileResizeCommits"][1]
                     > result["atomicMobileResizeCommits"][0]

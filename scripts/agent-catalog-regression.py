@@ -408,6 +408,20 @@ def assert_start_actions_reachable(page: Page, picker: Any) -> None:
         options.evaluate("element => { element.scrollTop = 0; }")
 
 
+def advance_workspace_picker(page: Page) -> None:
+    """Accept the current folder so the agent picker opens for it."""
+    workspace_picker = page.locator(".workspace-picker")
+    workspace_picker.wait_for(state="visible")
+    workspace_picker.get_by_role("tab", name="Browse").click()
+    use_folder = page.locator(".workspace-picker__choose-current")
+    use_folder.wait_for(state="visible")
+    page.wait_for_function(
+        "() => !document.querySelector('.workspace-picker__choose-current')"
+        "?.hasAttribute('disabled')"
+    )
+    use_folder.click()
+
+
 def exercise_picker(
     page: Page,
     port: int,
@@ -430,10 +444,13 @@ def exercise_picker(
         wait_until="domcontentloaded",
     )
     page.locator(".status--connected").wait_for(state="visible")
+    page.locator(".header-menu-trigger").click()
+    page.locator("[role='menu']").wait_for(state="visible")
     with page.expect_request(
         lambda request: "/api/agent-catalog?refresh=true" in request.url
     ):
         page.locator(".session-new-button").click()
+    advance_workspace_picker(page)
     picker = page.locator(".agent-picker")
     picker.wait_for(state="visible")
     page.wait_for_function(
@@ -568,10 +585,13 @@ def exercise_unavailable_to_ready_focus(
             wait_until="domcontentloaded",
         )
         page.locator(".status--connected").wait_for(state="visible")
+        page.locator(".header-menu-trigger").click()
+        page.locator("[role='menu']").wait_for(state="visible")
         with page.expect_request(
             lambda request: "/api/agent-catalog?refresh=true" in request.url
         ):
             page.locator(".session-new-button").click()
+        advance_workspace_picker(page)
         picker = page.locator(".agent-picker")
         claude_card = picker.locator(".agent-option--claude")
         check_again = claude_card.get_by_role("button", name="Check again")

@@ -188,8 +188,9 @@ glibc 2.35-or-newer runtime. It is not a universal Linux or musl binary.
 
 An official portable package checks the official
 `bproject07/Codex-web` GitHub Releases feed shortly after startup and at most
-once every 24 hours. Settings shows the installed/latest versions and a badge
-when a newer stable release is available. Checking is read-only. Installation
+once every 24 hours. Settings shows the installed/latest versions; the header
+Menu button and its Settings entry carry a badge when a newer stable release
+is available. Checking is read-only. Installation
 requires the operator to tick the session-termination confirmation and choose
 **Update to X.Y.Z and restart**; there is no silent restart.
 
@@ -372,8 +373,20 @@ If hardened browser settings reject tab storage, the current page keeps the
 token only in memory; the controlled update reload uses the same one-navigation
 fallback described above.
 
-Use the session tabs in the header to switch between managed terminals and
-**+ New** to create another live agent PTY. **+ New** first opens **Choose a
+Use the session tabs in the header to switch between managed terminals. The
+header reads left to right: the identity area (the active project's full
+server path — it may visually ellipsize on narrow screens while the complete
+value stays in the tooltip and accessible text — the selected session's agent
+(Codex, Claude, or AGY; the backend exposes no finer-grained LLM model
+identity), and the connection-status dot), then the ellipsis **Menu** button
+(`…`, labelled "Menu" on hover), then the left-aligned session tabs and the
+**@cwt** peer button. There is no manual reconnect button; the browser retries
+the WebSocket automatically with increasing delays. The Menu holds the general
+application actions — **New terminal**, **Settings**, **Manage sessions**, and
+**Full screen** — while **Settings** itself keeps only preferences,
+diagnostics, software updates, and the restart/terminate controls. The Menu
+button shows the update badge when a new release is available.
+**New terminal** creates another live agent PTY and first opens **Choose a
 project folder**:
 
 - **Favorites** contains folders explicitly starred in the browser UI.
@@ -390,16 +403,17 @@ its last agent also provides a direct **Start Codex**, **Start Claude**, or
 **Start AGY** shortcut. If that agent is no longer ready, the normal agent
 picker opens instead.
 
-Every open of **+ New** forces a fresh server-side agent check so an older
-browser tab cannot reuse stale availability. A missing or misconfigured agent
-displays manual host-side installation guidance and **Refresh** /
+Every open of **New terminal** forces a fresh server-side agent check so an
+older browser tab cannot reuse stale availability. A missing or misconfigured
+agent displays manual host-side installation guidance and **Refresh** /
 **Check again** actions. Swipe the tab strip on mobile, or use a wheel,
-trackpad, or the overflow arrows on desktop. **Manage** opens the detailed
-session list and shows the current/configured count, for example `3/20`.
-**+ New** is disabled at capacity; existing `@cwt` follow-ups remain available
-because they reuse their dedicated reviewer. Switching tabs does not stop the
-previously displayed session; it continues running and buffering output in
-the background.
+trackpad, or the overflow arrows on desktop. **Manage sessions** in the Menu
+opens the detailed session list and shows the current/configured count, for
+example `3/20`. **New terminal** is disabled at capacity; existing `@cwt`
+follow-ups remain available because they reuse their dedicated reviewer.
+Dismissing the folder picker returns focus to the Menu button. Switching tabs
+does not stop the previously displayed session; it continues running and
+buffering output in the background.
 
 ### `@cwt` peer review
 
@@ -1038,11 +1052,12 @@ interrupt keys inside the first screenful on a narrow phone. Its Ctrl mode
 converts the next typed ASCII letter to the matching control character, then
 automatically turns off.
 
-The header's session tabs, **+ New**, and **Manage** controls operate on
-independent live PTYs. **+ New** selects a server folder before the agent. The
-active tab selects which managed session feeds the same xterm screen. The tab
-strip scrolls horizontally when it overflows; it does not send `/new` or
-`/resume` commands into the selected agent's TUI.
+The header's session tabs and the **New terminal** and **Manage sessions**
+actions in the ellipsis Menu operate on independent live PTYs. **New
+terminal** selects a server folder before the agent. The active tab selects
+which managed session feeds the same xterm screen. The tab strip scrolls
+horizontally when it overflows; it does not send `/new` or `/resume` commands
+into the selected agent's TUI.
 
 ## Security
 
@@ -1277,7 +1292,8 @@ Check `/api/sessions` through the UI status, confirm that the selected
 `terminalId` still exists, and inspect the server log. Confirm that
 the selected agent's verification command (`codex --version`,
 `claude --version`, or `agy --version`) succeeds for the same operating-system
-user. Try a manual Reconnect, then restart only the affected managed session.
+user. The browser retries the WebSocket automatically; reload the page to
+force a fresh attachment, then restart only the affected managed session.
 Browser privacy extensions that block WebSockets can also cause a blank
 terminal.
 
@@ -1289,7 +1305,8 @@ PTY owns line endings. Ensure the proxy supports WebSocket binary frames.
 
 ### Resize problems
 
-Leave and re-enter fullscreen or press Reconnect after rotating a phone. Ensure
+Leave and re-enter fullscreen or reload the page after rotating a phone.
+Ensure
 the terminal container has a nonzero size and the browser page is not zoomed
 to an extreme value. The backend rejects sizes outside 20–500 by 5–300.
 

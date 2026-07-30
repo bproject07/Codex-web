@@ -208,7 +208,8 @@ preflight, PTY startup, or process termination requires:
 - The validated capacity is immutable for one server generation, is enforced
   under the registry mutex, and is reported by `/api/health`. The frontend
   treats malformed/unavailable health as unknown instead of falsely blocking
-  creation, and disables only **+ New** when a known capacity is full.
+  creation, and disables only **New terminal** when a known capacity is
+  full.
 - The primary entry cannot be deleted.
 - `terminalId` is stable for the managed entry.
 - `sessionId` identifies one PTY generation and changes on restart.
@@ -358,9 +359,28 @@ when changing batching or reconnect behavior.
   and hidden xterm textarea are moving.
 - The mobile toolbar order starts with Enter and arrows, then history/control
   keys.
-- Session tabs remain horizontally scrollable on overflow. **@cwt**, **+ New**,
-  and **Manage** stay outside the inner tab scroller so they remain
-  discoverable.
+- Session tabs remain horizontally scrollable on overflow. **@cwt** stays
+  outside the inner tab scroller so it remains discoverable. The header reads
+  left to right: identity area, then the ellipsis **Menu** trigger directly
+  after the status dot, then the left-aligned tabs and **@cwt**. The tab
+  strip is the only horizontal scroller in the header; the Menu trigger must
+  never sit inside it and its popover must not be clipped by it.
+- The Menu trigger is titled and labelled "Menu", uses the ARIA menu-button
+  pattern (`aria-haspopup`, `aria-expanded`, `aria-controls`, `role="menu"`
+  with `role="menuitem"` entries, arrow-key navigation, Escape returns focus
+  to the trigger), keeps a ≥44 px touch target at phone widths, and holds
+  exactly the general actions: **New terminal** (capacity-disabled with its
+  explanation), **Settings** (with the update badge), **Manage sessions**
+  (with the `N/M` count), and **Full screen**. Settings itself keeps only
+  preferences, updates, diagnostics, restart/terminate, and Forget token.
+- The header identity shows live context, not branding: the active session's
+  full native project path as visible DOM text (it may only visually
+  ellipsize; the heading `title` repeats the complete value), the selected
+  session's agent label, and a connection-status dot with a visually hidden
+  text equivalent (color alone is insufficient). There is no manual reconnect
+  control anywhere — WebSocket reattachment is automatic. Do not present the
+  agent as an LLM "model" — the backend has no structured model field — and
+  never derive identity from terminal text.
 - On desktop, an unmodified `/` pressed outside an editable control or dialog
   is routed to the connected terminal and its browser default is suppressed.
   Do not intercept modified shortcuts, form input, dialogs, IME composition,

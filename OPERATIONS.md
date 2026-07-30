@@ -73,7 +73,7 @@ and starts the primary terminal there. It is also the fallback for a
 new-session API request that omits `directoryId`.
 
 `--project` is not a filesystem sandbox or allowlist. An authenticated browser
-can use **+ New** to select another absolute directory readable by the
+can use **New terminal** to select another absolute directory readable by the
 operating-system account running the server. The selected directory applies
 only to that new managed terminal. The server canonicalizes and checks it
 again at browse and launch time.
@@ -585,9 +585,18 @@ revocation without rotating the server token are future work described in
 
 ### Connection status
 
-The header status combines the HTTP session lifecycle and the browser
-WebSocket state. A healthy attached session should reach **Connected**.
-Reconnect attempts use increasing delays and do not restart the selected agent.
+The dot in the header's identity area combines the HTTP session lifecycle and
+the browser WebSocket state: green means attached and healthy, amber pulses
+while connecting or reconnecting, and red means disconnected, authentication
+failed, or an exited agent. The same state is exposed as visually hidden text
+for assistive technology, and connection transitions are announced through a
+polite live region. Reconnect attempts use increasing delays and do not
+restart the selected agent.
+
+The identity area also shows the active project's full server path (it may
+visually ellipsize on narrow screens; the tooltip and DOM text keep the
+complete value) and the selected session's agent label. It follows the active
+tab. There is no manual reconnect button; reattachment is automatic.
 
 ### Sessions
 
@@ -596,9 +605,15 @@ highlighted and each tab includes a lifecycle-status dot.
 
 - Select a tab to attach the single browser terminal view to that managed PTY.
 - Swipe the tab strip horizontally on mobile.
-- Use a wheel, trackpad, or the left/right overflow buttons on desktop.
-- **+ New** stays beside the tab strip and creates another terminal.
-- **Manage** opens the detailed session list.
+- On desktop the tabs spread across the full remaining header width; the
+  left/right arrows appear (overlaid on the strip's edges) only when the tabs
+  genuinely overflow, and a wheel or trackpad scrolls the strip as well.
+- The header reads left to right: the identity area (project path, agent,
+  status dot), then the ellipsis **Menu** button (`…`, labelled "Menu"), then
+  the left-aligned tabs and **@cwt**. General actions live in the Menu;
+  preferences live in **Settings**, which the Menu opens.
+- **New terminal** in the Menu creates another terminal.
+- **Manage sessions** in the Menu opens the detailed session list.
 
 - **Attach** in the detailed list switches to that managed PTY.
 - Attaching does not stop the previously displayed session.
@@ -685,7 +700,8 @@ rejected by both the broker and helper.
 
 ### New
 
-**+ New** uses two focused steps.
+**New terminal** in the header Menu uses two focused steps. Dismissing the
+folder picker returns focus to the Menu button.
 
 1. **Choose a project folder** selects the native working directory on the
    server.
@@ -729,9 +745,9 @@ Each agent card reports:
 Only a ready card provides **Start Codex**, **Start Claude**, or **Start AGY**.
 A missing or misconfigured card shows a selectable provider command, **Copy**,
 **Official docs**, the required shell, the `--version` verification command,
-and **Check again**. Opening **New** always requests a fresh catalog so a tab
-cannot keep stale availability from an earlier server generation. The header
-**Refresh** and per-card **Check again** make the same
+and **Check again**. Opening **New terminal** always requests a fresh catalog
+so a tab cannot keep stale availability from an earlier server generation. The
+dialog's **Refresh** and per-card **Check again** make the same
 `/api/agent-catalog?refresh=true` request; it never executes the displayed
 command. Creation errors remain in the open dialog. A successful create closes
 it and attaches the terminal.
@@ -741,29 +757,31 @@ own **Start** action; later cards and their buttons remain reachable without
 scrolling the underlying terminal page.
 
 The server allows 20 managed sessions by default and accepts a configured
-capacity from 1 through 256. **Manage** displays the current/capacity value,
-for example `3/20`. The count includes the primary entry, ordinary running or
-stopped entries, and dedicated peer reviewers. **+ New** is disabled when the
-capacity is full; existing peer follow-ups remain available because they reuse
-their reviewer. A slot is released only by deleting a removable ordinary
-entry or closing its peer thread. Each entry has its own lifecycle, output
-replay buffer, and connected-client count; each running entry also owns a full
-agent process.
+capacity from 1 through 256. The Menu's **Manage sessions** entry displays the
+current/capacity value, for example `3/20`. The count includes the primary
+entry, ordinary running or stopped entries, and dedicated peer reviewers.
+**New terminal** is disabled when the capacity is full; existing peer
+follow-ups remain available because they reuse their reviewer. A slot is
+released only by deleting a removable ordinary entry or closing its peer
+thread. Each entry has its own lifecycle, output replay buffer, and
+connected-client count; each running entry also owns a full agent process.
 
 The Codex card always warns that approvals are disabled because the server
 launches Codex with `--yolo`. Claude and AGY cards show the same warning when
 their dangerous-mode switch is active. Such agents may edit files and run
 commands without asking for confirmation.
 
-### Connect / Reconnect
+### Reconnection
 
-This button closes and recreates only the browser WebSocket attachment. It is
-safe to use after a network interruption or stale screen. It does not restart
-or terminate the underlying agent process.
+There is no manual reconnect control. After a network interruption the browser
+recreates only its WebSocket attachment automatically, with increasing delays;
+reloading the page forces a fresh attachment immediately. Neither touches the
+underlying agent process.
 
 ### Restart
 
-**Restart** terminates and recreates the selected agent's PTY. Its stable
+**Restart _agent_** in Settings terminates and recreates the selected agent's
+PTY. Its stable
 `terminalId` remains, but its `sessionId`, PID, and PTY generation change.
 The agent profile and selected working folder remain the same, and a
 successful restart refreshes that folder in Recent. Output from the previous
@@ -771,38 +789,52 @@ generation is not treated as current live output.
 On Linux, termination targets the direct PTY child and cannot guarantee cleanup
 of a descendant that deliberately detached itself.
 
-### Fullscreen
+### Full screen
 
-Requests browser fullscreen mode. Leaving fullscreen does not affect the
-server session.
+**Full screen** in the header Menu requests browser fullscreen mode. Leaving
+fullscreen does not affect the server session.
+
+### Header Menu
+
+The ellipsis button (`…`) beside the status dot is labelled **Menu** on hover
+and for assistive technology. It opens a compact action menu holding
+**New terminal**, **Settings**, **Manage sessions**, and **Full screen** —
+general application actions rather than preferences. The menu supports mouse,
+touch, and keyboard (arrow keys move, Home/End jump, Escape closes and
+returns focus to the button, clicking outside dismisses), stays inside the
+viewport on narrow screens, and carries the update badge when a newer release
+is available.
 
 ### Desktop slash key
 
 On desktop, pressing an unmodified `/` while a non-editable header control has
 focus sends `/` to the connected terminal. This prevents Firefox Quick Find
-from taking over after using controls such as Reconnect. Slash remains normal
-text in form fields and dialogs, and modified shortcuts such as `Ctrl+/` are
-left to the browser or operating system.
+from taking over after using header controls such as the tabs or the **Menu**
+button. Slash is not routed while the menu popover is open. Slash remains
+normal text in form fields and dialogs, and modified shortcuts such as
+`Ctrl+/` are left to the browser or operating system.
 
 ### Mobile keys
 
-Shows or hides the mobile toolbar. Its order begins with Enter and the arrow
-keys, followed by Esc, Ctrl+C, Tab, Ctrl mode, Page Up/Down, Ctrl+L, Top, Live,
-and Hide, so the interrupt keys stay inside the first screenful on a narrow
-phone.
+The **Show mobile keys** setting shows or hides the mobile toolbar. Its order
+begins with Enter and the arrow keys, followed by Esc, Ctrl+C, Tab, Ctrl mode,
+Page Up/Down, Ctrl+L, Top, Live, and Hide, so the interrupt keys stay inside
+the first screenful on a narrow phone.
 
 - **PgUp/PgDn** moves through xterm's client-side scrollback.
 - **Top** moves to the oldest retained client-side line.
 - **Live** returns to current terminal output.
 - **Ctrl** applies Ctrl to the next typed ASCII letter and then turns off.
-- **Hide** hides the toolbar; it can be shown again from the header.
+- **Hide** hides the toolbar; it can be shown again from Settings.
 
 ### Settings
 
-Settings control font size, client scrollback, theme, cursor blinking, and the
-mobile toolbar. **Copy diagnostics** captures mobile viewport measurements
-after terminal focus; it does not include the authentication token, keyboard
-input, or terminal text.
+**Settings** opens from the header Menu and now contains only preferences and
+maintenance: font size, client scrollback, theme, cursor blinking, the mobile
+toolbar, software updates, diagnostics, **Restart _agent_**,
+**Terminate _agent_**, and **Forget token**. **Copy diagnostics** captures
+mobile viewport measurements after terminal focus; it does not include the
+authentication token, keyboard input, or terminal text.
 
 **Software updates** shows the running server version and the newest official
 stable release. **Check for updates** performs a read-only request to the fixed

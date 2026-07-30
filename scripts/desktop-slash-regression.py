@@ -86,8 +86,10 @@ def run_browser(
     page.wait_for_timeout(400)
     initial_active = page.evaluate("document.activeElement?.className ?? null")
 
-    reconnect = page.locator('[title="Reconnect the browser terminal"]')
-    reconnect.focus()
+    # Any non-editable header control works; the Menu trigger is always
+    # present. A bare "/" does not open the menu, so routing still applies.
+    header_button = page.locator(".header-menu-trigger")
+    header_button.focus()
     active_before_slash = page.evaluate(
         "document.activeElement?.getAttribute('title') ?? null"
     )
@@ -134,7 +136,7 @@ def run_browser(
     ]
 
     page.locator("#slash-regression-input").evaluate("element => element.remove()")
-    reconnect.focus()
+    header_button.focus()
     sent_frames.clear()
     page.keyboard.press("Control+/")
     page.wait_for_timeout(100)
@@ -215,14 +217,14 @@ def run_system_firefox(firefox_path: Path, port: int) -> dict[str, Any]:
         initial_active = driver.execute_script(
             "return document.activeElement?.className ?? null"
         )
-        reconnect = driver.find_element(
-            By.CSS_SELECTOR, '[title="Reconnect the browser terminal"]'
+        header_button = driver.find_element(
+            By.CSS_SELECTOR, ".header-menu-trigger"
         )
-        driver.execute_script("arguments[0].focus()", reconnect)
+        driver.execute_script("arguments[0].focus()", header_button)
         active_before_slash = driver.execute_script(
             "return document.activeElement?.getAttribute('title') ?? null"
         )
-        reconnect.send_keys("/")
+        header_button.send_keys("/")
         wait.until(
             lambda current: "/"
             in current.find_element(By.CSS_SELECTOR, ".xterm-rows").text

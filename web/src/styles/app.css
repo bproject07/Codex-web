@@ -154,7 +154,10 @@ button:disabled {
 }
 
 .app-header {
-  z-index: 2;
+  /* Above the terminal's atomic freeze frame (z-index: 2) so the open menu
+     popover is never painted over during a mobile resize commit; still far
+     below the dialog backdrops (10+). */
+  z-index: 3;
   display: flex;
   flex: none;
   flex-wrap: nowrap;
@@ -169,13 +172,28 @@ button:disabled {
   background: var(--color-chrome);
 }
 
-.app-identity {
-  flex: 1 1 14rem;
+/* Identity plus the overflow-menu trigger form the leading context group.
+   On the stacked mobile layout this whole group is the first header row. */
+.header-context {
+  display: flex;
+  flex: 0 1 auto;
   min-width: 0;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.app-identity {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .app-identity h1 {
   display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
   align-items: center;
   gap: 0.4rem;
   margin: 0;
@@ -183,6 +201,24 @@ button:disabled {
   font-weight: 650;
   letter-spacing: 0.01em;
 }
+
+/* The identity row is live context — project path, agent, and status dot —
+   rather than static branding. The path is the only flex item that shrinks;
+   it ellipsizes visually while the DOM text and the heading title keep the
+   complete native path. */
+.app-status {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+}
+
+.app-context-project {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 
 .community-label {
   display: inline-flex;
@@ -228,31 +264,102 @@ button:disabled {
   color: #cbc3ff;
 }
 
-.project-path {
-  max-width: min(50vw, 44rem);
-  overflow: hidden;
-  color: #aeb5c0;
-  font-size: 0.73rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.project-path span {
-  color: var(--color-text-faint);
-}
-
+/* Tabs and @cwt sit left, directly after the identity/menu group. Overflow
+   lives solely inside the .session-tabs strip, so the Menu trigger can never
+   be scrolled away with the tabs. */
 .header-actions {
   display: flex;
   min-width: 0;
-  max-width: 100%;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   align-items: center;
   gap: 0.35rem;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scroll-padding-inline: 0.25rem;
-  scrollbar-width: thin;
-  -webkit-overflow-scrolling: touch;
+}
+
+/* Overflow menu: the ellipsis trigger is the single route to New terminal,
+   Settings, Manage sessions, and Full screen. It anchors its popover in a
+   non-scrolling ancestor so the tab strip cannot clip it. */
+.header-menu {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.header-menu-trigger {
+  display: inline-flex;
+  min-width: 2.4rem;
+  min-height: 2rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  padding: 0.25rem 0.5rem;
+  color: #dfe5ee;
+}
+
+.header-menu-glyph {
+  font-size: 1.15rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  transform: translateY(-0.18em);
+}
+
+.header-menu-trigger[aria-expanded="true"] {
+  border-color: var(--color-border-strong);
+  background: var(--color-control-hover);
+}
+
+.header-menu-popover {
+  position: absolute;
+  z-index: 12;
+  top: calc(100% + 0.3rem);
+  left: 0;
+  display: flex;
+  min-width: min(14.5rem, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  max-height: min(60vh, 20rem);
+  flex-direction: column;
+  gap: 0.1rem;
+  overflow-y: auto;
+  padding: 0.3rem;
+  border: 1px solid #3b414b;
+  border-radius: 0.5rem;
+  background: var(--color-panel);
+  box-shadow: var(--shadow-panel);
+}
+
+.header-menu-popover--right {
+  right: 0;
+  left: auto;
+}
+
+.header-menu-item {
+  display: flex;
+  min-height: 2.5rem;
+  align-items: center;
+  gap: 0.5rem;
+  border-color: transparent;
+  background: transparent;
+  padding: 0.45rem 0.65rem;
+  color: #e7ebf1;
+  text-align: left;
+  font-size: 0.82rem;
+}
+
+.header-menu-item:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--color-control-hover);
+}
+
+.header-menu-item:disabled {
+  cursor: default;
+}
+
+.header-menu-item-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .header-actions button {
@@ -265,15 +372,29 @@ button:disabled {
 .session-switcher {
   display: flex;
   min-width: 0;
-  flex: none;
+  flex: 0 1 auto;
   align-items: center;
   gap: 0.2rem;
 }
 
+/* Positioning context for the overlay scroll arrows. Because the arrows sit
+   on top of the strip's edges instead of beside it, rendering them never
+   changes the measured width — so they appear exactly when the tabs really
+   overflow and disappear at the same threshold, with no oscillation and no
+   reserved gutters while the tabs still fit. */
+.session-tab-scroller {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  align-items: center;
+}
+
+/* No max-width cap: the tabs may spread across all of the header width that
+   remains after the identity, Menu, and @cwt before they start scrolling. */
 .session-tabs {
   display: flex;
   min-width: 5.5rem;
-  max-width: clamp(8rem, 28vw, 28rem);
   align-items: center;
   gap: 0.2rem;
   overflow-x: auto;
@@ -462,9 +583,7 @@ button:disabled {
   text-overflow: ellipsis;
 }
 
-.session-tab-label--compact,
-.session-new-label--compact,
-.session-manage-label--compact {
+.session-tab-label--compact {
   display: none;
 }
 
@@ -483,26 +602,31 @@ button:disabled {
 }
 
 .header-actions .session-scroll-button {
-  width: 1.75rem;
-  min-height: 2rem;
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  bottom: 0;
+  width: 1.6rem;
+  min-height: 0;
   padding: 0;
   border-color: #3b4654;
+  background: #1b212bee;
   color: #cbd8e8;
   font-size: 1.1rem;
   line-height: 1;
 }
 
+.session-scroll-button--left {
+  left: 0;
+}
+
+.session-scroll-button--right {
+  right: 0;
+}
+
 .header-actions .session-scroll-button:disabled {
   cursor: default;
   opacity: 0.3;
-}
-
-.header-actions .session-new-button {
-  min-width: 3.65rem;
-}
-
-.header-actions .session-manage-button {
-  min-width: 4.5rem;
 }
 
 .header-actions .session-peer-button {
@@ -512,38 +636,6 @@ button:disabled {
   color: #e4d8ff;
   font-family: "Cascadia Mono", Consolas, monospace;
   font-weight: 700;
-}
-
-.header-actions .header-action--sessions {
-  border-color: #466180;
-  background: #1d2a39;
-  color: #dceaff;
-}
-
-.header-actions .header-action--new {
-  border-color: #3f7851;
-  background: #183522;
-  color: #d9ffe5;
-}
-
-.status {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: 0.35rem;
-  min-height: 2rem;
-  border: 1px solid #343a43;
-  border-radius: var(--radius-pill);
-  padding: 0.2rem 0.55rem;
-  color: #c9ced6;
-  background: #1c2026;
-  font-size: 0.75rem;
-  white-space: nowrap;
-}
-
-.status-label--compact,
-.action-label--compact {
-  display: none;
 }
 
 .header-update-badge {
@@ -2406,7 +2498,8 @@ details.peer-composer__readiness p {
   padding-top: 1rem;
 }
 
-.settings-danger button:first-child {
+/* Restart and Terminate act on the live agent process; Forget token is last. */
+.settings-danger button:not(:last-child) {
   border-color: #7d3f3f;
   color: #ffb5b5;
 }
@@ -2420,38 +2513,28 @@ details.peer-composer__readiness p {
     padding-top: max(0.4rem, env(safe-area-inset-top));
   }
 
-  .app-identity,
+  .header-context,
   .header-actions {
     width: 100%;
   }
 
-  .project-path {
-    max-width: 100%;
+  /* Keep the ellipsis Menu — the only route to Settings — an easy target. */
+  .header-menu-trigger {
+    min-width: 2.5rem;
+    min-height: 2.5rem;
   }
 
-  .header-actions {
-    width: auto;
-    max-width: none;
-    margin-inline:
-      calc(0px - max(0.65rem, env(safe-area-inset-left)))
-      calc(0px - max(0.65rem, env(safe-area-inset-right)));
-    padding-inline:
-      max(0.65rem, env(safe-area-inset-left))
-      max(0.65rem, env(safe-area-inset-right));
-    padding-bottom: 0.05rem;
-  }
-
+  /* The tab strip is the only horizontal scroller in the header. */
   .session-tabs {
     min-width: 5rem;
-    max-width: min(46vw, 11rem);
+    max-width: none;
   }
 
   .session-scroll-button {
     display: none;
   }
 
-  .header-actions button,
-  .status {
+  .header-actions button {
     min-height: 2.5rem;
   }
 
@@ -2478,45 +2561,15 @@ details.peer-composer__readiness p {
     padding-bottom: 0.32rem;
   }
 
-  .app-identity {
-    display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-  }
-
   .app-identity h1 {
-    flex: none;
     font-size: 0.82rem;
   }
 
-  .project-path {
-    min-width: 0;
-    font-size: 0.68rem;
-  }
-
-  .project-path span {
+  .session-tab-label--full {
     display: none;
   }
 
-  .status-label--full,
-  .action-label--full {
-    display: none;
-  }
-
-  .status-label--compact,
-  .action-label--compact {
-    display: inline;
-  }
-
-  .session-tab-label--full,
-  .session-new-label--full,
-  .session-manage-label--full {
-    display: none;
-  }
-
-  .session-tab-label--compact,
-  .session-new-label--compact,
-  .session-manage-label--compact {
+  .session-tab-label--compact {
     display: inline;
   }
 
@@ -2539,18 +2592,24 @@ details.peer-composer__readiness p {
     font-size: 0.5rem;
   }
 
-  .header-actions .session-new-button,
-  .header-actions .session-manage-button,
   .header-actions .session-peer-button {
     min-width: 2.75rem;
+  }
+
+  .header-menu-trigger {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .header-menu-item {
+    min-height: 2.75rem;
   }
 
   .header-actions {
     gap: 0.28rem;
   }
 
-  .header-actions button,
-  .status {
+  .header-actions button {
     min-height: 2.75rem;
     padding-inline: 0.6rem;
   }
@@ -2825,12 +2884,18 @@ details.peer-composer__readiness p {
     padding-bottom: 0.22rem;
   }
 
+  /* The identity row now carries the status dot and live context, so it
+     stays visible with the keyboard open — just tighter. */
   .app-identity h1 {
-    display: none;
+    font-size: 0.78rem;
   }
 
-  .header-actions button,
-  .status {
+  .header-actions button {
+    min-height: 2.25rem;
+  }
+
+  .header-menu-trigger {
+    min-width: 2.25rem;
     min-height: 2.25rem;
   }
 
@@ -2897,6 +2962,11 @@ details.peer-composer__readiness p {
     gap: 0.5rem;
   }
 
+  .header-context {
+    width: auto;
+    flex: 0 1 auto;
+  }
+
   .app-identity {
     width: auto;
     max-width: min(28vw, 14rem);
@@ -2909,9 +2979,6 @@ details.peer-composer__readiness p {
     padding-inline: 0;
   }
 
-  .session-tabs {
-    max-width: min(38vw, 18rem);
-  }
 }
 
 @media (min-width: 900px) and (pointer: fine) {

@@ -482,7 +482,7 @@ def wait_for_application(page: Page, port: int, token: str) -> None:
         wait_until="domcontentloaded",
     )
     page.locator(".status--connected").wait_for(state="visible", timeout=20_000)
-    page.locator(".session-new-button").wait_for(state="visible")
+    page.locator(".header-menu-trigger").wait_for(state="visible")
 
 
 def assert_focus_inside(page: Page, selector: str) -> str:
@@ -604,6 +604,9 @@ def assert_browse_navigation_focus(page: Page) -> str:
 
 
 def open_workspace_picker(page: Page) -> Locator:
+    # "New terminal" lives in the header's ellipsis Menu.
+    page.locator(".header-menu-trigger").click()
+    page.locator("[role='menu']").wait_for(state="visible")
     page.locator(".session-new-button").click()
     picker = page.locator(".workspace-picker")
     picker.wait_for(state="visible")
@@ -641,17 +644,22 @@ def browse_to_path(page: Page, path: Path) -> Locator:
     return use_folder
 
 
+def selected_project_path(page: Page) -> str:
+    # The header identity shows a compact project name; the full native path
+    # is retained in the heading's title attribute.
+    return page.locator(".app-context").get_attribute("title") or ""
+
+
 def wait_for_selected_project(page: Page, expected: Path) -> None:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        project = page.locator(".project-path").inner_text()
-        if paths_equal(project.removeprefix("Project:").strip(), expected):
+        if paths_equal(selected_project_path(page).strip(), expected):
             page.locator(".status--connected").wait_for(state="visible", timeout=20_000)
             return
         page.wait_for_timeout(50)
     raise AssertionError(
         f"browser did not attach to expected project {expected}: "
-        f"{page.locator('.project-path').inner_text()!r}"
+        f"{selected_project_path(page)!r}"
     )
 
 
@@ -1028,7 +1036,7 @@ def exercise_mobile_layout(
         picker.wait_for(state="hidden")
         page.wait_for_function(
             "() => document.activeElement?.classList.contains("
-            "'session-new-button')"
+            "'header-menu-trigger')"
         )
 
         return {
@@ -1037,7 +1045,7 @@ def exercise_mobile_layout(
             "shortViewport": short_metrics,
             "shortControls": sorted(short_controls),
             "initialWorkspaceFocus": initial_focus,
-            "focusReturnedToNew": True,
+            "focusReturnedToMenuTrigger": True,
         }
     finally:
         context.close()

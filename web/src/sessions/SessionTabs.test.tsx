@@ -63,16 +63,13 @@ describe("SessionTabs", () => {
     const html = renderToStaticMarkup(
       <SessionTabs
         sessions={[PRIMARY, REVIEWER]}
-        maxSessions={20}
         selectedTerminalId={PRIMARY.terminalId}
         busy={false}
         peerThreads={[THREAD]}
         peerDisabledReason={null}
         onSelect={vi.fn()}
         onClose={vi.fn()}
-        onCreate={vi.fn()}
         onPeer={vi.fn()}
-        onManage={vi.fn()}
       />,
     );
 
@@ -84,6 +81,10 @@ describe("SessionTabs", () => {
     expect(html).toContain(
       '</button><button type="button" class="session-tab-close"',
     );
+    // Scroll arrows only exist after real measured overflow — never in the
+    // initial layout, where the tabs own the full available width.
+    expect(html).toContain("session-tab-scroller");
+    expect(html).not.toContain("session-scroll-button");
   });
 
   it("explains why peer collaboration is disabled for a stopped source", () => {
@@ -92,16 +93,13 @@ describe("SessionTabs", () => {
     const html = renderToStaticMarkup(
       <SessionTabs
         sessions={[{ ...PRIMARY, status: "exited" }]}
-        maxSessions={20}
         selectedTerminalId={PRIMARY.terminalId}
         busy={false}
         peerThreads={[]}
         peerDisabledReason={reason}
         onSelect={vi.fn()}
         onClose={vi.fn()}
-        onCreate={vi.fn()}
         onPeer={vi.fn()}
-        onManage={vi.fn()}
       />,
     );
 
@@ -110,60 +108,27 @@ describe("SessionTabs", () => {
     expect(html).toContain("disabled");
   });
 
-  it("shows configured capacity and disables only new interactive sessions", () => {
+  it("renders only tabs and the @cwt launcher in the top strip", () => {
     const html = renderToStaticMarkup(
       <SessionTabs
         sessions={[PRIMARY, REVIEWER]}
-        maxSessions={2}
         selectedTerminalId={PRIMARY.terminalId}
         busy={false}
         peerThreads={[THREAD]}
         peerDisabledReason={null}
         onSelect={vi.fn()}
         onClose={vi.fn()}
-        onCreate={vi.fn()}
         onPeer={vi.fn()}
-        onManage={vi.fn()}
       />,
     );
 
-    const newButton = html.match(
-      /<button[^>]*class="[^"]*session-new-button[^"]*"[^>]*>/,
-    )?.[0];
     const peerButton = html.match(
       /<button[^>]*class="[^"]*session-peer-button[^"]*"[^>]*>/,
     )?.[0];
 
-    expect(html).toContain("Manage 2 of 2 terminal sessions");
-    expect(html).toContain("Manage 2/2");
-    expect(newButton).toContain("Session capacity reached (2 of 2)");
-    expect(newButton).toContain("disabled");
     expect(peerButton).toContain("Open @cwt peer collaboration");
     expect(peerButton).not.toContain("disabled");
-  });
-
-  it("keeps session creation available when capacity metadata is unknown", () => {
-    const html = renderToStaticMarkup(
-      <SessionTabs
-        sessions={[PRIMARY]}
-        maxSessions={null}
-        selectedTerminalId={PRIMARY.terminalId}
-        busy={false}
-        peerThreads={[]}
-        peerDisabledReason={null}
-        onSelect={vi.fn()}
-        onClose={vi.fn()}
-        onCreate={vi.fn()}
-        onPeer={vi.fn()}
-        onManage={vi.fn()}
-      />,
-    );
-    const newButton = html.match(
-      /<button[^>]*class="[^"]*session-new-button[^"]*"[^>]*>/,
-    )?.[0];
-
-    expect(html).toContain("Manage 1 terminal session");
-    expect(newButton).toContain("Choose an agent for a new terminal");
-    expect(newButton).not.toContain("disabled");
+    expect(html).not.toContain("session-new-button");
+    expect(html).not.toContain("session-manage-button");
   });
 });
