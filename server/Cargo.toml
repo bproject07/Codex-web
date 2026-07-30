@@ -1,6 +1,6 @@
 [package]
 name = "codex-web-terminal"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version = "1.88"
 description = "Run Codex, Claude, and AGY CLIs in native PTYs from a browser"

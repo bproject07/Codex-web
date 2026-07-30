@@ -324,6 +324,12 @@ authentication. Codex Web Terminal neither copies nor reads agent credentials.
 Each child inherits the server account's environment and existing CLI
 configuration.
 
+Every Codex terminal is launched as `codex --yolo`, including the primary
+terminal, **New**, restarts, and dedicated `@cwt` reviewers. This fixed mode
+disables Codex approval prompts and sandboxing. It is not used for the
+read-only `codex --version` discovery probe. Run Codex Web Terminal only under
+an operating-system account and on workspaces whose full access is acceptable.
+
 The browser shows missing or misconfigured agents together with an official
 manual command and verification command. Run the command in a trusted terminal
 on the **server host**, then choose **Refresh** or **Check again**. There is
@@ -671,10 +677,12 @@ Command values are treated as executable names or file paths, not as arbitrary
 shell expressions. A discovered `.cmd` entry point is always invoked through
 `cmd.exe /d /s /c` on Windows, which is required for the npm Codex package. On
 Unix, the resolved executable is launched directly without a shell wrapper.
-The two permission switches add one fixed argument to the selected process.
-On Unix and Windows `cmd` launches it remains a distinct process argument. The
-Windows PowerShell wrapper encodes it as a single-quoted literal with embedded
-quotes escaped. It cannot be selected or altered by a browser client.
+Codex always receives the fixed `--yolo` argument. The two optional permission
+switches add the fixed upstream `--dangerously-skip-permissions` argument to
+Claude or AGY. On Unix and Windows `cmd` launches each remains a distinct
+process argument. The Windows PowerShell wrapper encodes each as a
+single-quoted literal with embedded quotes escaped. These arguments cannot be
+selected or altered by a browser client.
 
 With auto-detection enabled (the default), the primary executable name follows
 `--primary-agent`, and the server probes `codex`, `claude`, and `agy` plus
@@ -702,8 +710,12 @@ paths are useful for services with a restricted `PATH`:
   --agy-command "$env:LOCALAPPDATA\agy\bin\agy.exe"
 ```
 
+Codex starts as `codex --yolo` without an additional server switch. This
+disables both Codex approvals and sandboxing for the primary session, **New**,
+restarts, and `@cwt` reviewers.
+
 Add the following switches only in a trusted, isolated environment when every
-tool action should run without a permission prompt:
+Claude or AGY tool action should run without a permission prompt:
 
 ```text
 --claude-dangerously-skip-permissions
@@ -1036,11 +1048,13 @@ strip scrolls horizontally when it overflows; it does not send `/new` or
 
 This process has the same operating-system permissions and environment as the
 user who starts it. Anyone with the authenticated URL can interact with the
-selected agent, approve actions it presents, and potentially cause commands to
-run in any directory readable by that operating-system account. The same token
-authorizes filesystem-root discovery, directory browsing, manual absolute-path
-resolution, Favorites/Recent access, and PTY launch. `--project` is only the
-default working directory; it is not a sandbox or an authorization boundary.
+selected agent and potentially cause commands to run in any directory readable
+by that operating-system account. Codex sessions always use `--yolo`, so Codex
+approval prompts and sandboxing are disabled; Claude and AGY can be configured
+similarly. The same token authorizes filesystem-root discovery, directory
+browsing, manual absolute-path resolution, Favorites/Recent access, and PTY
+launch. `--project` is only the default working directory; it is not a sandbox
+or an authorization boundary.
 
 Security measures in this application:
 
@@ -1330,6 +1344,8 @@ when available.
 - Dedicated peer tabs isolate conversational context from ordinary tabs, but
   are not an operating-system security boundary. All configured CLIs run as
   the same server account.
+- Every Codex session receives `--yolo`; Codex approvals and sandboxing are
+  therefore disabled. There is currently no server or browser opt-out.
 - Agent CLIs must use their tool runner to call the loopback peer helper.
   Provider policy, sandboxing, or a declined tool call can leave a supervised
   turn waiting; terminal output is never parsed to infer completion.

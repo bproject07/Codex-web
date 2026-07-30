@@ -227,17 +227,20 @@ fn agent_command_override(config: &Config, agent: AgentKind) -> Option<String> {
 
 fn dangerously_skip_permissions(config: &Config, agent: AgentKind) -> bool {
     match agent {
-        AgentKind::Codex => false,
+        AgentKind::Codex => true,
         AgentKind::Claude => config.claude_dangerously_skip_permissions,
         AgentKind::Agy => config.agy_dangerously_skip_permissions,
     }
 }
 
 fn agent_arguments(config: &Config, agent: AgentKind) -> Vec<String> {
-    dangerously_skip_permissions(config, agent)
-        .then(|| "--dangerously-skip-permissions".to_owned())
-        .into_iter()
-        .collect()
+    match agent {
+        AgentKind::Codex => vec!["--yolo".to_owned()],
+        AgentKind::Claude | AgentKind::Agy => dangerously_skip_permissions(config, agent)
+            .then(|| "--dangerously-skip-permissions".to_owned())
+            .into_iter()
+            .collect(),
+    }
 }
 
 const fn default_command(agent: AgentKind) -> &'static str {
@@ -412,6 +415,7 @@ mod tests {
             .expect("Codex profile");
 
         assert_eq!(codex.command, "trusted-codex-wrapper");
+        assert_eq!(codex.arguments, ["--yolo"]);
     }
 
     #[test]
@@ -422,13 +426,23 @@ mod tests {
 
         let profiles = build_agent_profiles(&config);
 
-        assert!(profiles.primary.arguments.is_empty());
+        assert_eq!(profiles.primary.arguments, ["--yolo"]);
+        assert_eq!(profiles.new_session.arguments, ["--yolo"]);
         assert_eq!(
             profiles
                 .additional
                 .iter()
                 .find(|profile| profile.agent == AgentKind::Claude)
                 .expect("Claude profile")
+                .arguments,
+            ["--dangerously-skip-permissions"]
+        );
+        assert_eq!(
+            profiles
+                .additional
+                .iter()
+                .find(|profile| profile.agent == AgentKind::Agy)
+                .expect("AGY profile")
                 .arguments,
             ["--dangerously-skip-permissions"]
         );
@@ -457,7 +471,7 @@ mod tests {
                 shell: ShellKind::Powershell,
             },
             explicit_override: true,
-            dangerously_skip_permissions: false,
+            dangerously_skip_permissions: true,
         };
         let catalog = AgentCatalog {
             profiles: Arc::new(vec![profile]),
@@ -475,7 +489,7 @@ mod tests {
         assert_eq!(agent["state"], "ready");
         assert_eq!(agent["configuration"], "override");
         assert_eq!(agent["version"], "9.8.7");
-        assert_eq!(agent["dangerouslySkipPermissions"], false);
+        assert_eq!(agent["dangerouslySkipPermissions"], true);
         assert_eq!(agent["install"]["verifyCommand"], "codex --version");
         assert_eq!(agent["install"]["requiresServerAccess"], true);
         assert!(agent.get("path").is_none());

@@ -161,11 +161,15 @@ Unix:
 
 Do not unify these paths through a generic shell command string. The command
 configuration intentionally rejects arbitrary shell expressions.
-Optional Claude and AGY dangerous-mode switches append only the fixed upstream
-`--dangerously-skip-permissions` argument. Unix and Windows `cmd` launches keep
-it as a distinct process argument. The Windows PowerShell wrapper must encode
-each fixed argument as an independently single-quoted literal with embedded
-quotes escaped. Never accept executable arguments from the browser API.
+Every Codex profile appends only the fixed upstream `--yolo` argument; this
+applies to the primary terminal, **New**, restarts, and dedicated peer
+reviewers, including executable overrides. Version probes remain exactly
+`codex --version`. Optional Claude and AGY dangerous-mode switches append only
+the fixed upstream `--dangerously-skip-permissions` argument. Unix and Windows
+`cmd` launches keep fixed arguments distinct. The Windows PowerShell wrapper
+must encode each fixed argument as an independently single-quoted literal with
+embedded quotes escaped. Never accept executable arguments from the browser
+API.
 
 Agent auto-detection is also a platform boundary:
 

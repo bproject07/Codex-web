@@ -15,6 +15,12 @@ operating-system account running the server. Successful launches also update
 Recent. The terminal process inherits that account's permissions and
 environment.
 
+Every Codex process is launched with `--yolo`, which disables Codex approvals
+and sandboxing. This applies to the primary terminal, new and restarted
+sessions, and dedicated `@cwt` reviewers. There is currently no server or
+browser opt-out. Treat possession of the bearer token as authority to cause
+unprompted Codex actions with the full permissions of the server account.
+
 All `/api/filesystem/*`, `/api/workspaces*`, and session endpoints require the
 same bearer token. Directory IDs preserve native Windows UTF-16 or Unix path
 bytes as an opaque API transport value. They are neither secret nor encrypted,

@@ -897,14 +897,14 @@ mod tests {
     #[test]
     fn passes_fixed_arguments_to_an_executable_through_powershell() {
         let resolved = ResolvedCommand {
-            path: PathBuf::from(r"C:\Program Files\Claude\claude.exe"),
+            path: PathBuf::from(r"C:\Program Files\Codex\codex.exe"),
             is_batch_file: false,
         };
         let config = TerminalConfig {
             project_dir: PathBuf::from(r"C:\project"),
             command: "ignored".to_owned(),
-            arguments: vec!["--dangerously-skip-permissions".to_owned()],
-            agent: AgentKind::Claude,
+            arguments: vec!["--yolo".to_owned()],
+            agent: AgentKind::Codex,
             shell: ShellKind::Powershell,
         };
 
@@ -914,8 +914,7 @@ mod tests {
             "-NoLogo".into(),
             "-NoProfile".into(),
             "-Command".into(),
-            "& 'C:\\Program Files\\Claude\\claude.exe' '--dangerously-skip-permissions'; exit $LASTEXITCODE"
-                .into(),
+            "& 'C:\\Program Files\\Codex\\codex.exe' '--yolo'; exit $LASTEXITCODE".into(),
         ];
 
         assert_eq!(command.get_argv(), &expected);
@@ -1041,7 +1040,7 @@ mod unix_tests {
         let config = TerminalConfig {
             project_dir: PathBuf::from("/tmp/codex-web-project"),
             command: "ignored".to_owned(),
-            arguments: vec!["--dangerously-skip-permissions".to_owned()],
+            arguments: vec!["--yolo".to_owned()],
             agent: AgentKind::Codex,
             shell: ShellKind::Powershell,
         };
@@ -1049,7 +1048,7 @@ mod unix_tests {
         let command = pty_command(&config, &resolved);
         let expected = vec![
             resolved.path.clone().into_os_string(),
-            "--dangerously-skip-permissions".into(),
+            "--yolo".into(),
         ];
 
         assert_eq!(
@@ -1068,7 +1067,7 @@ mod unix_tests {
         let command_path = directory.path().join("fake-codex");
         std::fs::write(
             &command_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'codex-cli 1.0.0'\n  exit 0\nfi\n[ \"$1\" = \"--dangerously-skip-permissions\" ]\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  [ -z \"$2\" ] || exit 9\n  echo 'codex-cli 1.0.0'\n  exit 0\nfi\n[ \"$1\" = \"--yolo\" ]\n",
         )
         .expect("write fake Codex command");
 
@@ -1081,7 +1080,7 @@ mod unix_tests {
         let config = TerminalConfig {
             project_dir: directory.path().to_path_buf(),
             command: command_path.to_string_lossy().into_owned(),
-            arguments: vec!["--dangerously-skip-permissions".to_owned()],
+            arguments: vec!["--yolo".to_owned()],
             agent: AgentKind::Codex,
             shell: ShellKind::Powershell,
         };

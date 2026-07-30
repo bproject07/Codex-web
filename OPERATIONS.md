@@ -440,6 +440,13 @@ only the inherited nesting markers `CODEX_THREAD_ID` and `CLAUDECODE` before
 version checks and PTY startup; authentication and provider environment
 variables remain untouched.
 
+Every Codex profile receives one fixed `--yolo` process argument. This applies
+to the primary terminal, **New**, restarts, and dedicated `@cwt` reviewers,
+including trusted executable overrides. It disables Codex approval prompts and
+sandboxing. The bounded discovery probe remains exactly `codex --version`.
+There is currently no server or browser opt-out, so custom Codex wrappers must
+accept or forward `--yolo`.
+
 To deliberately auto-approve every tool action for both optional profiles:
 
 ```powershell
@@ -743,9 +750,10 @@ entry or closing its peer thread. Each entry has its own lifecycle, output
 replay buffer, and connected-client count; each running entry also owns a full
 agent process.
 
-When a dangerous-mode switch is active, the card warns that approvals are
-disabled and the agent may edit files and run commands without asking for
-confirmation.
+The Codex card always warns that approvals are disabled because the server
+launches Codex with `--yolo`. Claude and AGY cards show the same warning when
+their dangerous-mode switch is active. Such agents may edit files and run
+commands without asking for confirmation.
 
 ### Connect / Reconnect
 
