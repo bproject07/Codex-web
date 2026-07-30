@@ -1046,10 +1046,7 @@ mod unix_tests {
         };
 
         let command = pty_command(&config, &resolved);
-        let expected = vec![
-            resolved.path.clone().into_os_string(),
-            "--yolo".into(),
-        ];
+        let expected = vec![resolved.path.clone().into_os_string(), "--yolo".into()];
 
         assert_eq!(
             command.get_argv(),
