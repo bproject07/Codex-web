@@ -124,7 +124,10 @@ describe("translateAndroidImeReplacement", () => {
       "\u007f\u007fhe",
     );
     expect(translateAndroidImeReplacement("dont", "don't")).toBe(
-      "\u007f\u007f\u007f\u007fon't",
+      "\u007f't",
+    );
+    expect(translateAndroidImeReplacement("bad", "new")).toBe(
+      "\u007f\u007f\u007fnew",
     );
   });
 
