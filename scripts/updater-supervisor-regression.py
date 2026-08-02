@@ -26,6 +26,7 @@ FIXTURE_TOKEN = "synthetic-supervisor-regression-token"
 CONTROL_DIRECTORY = ".updater-supervisor-regression"
 CONTROL_FILE = "control.json"
 LIVE_PORT = 8789
+SUPERVISOR_READINESS_STABILITY_SECONDS = 1.0
 
 
 class RegressionFailure(RuntimeError):
@@ -329,6 +330,63 @@ def wait_for_generation(
     )
 
 
+def wait_for_stable_generation(
+    process: subprocess.Popen[str],
+    port: int,
+    expected_version: str,
+    expected_worker_id: int,
+    root_process_id: int,
+    timeout: float,
+    *,
+    reported_root_process_id: int | None = None,
+) -> None:
+    if reported_root_process_id is None:
+        reported_root_process_id = root_process_id
+    deadline = time.monotonic() + timeout
+    stable_since: float | None = None
+    last_error = "no health response"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RegressionFailure(
+                f"root supervisor {root_process_id} exited while settling a generation"
+            )
+        try:
+            value = health(port)
+            if (
+                value.get("status") == "ok"
+                and value.get("serverVersion") == expected_version
+                and value.get("processId") == expected_worker_id
+                and value.get("rootProcessId") == reported_root_process_id
+                and value.get("supervisedWorker") is True
+            ):
+                now = time.monotonic()
+                if stable_since is None:
+                    stable_since = now
+                if (
+                    now - stable_since
+                    >= SUPERVISOR_READINESS_STABILITY_SECONDS
+                ):
+                    return
+            else:
+                stable_since = None
+                last_error = f"unexpected health response: {value}"
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            OSError,
+            RegressionFailure,
+            json.JSONDecodeError,
+        ) as error:
+            stable_since = None
+            last_error = str(error)
+        time.sleep(0.05)
+    raise RegressionFailure(
+        f"generation {expected_version} did not remain stable within "
+        f"{timeout:.1f}s ({last_error})"
+    )
+
+
 def assert_active(
     state_directory: Path,
     expected_version: str,
@@ -557,6 +615,18 @@ def run_regression(args: argparse.Namespace) -> dict[str, Any]:
             current_worker_id = restarted_worker_id
             assert_active(state_directory, second_version, first_version)
             assert_pending_removed(state_directory)
+            # The public listener becomes observable before the stable root has
+            # completed its three consecutive readiness probes. Do not inject
+            # the next reserved-status transition into that validation window.
+            wait_for_stable_generation(
+                process,
+                port,
+                second_version,
+                restarted_worker_id,
+                root_process_id,
+                args.timeout,
+                reported_root_process_id=reported_root_process_id,
+            )
 
             create_release(
                 state_directory,

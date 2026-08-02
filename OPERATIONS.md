@@ -907,7 +907,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.3.0",
+  "serverVersion": "0.3.1",
   "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,
