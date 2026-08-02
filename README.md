@@ -1071,7 +1071,9 @@ automatically turns off. Page Up/Down send the standard terminal input
 sequences to the selected PTY, including full-screen alternate-buffer TUIs.
 Top and Live continue to navigate xterm's client-side scrollback.
 On touch/coarse-pointer devices, xterm's vertical scrollbar has a 28 px
-draggable target while its painted thumb stays narrow.
+draggable target while reserving only 4 px of terminal width. Its painted
+thumb stays hidden until the right-edge target is touched, remains visible
+while it is dragged, and hides after 20 seconds without scrollbar interaction.
 The Android IME guard also converts keyboard replacement/autocorrect edits to
 the corresponding terminal Backspace-plus-suffix input, avoiding duplicated
 whole-word output from overlapping Chrome/Gboard and xterm fallbacks.

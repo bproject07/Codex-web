@@ -3,12 +3,12 @@ export interface TerminalSize {
   rows: number;
 }
 
-const MOBILE_TERMINAL_SCROLLBAR_WIDTH = 28;
+const MOBILE_TERMINAL_SCROLLBAR_LAYOUT_WIDTH = 4;
 
 export function terminalScrollbarWidth(
   coarsePointer: boolean,
 ): number | undefined {
-  return coarsePointer ? MOBILE_TERMINAL_SCROLLBAR_WIDTH : undefined;
+  return coarsePointer ? MOBILE_TERMINAL_SCROLLBAR_LAYOUT_WIDTH : undefined;
 }
 
 export function isMobileRowOnlyResize(

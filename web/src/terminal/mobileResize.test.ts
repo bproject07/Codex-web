@@ -5,8 +5,8 @@ import {
 } from "./mobileResize";
 
 describe("terminalScrollbarWidth", () => {
-  it("doubles xterm's default touch scrollbar target without changing desktop", () => {
-    expect(terminalScrollbarWidth(true)).toBe(28);
+  it("reserves only a narrow mobile rail without changing desktop", () => {
+    expect(terminalScrollbarWidth(true)).toBe(4);
     expect(terminalScrollbarWidth(false)).toBeUndefined();
   });
 });

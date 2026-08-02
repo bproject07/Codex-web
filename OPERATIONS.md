@@ -828,9 +828,11 @@ the first screenful on a narrow phone.
 - **Ctrl** applies Ctrl to the next typed ASCII letter and then turns off.
 - **Hide** hides the toolbar; it can be shown again from Settings.
 
-On a touch/coarse-pointer device, xterm's vertical scrollbar uses a wider
-drag target while keeping a narrow visible thumb. You can still swipe anywhere
-inside the terminal to move through scrollback.
+On a touch/coarse-pointer device, xterm reserves only 4 px of terminal width
+for its vertical scrollbar but overlays a 28 px right-edge drag target. The
+narrow thumb appears when that target is touched, remains visible throughout
+the drag, and hides after 20 seconds without scrollbar interaction. You can
+still swipe anywhere inside the terminal to move through scrollback.
 
 On Android, replacement/autocorrect events are converted to terminal
 Backspace-plus-suffix input. Diagnostics count these translations but never
@@ -907,7 +909,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.3.1",
+  "serverVersion": "0.3.2",
   "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,

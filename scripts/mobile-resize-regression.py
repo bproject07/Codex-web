@@ -198,6 +198,61 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
             )
             page.locator(".xterm-helper-textarea").wait_for(state="attached")
             page.wait_for_timeout(1_500)
+
+            scrollbar = page.locator(
+                ".terminal-view "
+                ".xterm-scrollable-element > .scrollbar.vertical"
+            )
+            slider = scrollbar.locator(":scope > .slider")
+            scrollbar.wait_for(state="attached")
+            mobile_scrollbar = page.evaluate(
+                """() => {
+                  const terminal = document.querySelector(".terminal-view");
+                  const scrollbar = terminal?.querySelector(
+                    ".xterm-scrollable-element > .scrollbar.vertical",
+                  );
+                  const slider = scrollbar?.querySelector(":scope > .slider");
+                  return {
+                    enabled: terminal?.classList.contains(
+                      "terminal-view--mobile-scrollbar",
+                    ) ?? false,
+                    visible: terminal?.classList.contains(
+                      "terminal-view--mobile-scrollbar-visible",
+                    ) ?? false,
+                    layoutWidth: scrollbar?.style.width ?? null,
+                    touchWidth: scrollbar?.getBoundingClientRect().width ?? null,
+                    opacity: scrollbar
+                      ? getComputedStyle(scrollbar).opacity
+                      : null,
+                    sliderWidth: slider?.getBoundingClientRect().width ?? null,
+                  };
+                }"""
+            )
+            slider_box = slider.bounding_box()
+            if slider_box is None:
+                raise AssertionError("mobile scrollbar slider has no bounds")
+            page.touchscreen.tap(
+                slider_box["x"] + slider_box["width"] / 2,
+                slider_box["y"] + slider_box["height"] / 2,
+            )
+            page.wait_for_timeout(250)
+            mobile_scrollbar["revealedAfterTouch"] = page.evaluate(
+                """() => {
+                  const terminal = document.querySelector(".terminal-view");
+                  const scrollbar = terminal?.querySelector(
+                    ".xterm-scrollable-element > .scrollbar.vertical",
+                  );
+                  return {
+                    visible: terminal?.classList.contains(
+                      "terminal-view--mobile-scrollbar-visible",
+                    ) ?? false,
+                    opacity: scrollbar
+                      ? getComputedStyle(scrollbar).opacity
+                      : null,
+                  };
+                }"""
+            )
+
             page.evaluate(
                 """() => {
                   window.__atomicFrameEvents = [];
@@ -375,6 +430,7 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                 "openResizeFrames": open_frames,
                 "closeResizeFrames": frames,
                 "atomicFrameEvents": atomic_events,
+                "mobileScrollbar": mobile_scrollbar,
             }
 
             if not args.observe:
@@ -393,6 +449,18 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                 # terminal row at rest versus the pre-menu layout.
                 assert result["rows"][1] >= 29
                 assert result["pageScrollY"] == [0]
+                assert result["mobileScrollbar"] == {
+                    "enabled": True,
+                    "visible": False,
+                    "layoutWidth": "4px",
+                    "touchWidth": 28,
+                    "opacity": "0",
+                    "sliderWidth": 28,
+                    "revealedAfterTouch": {
+                        "visible": True,
+                        "opacity": "1",
+                    },
+                }
                 assert result["replayCount"][0] == result["replayCount"][1]
                 assert len(result["openResizeFrames"]) == 1
                 assert result["openResizeFrames"][0]["rows"] <= 16

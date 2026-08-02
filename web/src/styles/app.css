@@ -775,15 +775,32 @@ button:disabled {
 }
 
 @media (pointer: coarse) {
-  /* xterm 6 renders its own 14px scrollbar. TerminalView doubles that
-     pointer target on touch devices; the transparent border keeps the
-     painted thumb slim while the full slider remains draggable. */
-  .terminal-view
+  /* FitAddon reserves only the 4px configured by TerminalView. The custom
+     xterm rail overlays a 28px touch target, so it remains easy to grab
+     without permanently taking terminal columns away. */
+  .terminal-view--mobile-scrollbar
+    .xterm-scrollable-element
+    > .scrollbar.vertical {
+    width: 28px !important;
+    opacity: 0;
+    pointer-events: auto !important;
+    touch-action: none;
+    transition: opacity 180ms linear;
+  }
+
+  .terminal-view--mobile-scrollbar-visible
+    .xterm-scrollable-element
+    > .scrollbar.vertical {
+    opacity: 1;
+  }
+
+  .terminal-view--mobile-scrollbar
     .xterm-scrollable-element
     > .scrollbar.vertical
     > .slider {
+    width: 28px !important;
     box-sizing: border-box;
-    border-inline: 8px solid transparent;
+    border-inline: 11px solid transparent;
     border-radius: 999px;
     background-clip: padding-box;
   }

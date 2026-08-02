@@ -29,6 +29,10 @@ import {
   isMobileRowOnlyResize,
   terminalScrollbarWidth,
 } from "./mobileResize";
+import {
+  createMobileScrollbarVisibilityController,
+  type MobileScrollbarVisibilityController,
+} from "./mobileScrollbar";
 import { takeReplayBatch, type BufferedReplay } from "./replay";
 import {
   TERMINAL_THEMES,
@@ -218,6 +222,14 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     const replayRef = useRef<BufferedReplay | null>(null);
     const ctrlModeRef = useRef(ctrlMode);
     const [isRestoring, setIsRestoring] = useState(false);
+    const [mobileScrollbarEnabled] = useState(
+      () =>
+        typeof window !== "undefined" &&
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(pointer: coarse)").matches,
+    );
+    const [mobileScrollbarVisible, setMobileScrollbarVisible] =
+      useState(false);
     const callbackRef = useRef({
       onCtrlConsumed,
       onConnectionStatus,
@@ -391,7 +403,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
               isMobileRowOnlyResize(
                 lastSize,
                 terminal,
-                window.matchMedia("(pointer: coarse)").matches,
+                mobileScrollbarEnabled,
               );
             if (mobileRowOnlyResize) {
               beginMobileResizeCapture(socket);
@@ -502,7 +514,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       }
 
       const scrollbarWidth = terminalScrollbarWidth(
-        window.matchMedia("(pointer: coarse)").matches,
+        mobileScrollbarEnabled,
       );
       const terminal = new Terminal({
         cursorBlink: settings.cursorBlink,
@@ -525,6 +537,65 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
 
       terminalRef.current = terminal;
       fitAddonRef.current = fitAddon;
+
+      let mobileScrollbarController:
+        | MobileScrollbarVisibilityController
+        | null = null;
+      let removeMobileScrollbarListeners: (() => void) | null = null;
+      if (mobileScrollbarEnabled) {
+        const scrollbar =
+          terminal.element?.querySelector<HTMLElement>(
+            ".xterm-scrollable-element > .scrollbar.vertical",
+          ) ?? null;
+        if (scrollbar) {
+          mobileScrollbarController =
+            createMobileScrollbarVisibilityController(
+              setMobileScrollbarVisible,
+              {
+                setTimeout: (callback, delay) =>
+                  window.setTimeout(callback, delay),
+                clearTimeout: (timer) => window.clearTimeout(timer),
+              },
+            );
+
+          const isScrollbarTarget = (event: Event) =>
+            event.target instanceof window.Node &&
+            scrollbar.contains(event.target);
+          const onPointerDown = (event: PointerEvent) => {
+            if (isScrollbarTarget(event)) {
+              mobileScrollbarController?.pointerDown(event.pointerId);
+            }
+          };
+          const onPointerMove = (event: PointerEvent) => {
+            mobileScrollbarController?.pointerMove(event.pointerId);
+          };
+          const onPointerEnd = (event: PointerEvent) => {
+            mobileScrollbarController?.pointerEnd(event.pointerId);
+          };
+          const onWheel = (event: WheelEvent) => {
+            if (isScrollbarTarget(event)) {
+              mobileScrollbarController?.activity();
+            }
+          };
+
+          container.addEventListener("pointerdown", onPointerDown, true);
+          container.addEventListener("wheel", onWheel, true);
+          window.addEventListener("pointermove", onPointerMove, true);
+          window.addEventListener("pointerup", onPointerEnd, true);
+          window.addEventListener("pointercancel", onPointerEnd, true);
+          removeMobileScrollbarListeners = () => {
+            container.removeEventListener(
+              "pointerdown",
+              onPointerDown,
+              true,
+            );
+            container.removeEventListener("wheel", onWheel, true);
+            window.removeEventListener("pointermove", onPointerMove, true);
+            window.removeEventListener("pointerup", onPointerEnd, true);
+            window.removeEventListener("pointercancel", onPointerEnd, true);
+          };
+        }
+      }
 
       const textarea = terminal.textarea;
       const androidImeGuardEnabled = shouldEnableAndroidImeGuard(
@@ -569,11 +640,13 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       resizeObserver.observe(container);
       void document.fonts?.ready.then(fit);
       fit();
-      if (!window.matchMedia("(pointer: coarse)").matches) {
+      if (!mobileScrollbarEnabled) {
         terminal.focus();
       }
 
       return () => {
+        removeMobileScrollbarListeners?.();
+        mobileScrollbarController?.dispose();
         androidImeGuard?.dispose();
         androidImeGuardEnabledRef.current = false;
         inputDisposable.dispose();
@@ -877,11 +950,18 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       <>
         <div
           ref={containerRef}
-          className={
-            isRestoring
-              ? "terminal-view terminal-view--covered"
-              : "terminal-view"
-          }
+          className={[
+            "terminal-view",
+            isRestoring ? "terminal-view--covered" : "",
+            mobileScrollbarEnabled
+              ? "terminal-view--mobile-scrollbar"
+              : "",
+            mobileScrollbarVisible
+              ? "terminal-view--mobile-scrollbar-visible"
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
           aria-label="Codex terminal"
         />
         {isRestoring && (
