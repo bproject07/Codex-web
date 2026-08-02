@@ -382,11 +382,15 @@ when changing batching or reconnect behavior.
 - The mobile toolbar order starts with Enter and arrows, then history/control
   keys.
 - Session tabs remain horizontally scrollable on overflow. **@cwt** stays
-  outside the inner tab scroller so it remains discoverable. The header reads
-  left to right: identity area, then the ellipsis **Menu** trigger directly
-  after the status dot, then the left-aligned tabs and **@cwt**. The tab
-  strip is the only horizontal scroller in the header; the Menu trigger must
-  never sit inside it and its popover must not be clipped by it.
+  outside the inner tab scroller so it remains discoverable. Desktop and an
+  expanded mobile header read left to right: identity area, then the ellipsis
+  **Menu** trigger directly after the status dot, then the left-aligned tabs
+  and **@cwt**. On touch screens up to 900 px, a ≥44 px disclosure may hide
+  the identity/Menu row; the default and last user choice are browser-local.
+  Its collapsed row retains the connection-status dot, disclosure, tabs, and
+  **@cwt**. The tab strip is the only horizontal scroller in the header; the
+  Menu trigger and disclosure must never sit inside it, and the Menu popover
+  must not be clipped by it.
 - The Menu trigger is titled and labelled "Menu", uses the ARIA menu-button
   pattern (`aria-haspopup`, `aria-expanded`, `aria-controls`, `role="menu"`
   with `role="menuitem"` entries, arrow-key navigation, Escape returns focus

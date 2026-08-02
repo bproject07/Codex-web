@@ -3,6 +3,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -48,6 +49,10 @@ import {
   type ThemeName,
 } from "./terminal/settings";
 import { HeaderMenu, type HeaderMenuItem } from "./menu/HeaderMenu";
+import {
+  loadMobileHeaderCollapsed,
+  saveMobileHeaderCollapsed,
+} from "./mobileHeader";
 import { SessionTabs } from "./sessions/SessionTabs";
 import { shouldRouteDesktopSlash } from "./terminal/desktopSlash";
 import {
@@ -106,6 +111,9 @@ export function App() {
   const [reconnectNonce, setReconnectNonce] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const [mobileHeaderCollapsed, setMobileHeaderCollapsed] = useState(
+    loadMobileHeaderCollapsed,
+  );
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [launchDirectory, setLaunchDirectory] =
@@ -140,6 +148,7 @@ export function App() {
     null,
   );
   const [announcement, setAnnouncement] = useState({ nonce: 0, text: "" });
+  const mobileHeaderContextId = useId();
   const terminalRef = useRef<TerminalViewHandle>(null);
   const selectedTerminalIdRef = useRef(selectedTerminalId);
   const sessionsRequestEpochRef = useRef(0);
@@ -1727,11 +1736,29 @@ export function App() {
       onSelect: () => void toggleFullscreen(),
     },
   ];
+  const toggleMobileHeader = () => {
+    const nextCollapsed = !mobileHeaderCollapsed;
+    setMobileHeaderCollapsed(nextCollapsed);
+    saveMobileHeaderCollapsed(nextCollapsed);
+  };
 
   return (
     <main className="app-shell">
-      <header className="app-header">
-        <div className="header-context">
+      <header
+        className={`app-header${
+          mobileHeaderCollapsed
+            ? " app-header--mobile-context-collapsed"
+            : ""
+        }`}
+      >
+        <MobileHeaderToggle
+          collapsed={mobileHeaderCollapsed}
+          contextId={mobileHeaderContextId}
+          effectiveStatus={effectiveStatus}
+          updateAvailable={updateAvailable}
+          onToggle={toggleMobileHeader}
+        />
+        <div className="header-context" id={mobileHeaderContextId}>
           <AppIdentity
             session={session}
             sessionsLoading={sessionsLoading}
@@ -1974,6 +2001,64 @@ export function App() {
         />
       )}
     </main>
+  );
+}
+
+export interface MobileHeaderToggleProps {
+  collapsed: boolean;
+  contextId: string;
+  effectiveStatus: ConnectionStatus | "codex_exited";
+  updateAvailable: boolean;
+  onToggle: () => void;
+}
+
+/** Phone-only disclosure control. CSS keeps it out of desktop layout and
+ * moves it between the context row and the compact tab row. */
+export function MobileHeaderToggle({
+  collapsed,
+  contextId,
+  effectiveStatus,
+  updateAvailable,
+  onToggle,
+}: MobileHeaderToggleProps) {
+  const actionLabel = collapsed
+    ? "Show project and Menu"
+    : "Hide project and Menu";
+
+  return (
+    <button
+      type="button"
+      className="mobile-header-toggle"
+      title={actionLabel}
+      aria-expanded={!collapsed}
+      aria-controls={contextId}
+      onClick={onToggle}
+    >
+      {collapsed && (
+        <span
+          className={`mobile-header-toggle__status app-status status--${effectiveStatus}`}
+          aria-hidden="true"
+        >
+          <span className="status-dot" />
+        </span>
+      )}
+      <span className="mobile-header-toggle__glyph" aria-hidden="true">
+        {collapsed ? "⌄" : "⌃"}
+      </span>
+      {collapsed && updateAvailable && (
+        <span className="header-update-badge" aria-hidden="true">
+          ↑
+        </span>
+      )}
+      <span className="visually-hidden">
+        {actionLabel}.
+        {collapsed
+          ? ` Connection: ${STATUS_LABELS[effectiveStatus]}.${
+              updateAvailable ? " Update available." : ""
+            }`
+          : ""}
+      </span>
+    </button>
   );
 }
 

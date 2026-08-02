@@ -422,14 +422,16 @@ picker opens instead.
 Every open of **New terminal** forces a fresh server-side agent check so an
 older browser tab cannot reuse stale availability. A missing or misconfigured
 agent displays manual host-side installation guidance and **Refresh** /
-**Check again** actions. Swipe the tab strip on mobile, or use a wheel,
-trackpad, or the overflow arrows on desktop. **Manage sessions** in the Menu
-opens the detailed session list and shows the current/configured count, for
-example `3/20`. **New terminal** is disabled at capacity; existing `@cwt`
-follow-ups remain available because they reuse their dedicated reviewer.
-Dismissing the folder picker returns focus to the Menu button. Switching tabs
-does not stop the previously displayed session; it continues running and
-buffering output in the background.
+**Check again** actions. On mobile, the header starts collapsed so the tabs
+and terminal receive more height; its arrow restores the project identity and
+Menu, and the browser remembers that choice. Swipe the tab strip on mobile,
+or use a wheel, trackpad, or the overflow arrows on desktop. **Manage
+sessions** in the Menu opens the detailed session list and shows the
+current/configured count, for example `3/20`. **New terminal** is disabled at
+capacity; existing `@cwt` follow-ups remain available because they reuse their
+dedicated reviewer. Dismissing the folder picker returns focus to the Menu
+button. Switching tabs does not stop the previously displayed session; it
+continues running and buffering output in the background.
 
 ### `@cwt` peer review
 
@@ -1071,18 +1073,22 @@ automatically turns off. Page Up/Down send the standard terminal input
 sequences to the selected PTY, including full-screen alternate-buffer TUIs.
 Top and Live continue to navigate xterm's client-side scrollback.
 On touch/coarse-pointer devices, xterm's vertical scrollbar has a 28 px
-draggable target while reserving only 4 px of terminal width. Its painted
-thumb stays hidden until the right-edge target is touched, remains visible
-while it is dragged, and hides after 20 seconds without scrollbar interaction.
+draggable target and preserves the established mobile terminal width. Its
+painted thumb stays hidden until the right-edge target is touched, remains
+visible while it is dragged, and hides after 20 seconds without scrollbar
+interaction.
 The Android IME guard also converts keyboard replacement/autocorrect edits to
 the corresponding terminal Backspace-plus-suffix input, avoiding duplicated
 whole-word output from overlapping Chrome/Gboard and xterm fallbacks.
 
 The header's session tabs and the **New terminal** and **Manage sessions**
-actions in the ellipsis Menu operate on independent live PTYs. **New
-terminal** selects a server folder before the agent. The active tab selects
-which managed session feeds the same xterm screen. The tab strip scrolls
-horizontally when it overflows; it does not send `/new` or `/resume` commands
+actions in the ellipsis Menu operate on independent live PTYs. On touch
+screens up to 900 px, the 44 px arrow collapses the project/Menu row while
+retaining the connection dot, tabs, and **@cwt**; tap it again to expand the
+row. **New terminal** selects a server folder before the agent. The active tab
+selects which managed session feeds the same xterm screen. The tab strip
+scrolls horizontally when it overflows; it does not send `/new` or `/resume`
+commands
 into the selected agent's TUI.
 
 ## Security

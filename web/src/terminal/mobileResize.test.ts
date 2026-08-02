@@ -5,8 +5,8 @@ import {
 } from "./mobileResize";
 
 describe("terminalScrollbarWidth", () => {
-  it("reserves only a narrow mobile rail without changing desktop", () => {
-    expect(terminalScrollbarWidth(true)).toBe(4);
+  it("keeps the established mobile terminal width without changing desktop", () => {
+    expect(terminalScrollbarWidth(true)).toBe(28);
     expect(terminalScrollbarWidth(false)).toBeUndefined();
   });
 });

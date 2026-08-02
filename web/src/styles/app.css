@@ -172,6 +172,10 @@ button:disabled {
   background: var(--color-chrome);
 }
 
+.mobile-header-toggle {
+  display: none;
+}
+
 /* Identity plus the overflow-menu trigger form the leading context group.
    On the stacked mobile layout this whole group is the first header row. */
 .header-context {
@@ -775,9 +779,8 @@ button:disabled {
 }
 
 @media (pointer: coarse) {
-  /* FitAddon reserves only the 4px configured by TerminalView. The custom
-     xterm rail overlays a 28px touch target, so it remains easy to grab
-     without permanently taking terminal columns away. */
+  /* Keep xterm's established 28px mobile layout and drag target, but paint
+     the scrollbar only while the user is interacting with it. */
   .terminal-view--mobile-scrollbar
     .xterm-scrollable-element
     > .scrollbar.vertical {
@@ -792,6 +795,14 @@ button:disabled {
     .xterm-scrollable-element
     > .scrollbar.vertical {
     opacity: 1;
+  }
+
+  /* overviewRuler.width also controls xterm's scrollbar geometry, but xterm
+     draws an unrelated 1px foreground-colored ruler outline when it is set.
+     The application does not use overview-ruler decorations on mobile. */
+  .terminal-view--mobile-scrollbar
+    .xterm-decoration-overview-ruler {
+    display: none !important;
   }
 
   .terminal-view--mobile-scrollbar
@@ -2546,15 +2557,27 @@ details.peer-composer__readiness p {
 @media (max-width: 760px) {
   .app-header {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "context toggle"
+      "actions actions";
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: stretch;
     gap: 0.35rem;
     padding-top: max(0.4rem, env(safe-area-inset-top));
   }
 
-  .header-context,
-  .header-actions {
+  .header-context {
+    grid-area: context;
     width: 100%;
+  }
+
+  .header-actions {
+    grid-area: actions;
+    width: 100%;
+  }
+
+  .mobile-header-toggle {
+    grid-area: toggle;
   }
 
   /* Keep the ellipsis Menu — the only route to Settings — an easy target. */
@@ -2591,6 +2614,80 @@ details.peer-composer__readiness p {
 
   .agent-option {
     min-height: 0;
+  }
+}
+
+/* A compact disclosure is useful only on touch-sized screens. Desktop keeps
+   the complete identity/Menu row regardless of the saved phone preference. */
+@media (max-width: 900px) and (pointer: coarse) {
+  .mobile-header-toggle {
+    position: relative;
+    display: inline-flex;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    gap: 0.22rem;
+    padding: 0.3rem 0.38rem;
+    color: #dfe5ee;
+  }
+
+  .mobile-header-toggle__glyph {
+    font-size: 1.25rem;
+    font-weight: 800;
+    line-height: 0.8;
+    transform: translateY(-0.08rem);
+  }
+
+  .mobile-header-toggle__status {
+    align-self: center;
+  }
+
+  .mobile-header-toggle .header-update-badge {
+    width: 0.9rem;
+    height: 0.9rem;
+    margin-left: 0;
+    font-size: 0.62rem;
+  }
+
+  .app-header--mobile-context-collapsed .header-context {
+    display: none;
+  }
+
+  .app-header--mobile-context-collapsed {
+    min-height: 0;
+  }
+}
+
+@media (max-width: 760px) and (pointer: coarse) {
+  .app-header--mobile-context-collapsed {
+    grid-template-areas: "toggle actions";
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.25rem;
+    padding-bottom: 0.25rem;
+  }
+}
+
+@media (min-width: 761px) and (max-width: 900px) and (pointer: coarse) {
+  .header-context {
+    order: 1;
+  }
+
+  .mobile-header-toggle {
+    order: 2;
+  }
+
+  .header-actions {
+    order: 3;
+  }
+
+  .app-header--mobile-context-collapsed .mobile-header-toggle {
+    order: 1;
+  }
+
+  .app-header--mobile-context-collapsed .header-actions {
+    order: 2;
   }
 }
 

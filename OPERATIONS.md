@@ -604,14 +604,20 @@ The header shows one tab for each server-managed terminal. The active tab is
 highlighted and each tab includes a lifecycle-status dot.
 
 - Select a tab to attach the single browser terminal view to that managed PTY.
+- On mobile, the header starts with the project/Menu row collapsed. Its
+  status-and-arrow control expands or collapses that row, retains a 44 px
+  touch target, and remembers the choice in that browser. The tabs and
+  **@cwt** remain visible in either state.
 - Swipe the tab strip horizontally on mobile.
 - On desktop the tabs spread across the full remaining header width; the
   left/right arrows appear (overlaid on the strip's edges) only when the tabs
   genuinely overflow, and a wheel or trackpad scrolls the strip as well.
-- The header reads left to right: the identity area (project path, agent,
-  status dot), then the ellipsis **Menu** button (`…`, labelled "Menu"), then
-  the left-aligned tabs and **@cwt**. General actions live in the Menu;
-  preferences live in **Settings**, which the Menu opens.
+- Desktop and the expanded mobile header read left to right: the identity area
+  (project path, agent, status dot), then the ellipsis **Menu** button (`…`,
+  labelled "Menu"), then the left-aligned tabs and **@cwt**. The collapsed
+  mobile row keeps a compact status/disclosure followed by the tabs and
+  **@cwt**. General actions live in the Menu; preferences live in
+  **Settings**, which the Menu opens.
 - **New terminal** in the Menu creates another terminal.
 - **Manage sessions** in the Menu opens the detailed session list.
 
@@ -828,11 +834,11 @@ the first screenful on a narrow phone.
 - **Ctrl** applies Ctrl to the next typed ASCII letter and then turns off.
 - **Hide** hides the toolbar; it can be shown again from Settings.
 
-On a touch/coarse-pointer device, xterm reserves only 4 px of terminal width
-for its vertical scrollbar but overlays a 28 px right-edge drag target. The
-narrow thumb appears when that target is touched, remains visible throughout
-the drag, and hides after 20 seconds without scrollbar interaction. You can
-still swipe anywhere inside the terminal to move through scrollback.
+On a touch/coarse-pointer device, xterm keeps its established mobile terminal
+width and a 28 px right-edge drag target. The narrow thumb appears when that
+target is touched, remains visible throughout the drag, and hides after 20
+seconds without scrollbar interaction. You can still swipe anywhere inside
+the terminal to move through scrollback.
 
 On Android, replacement/autocorrect events are converted to terminal
 Backspace-plus-suffix input. Diagnostics count these translations but never

@@ -96,6 +96,12 @@ def begin_diagnostics(page: Page) -> None:
 
 def read_diagnostics(page: Page) -> dict[str, Any]:
     # Settings now opens from the header's ellipsis Menu.
+    disclosure = page.locator(".mobile-header-toggle")
+    if (
+        disclosure.is_visible()
+        and disclosure.get_attribute("aria-expanded") == "false"
+    ):
+        disclosure.click()
     page.locator(".header-menu-trigger").click()
     page.locator("[role='menu']").wait_for(state="visible")
     page.locator(".header-menu-item--settings").click()
@@ -107,6 +113,25 @@ def read_diagnostics(page: Page) -> dict[str, Any]:
         'textarea[aria-label="Viewport diagnostics text"]'
     ).input_value()
     return json.loads(raw)
+
+
+def mobile_header_snapshot(page: Page) -> dict[str, Any]:
+    return page.evaluate(
+        """() => {
+          const header = document.querySelector(".app-header");
+          const context = document.querySelector(".header-context");
+          const toggle = document.querySelector(".mobile-header-toggle");
+          return {
+            collapsed:
+              header?.classList.contains(
+                "app-header--mobile-context-collapsed",
+              ) ?? false,
+            expanded: toggle?.getAttribute("aria-expanded") ?? null,
+            contextDisplay: context ? getComputedStyle(context).display : null,
+            headerHeight: header?.getBoundingClientRect().height ?? null,
+          };
+        }"""
+    )
 
 
 def terminal_sample(
@@ -199,6 +224,18 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
             page.locator(".xterm-helper-textarea").wait_for(state="attached")
             page.wait_for_timeout(1_500)
 
+            header_toggle = page.locator(".mobile-header-toggle")
+            header_toggle.wait_for(state="visible")
+            mobile_header = {
+                "initial": mobile_header_snapshot(page),
+            }
+            header_toggle.click()
+            page.wait_for_timeout(100)
+            mobile_header["expanded"] = mobile_header_snapshot(page)
+            header_toggle.click()
+            page.wait_for_timeout(100)
+            mobile_header["collapsedAgain"] = mobile_header_snapshot(page)
+
             scrollbar = page.locator(
                 ".terminal-view "
                 ".xterm-scrollable-element > .scrollbar.vertical"
@@ -212,6 +249,9 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                     ".xterm-scrollable-element > .scrollbar.vertical",
                   );
                   const slider = scrollbar?.querySelector(":scope > .slider");
+                  const overviewRuler = terminal?.querySelector(
+                    ".xterm-decoration-overview-ruler",
+                  );
                   return {
                     enabled: terminal?.classList.contains(
                       "terminal-view--mobile-scrollbar",
@@ -225,6 +265,9 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                       ? getComputedStyle(scrollbar).opacity
                       : null,
                     sliderWidth: slider?.getBoundingClientRect().width ?? null,
+                    overviewRulerDisplay: overviewRuler
+                      ? getComputedStyle(overviewRuler).display
+                      : null,
                   };
                 }"""
             )
@@ -431,6 +474,7 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                 "closeResizeFrames": frames,
                 "atomicFrameEvents": atomic_events,
                 "mobileScrollbar": mobile_scrollbar,
+                "mobileHeader": mobile_header,
             }
 
             if not args.observe:
@@ -444,18 +488,42 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                     KEYBOARD_CLOSED_HEIGHT,
                 ]
                 assert result["rows"][0] <= 16
-                # The stacked mobile header carries the 44px ellipsis Menu
-                # trigger (the only route to Settings), which costs one
-                # terminal row at rest versus the pre-menu layout.
+                # The default-collapsed phone header restores terminal room
+                # while keeping a 44px disclosure next to the session tabs.
                 assert result["rows"][1] >= 29
                 assert result["pageScrollY"] == [0]
+                assert result["mobileHeader"]["initial"]["collapsed"] is True
+                assert result["mobileHeader"]["initial"]["expanded"] == "false"
+                assert (
+                    result["mobileHeader"]["initial"]["contextDisplay"]
+                    == "none"
+                )
+                assert (
+                    result["mobileHeader"]["expanded"]["collapsed"] is False
+                )
+                assert (
+                    result["mobileHeader"]["expanded"]["expanded"] == "true"
+                )
+                assert (
+                    result["mobileHeader"]["expanded"]["contextDisplay"]
+                    != "none"
+                )
+                assert (
+                    result["mobileHeader"]["expanded"]["headerHeight"]
+                    > result["mobileHeader"]["initial"]["headerHeight"]
+                )
+                assert (
+                    result["mobileHeader"]["collapsedAgain"]
+                    == result["mobileHeader"]["initial"]
+                )
                 assert result["mobileScrollbar"] == {
                     "enabled": True,
                     "visible": False,
-                    "layoutWidth": "4px",
+                    "layoutWidth": "28px",
                     "touchWidth": 28,
                     "opacity": "0",
                     "sliderWidth": 28,
+                    "overviewRulerDisplay": "none",
                     "revealedAfterTouch": {
                         "visible": True,
                         "opacity": "1",
