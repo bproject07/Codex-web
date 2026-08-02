@@ -725,9 +725,7 @@ async fn test_router_with_options(
     )
     .expect("update manager");
     let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel(1);
-    tokio::spawn(async move {
-        while restart_rx.recv().await.is_some() {}
-    });
+    tokio::spawn(async move { while restart_rx.recv().await.is_some() {} });
     let state = AppState {
         config,
         auth: AuthState::new(TOKEN.to_owned()),

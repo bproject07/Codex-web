@@ -21,9 +21,7 @@ use crate::{
         CWT_TERMINAL_ID_ENV,
     },
     process_tree::{BoundedProcessOptions, run_bounded},
-    update_bootstrap::{
-        READINESS_NONCE_ENV, SERVER_RESTART_CAPABILITY_ENV, SUPERVISED_WORKER_ENV,
-    },
+    update_bootstrap::{READINESS_NONCE_ENV, SERVER_RESTART_CAPABILITY_ENV, SUPERVISED_WORKER_ENV},
 };
 
 pub const INITIAL_COLS: u16 = 120;

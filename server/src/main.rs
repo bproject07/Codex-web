@@ -288,12 +288,7 @@ async fn run(
             if supervised_worker {
                 std::process::exit(update_bootstrap::SERVER_RESTART_EXIT_CODE);
             }
-            update_bootstrap::restart_and_supervise(
-                &config,
-                &token,
-                &previous_executable,
-            )
-            .await
+            update_bootstrap::restart_and_supervise(&config, &token, &previous_executable).await
         }
         StopCause::UpdateChannelClosed => {
             if let Err(error) = await_server_task(&mut public_server, "HTTP server").await {
