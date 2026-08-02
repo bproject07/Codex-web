@@ -10,6 +10,7 @@ const HEALTH = {
   sessionCount: 3,
   runningSessions: 3,
   maxSessions: 20,
+  serverRestartSupported: true,
 };
 
 function jsonResponse(body: unknown): Response {
@@ -56,12 +57,17 @@ describe("health API", () => {
   );
 
   it("keeps capacity checks compatible when an older server omits its version", async () => {
-    const { serverVersion: _serverVersion, ...legacyHealth } = HEALTH;
+    const {
+      serverVersion: _serverVersion,
+      serverRestartSupported: _serverRestartSupported,
+      ...legacyHealth
+    } = HEALTH;
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(legacyHealth)));
 
     await expect(getHealth("0123456789abcdef")).resolves.toEqual({
       ...legacyHealth,
       serverVersion: null,
+      serverRestartSupported: false,
     });
   });
 });

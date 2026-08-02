@@ -11,6 +11,9 @@ function renderPanel(overrides: Partial<SettingsPanelProps> = {}): string {
       agentLabel="Codex"
       restartDisabled={false}
       onRestart={vi.fn()}
+      serverRestartDisabled={false}
+      serverRestartUnavailableReason={null}
+      onRestartServer={vi.fn()}
       onChange={vi.fn()}
       updateStatus={null}
       updateLoading={false}
@@ -40,6 +43,7 @@ describe("SettingsPanel", () => {
     expect(html).toContain("Blinking cursor");
     expect(html).toContain("Show mobile keys");
     expect(html).toContain("Copy diagnostics");
+    expect(html).toContain("Restart server");
     expect(html).toContain("Restart Codex");
     expect(html).toContain("Terminate Codex");
     expect(html).toContain("Forget token");
@@ -63,5 +67,20 @@ describe("SettingsPanel", () => {
 
     expect(restartButton).toContain("disabled");
     expect(html).toContain("Terminate Claude");
+  });
+
+  it("explains when an older stable launcher cannot restart the server", () => {
+    const reason =
+      "Install this complete release package as the launcher before using server restart.";
+    const html = renderPanel({
+      serverRestartDisabled: true,
+      serverRestartUnavailableReason: reason,
+    });
+
+    expect(html).toContain(reason);
+    const restartButton = html.match(
+      /<button[^>]*title="Install this complete release package[^"]*"[^>]*>/,
+    )?.[0];
+    expect(restartButton).toContain("disabled");
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HealthSnapshot } from "../api";
+import type { HealthSnapshot, SessionSnapshot } from "../api";
 import {
   isUpdateHandoffState,
   isUpdatePollState,
@@ -16,6 +16,7 @@ const health = (serverVersion: string | null): HealthSnapshot => ({
   sessionCount: 1,
   runningSessions: 0,
   maxSessions: 20,
+  serverRestartSupported: true,
 });
 
 describe("waitForServerVersion", () => {
@@ -64,6 +65,38 @@ describe("waitForServerVersion", () => {
       }),
     ).resolves.toBe(false);
     expect(readHealth).not.toHaveBeenCalled();
+  });
+
+  it("waits for the primary ID to change on a same-version server restart", async () => {
+    const readHealth = vi.fn().mockResolvedValue(health("0.3.0"));
+    const readSessions = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          terminalId: "primary-old",
+          isPrimary: true,
+        } as SessionSnapshot,
+      ])
+      .mockResolvedValueOnce([
+        {
+          terminalId: "primary-new",
+          isPrimary: true,
+        } as SessionSnapshot,
+      ]);
+
+    await expect(
+      waitForServerVersion({
+        token: "0123456789abcdef",
+        expectedVersion: "0.3.0",
+        previousPrimaryTerminalId: "primary-old",
+        attempts: 2,
+        intervalMs: 0,
+        readHealth,
+        readSessions,
+        wait: vi.fn().mockResolvedValue(undefined),
+      }),
+    ).resolves.toBe(true);
+    expect(readSessions).toHaveBeenCalledTimes(2);
   });
 });
 

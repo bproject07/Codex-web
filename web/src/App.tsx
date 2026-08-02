@@ -24,6 +24,7 @@ import {
   readSelectedTerminalId,
   removeWorkspaceFavorite,
   resolveWorkspacePath,
+  restartServer,
   restartSession,
   terminateSession,
   writeSelectedTerminalId,
@@ -69,9 +70,13 @@ import {
   applyUpdate,
   checkForUpdate,
   getUpdateStatus,
+  discardSessionRestorePlan,
+  discardSessionRestorePlanForOriginalGeneration,
   isUpdateHandoffState,
   isUpdatePollState,
   reloadForUpdatedServer,
+  restoreSessionTabs,
+  stageSessionRestorePlan,
   UpdatePanel,
   waitForServerVersion,
   type UpdateOperation,
@@ -114,7 +119,11 @@ export function App() {
   );
   const [creatingAgent, setCreatingAgent] = useState<AgentKind | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsInitialized, setSessionsInitialized] = useState(false);
   const [maxSessions, setMaxSessions] = useState<number | null>(null);
+  const [serverRestartSupported, setServerRestartSupported] = useState<
+    boolean | null
+  >(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
@@ -260,7 +269,10 @@ export function App() {
   }, [announce, readyResponseCount]);
 
   const beginUpdateReconnect = useCallback(
-    async (expectedVersion: string) => {
+    async (
+      expectedVersion: string,
+      previousPrimaryTerminalId?: string,
+    ) => {
       if (!token) {
         return;
       }
@@ -274,6 +286,7 @@ export function App() {
       const ready = await waitForServerVersion({
         token,
         expectedVersion,
+        previousPrimaryTerminalId,
         signal: abortController.signal,
       });
       if (
@@ -290,6 +303,7 @@ export function App() {
       }
 
       setUpdateOperation(null);
+      setBusy(false);
       setUpdateError(
         `The server did not return as version ${expectedVersion}. Check the server console, then try again.`,
       );
@@ -348,6 +362,12 @@ export function App() {
       updateRequestEpochRef.current += 1;
     };
   }, [beginUpdateReconnect, token]);
+
+  useEffect(() => {
+    if (updateStatus?.state === "failed") {
+      discardSessionRestorePlanForOriginalGeneration(sessions);
+    }
+  }, [sessions, updateStatus?.state]);
 
   useEffect(() => {
     if (
@@ -436,6 +456,28 @@ export function App() {
         return;
       }
 
+      const sourceVersion = updateStatus?.currentVersion;
+      if (!sourceVersion) {
+        setUpdateError(
+          "The running server version is unavailable, so terminal tabs cannot be preserved safely.",
+        );
+        return;
+      }
+      const staged = stageSessionRestorePlan({
+        sourceVersion,
+        targetVersion: expectedVersion,
+        sessions,
+        selectedTerminalId: selectedTerminalIdRef.current,
+      });
+      if (!staged.saved) {
+        setUpdateError(
+          `The browser could not save ${staged.sessionCount} terminal tab${
+            staged.sessionCount === 1 ? "" : "s"
+          } for restoration. The update was not started.`,
+        );
+        return;
+      }
+
       const requestEpoch = ++updateRequestEpochRef.current;
       let reconnecting = false;
       setUpdateOperation("applying");
@@ -447,6 +489,7 @@ export function App() {
         }
         setUpdateStatus(status);
         if (status.state === "failed") {
+          discardSessionRestorePlan();
           setUpdateError(status.error ?? "The update could not be applied.");
         } else if (isUpdateHandoffState(status.state)) {
           reconnecting = true;
@@ -463,6 +506,7 @@ export function App() {
           reconnecting = true;
           void beginUpdateReconnect(expectedVersion);
         } else {
+          discardSessionRestorePlan();
           setUpdateError(
             error instanceof ApiError || error instanceof Error
               ? error.message
@@ -478,7 +522,13 @@ export function App() {
         }
       }
     },
-    [beginUpdateReconnect, token, updateOperation],
+    [
+      beginUpdateReconnect,
+      sessions,
+      token,
+      updateOperation,
+      updateStatus?.currentVersion,
+    ],
   );
 
   useEffect(() => {
@@ -639,6 +689,7 @@ export function App() {
       if (!token) {
         if (capacityRequestEpochRef.current === requestEpoch) {
           setMaxSessions(null);
+          setServerRestartSupported(null);
         }
         return;
       }
@@ -650,6 +701,7 @@ export function App() {
           capacityRequestEpochRef.current === requestEpoch
         ) {
           setMaxSessions(health.maxSessions);
+          setServerRestartSupported(health.serverRestartSupported);
         }
       } catch {
         if (
@@ -659,6 +711,7 @@ export function App() {
           // Capacity metadata is advisory. Keep session management usable with
           // an older, temporarily unavailable, or malformed health endpoint.
           setMaxSessions(null);
+          setServerRestartSupported(null);
         }
       }
     },
@@ -668,6 +721,7 @@ export function App() {
   useEffect(() => {
     const abortController = new AbortController();
     setMaxSessions(null);
+    setServerRestartSupported(null);
     void refreshCapacity(abortController.signal);
 
     return () => {
@@ -711,18 +765,40 @@ export function App() {
     if (!token) {
       sessionsRequestEpochRef.current += 1;
       setSessionsLoading(false);
+      setSessionsInitialized(false);
       return;
     }
 
     const abortController = new AbortController();
     const requestEpoch = ++sessionsRequestEpochRef.current;
     setSessionsLoading(true);
-    void listSessions(token, abortController.signal)
-      .then((nextSessions) => {
-        if (sessionsRequestEpochRef.current === requestEpoch) {
-          applySessionList(nextSessions);
+    void (async () => {
+      const nextSessions = await listSessions(token, abortController.signal);
+      let restoredSessions = nextSessions;
+      let preferredTerminalId: string | undefined;
+      let restoreError: string | undefined;
+      try {
+        const health = await getHealth(token, abortController.signal);
+        const restoration = await restoreSessionTabs({
+          token,
+          serverVersion: health.serverVersion,
+          sessions: nextSessions,
+        });
+        restoredSessions = restoration.sessions;
+        preferredTerminalId = restoration.preferredTerminalId;
+        restoreError = restoration.error;
+      } catch {
+        // A transient health/read failure leaves the bounded restore plan in
+        // sessionStorage for the next reload.
+      }
+
+      if (sessionsRequestEpochRef.current === requestEpoch) {
+        if (restoreError) {
+          setMessage(restoreError);
         }
-      })
+        applySessionList(restoredSessions, preferredTerminalId);
+      }
+    })()
       .catch((error) => {
         if (
           !abortController.signal.aborted &&
@@ -741,6 +817,7 @@ export function App() {
           sessionsRequestEpochRef.current === requestEpoch
         ) {
           setSessionsLoading(false);
+          setSessionsInitialized(true);
         }
       });
 
@@ -1132,6 +1209,75 @@ export function App() {
       setMessage(error instanceof Error ? error.message : "Terminate failed.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleServerRestart = async () => {
+    if (
+      !token ||
+      busy ||
+      serverRestartSupported !== true ||
+      updateOperation !== null ||
+      isUpdatePollState(updateStatus?.state) ||
+      isUpdateHandoffState(updateStatus?.state)
+    ) {
+      return;
+    }
+    const primary = sessions.find((candidate) => candidate.isPrimary);
+    if (!primary) {
+      setMessage("The primary server session is unavailable.");
+      return;
+    }
+    if (
+      !(await requestConfirmation({
+        title: "Restart server?",
+        body:
+          "Every PTY and @cwt reviewer will end. Ordinary terminal tabs will be recreated with the same agent and folder as fresh sessions after the server returns.",
+        confirmLabel: "Restart server",
+        danger: true,
+      }))
+    ) {
+      return;
+    }
+
+    setBusy(true);
+    setMessage(null);
+    try {
+      const health = await getHealth(token);
+      if (!health.serverVersion) {
+        throw new Error("The running server version is unavailable.");
+      }
+      const staged = stageSessionRestorePlan({
+        sourceVersion: health.serverVersion,
+        targetVersion: health.serverVersion,
+        sessions,
+        selectedTerminalId: selectedTerminalIdRef.current,
+      });
+      if (!staged.saved) {
+        throw new Error(
+          `The browser could not save ${staged.sessionCount} terminal tab${
+            staged.sessionCount === 1 ? "" : "s"
+          } for restoration. The server was not restarted.`,
+        );
+      }
+
+      setSettingsOpen(false);
+      try {
+        await restartServer(token);
+      } catch (error) {
+        if (!(error instanceof TypeError)) {
+          discardSessionRestorePlan();
+          throw error;
+        }
+        // A successful restart can close the listener before the 202 response
+        // reaches the browser. The generation check below is authoritative.
+      }
+      void beginUpdateReconnect(health.serverVersion, primary.terminalId);
+    } catch (error) {
+      setBusy(false);
+      setMessage(
+        error instanceof Error ? error.message : "Server restart failed.",
+      );
     }
   };
 
@@ -1634,7 +1780,7 @@ export function App() {
       )}
 
       <section className="terminal-region">
-        {selectedTerminalId ? (
+        {selectedTerminalId && sessionsInitialized ? (
           <TerminalView
             key={selectedTerminalId}
             ref={terminalRef}
@@ -1677,9 +1823,6 @@ export function App() {
             terminalRef.current?.focus();
           }}
           onSend={(data) => terminalRef.current?.send(data)}
-          onScrollPages={(pageCount) =>
-            terminalRef.current?.scrollPages(pageCount)
-          }
           onScrollToTop={() => terminalRef.current?.scrollToTop()}
           onScrollToBottom={() => terminalRef.current?.scrollToBottom()}
           onHide={() => updateSettings({ mobileKeys: false })}
@@ -1760,6 +1903,19 @@ export function App() {
           agentLabel={selectedAgentLabel}
           restartDisabled={busy || session?.purpose.kind === "peer"}
           onRestart={() => void handleRestart()}
+          serverRestartDisabled={
+            busy ||
+            serverRestartSupported !== true ||
+            updateOperation !== null ||
+            isUpdatePollState(updateStatus?.state) ||
+            isUpdateHandoffState(updateStatus?.state)
+          }
+          serverRestartUnavailableReason={
+            serverRestartSupported === false
+              ? "A built-in update cannot replace an older stable launcher. Install this complete release package as the launcher before using server restart."
+              : null
+          }
+          onRestartServer={() => void handleServerRestart()}
           onChange={updateSettings}
           updateStatus={updateStatus}
           updateLoading={updateLoading}
@@ -1787,6 +1943,7 @@ export function App() {
             setLaunchDirectory(null);
             setSessions([]);
             setSelectedTerminalId("");
+            setSessionsInitialized(false);
             setSession(null);
             setToken("");
           }}
@@ -2155,6 +2312,9 @@ export interface SettingsPanelProps {
   agentLabel: string;
   restartDisabled: boolean;
   onRestart: () => void;
+  serverRestartDisabled: boolean;
+  serverRestartUnavailableReason: string | null;
+  onRestartServer: () => void;
   onChange: (patch: Partial<TerminalSettings>) => void;
   updateStatus: UpdateStatus | null;
   updateLoading: boolean;
@@ -2177,6 +2337,9 @@ export function SettingsPanel({
   agentLabel,
   restartDisabled,
   onRestart,
+  serverRestartDisabled,
+  serverRestartUnavailableReason,
+  onRestartServer,
   onChange,
   updateStatus,
   updateLoading,
@@ -2321,6 +2484,22 @@ export function SettingsPanel({
         </div>
 
         <div className="settings-danger">
+          {serverRestartUnavailableReason && (
+            <small className="settings-danger-note">
+              {serverRestartUnavailableReason}
+            </small>
+          )}
+          <button
+            type="button"
+            disabled={serverRestartDisabled}
+            title={
+              serverRestartUnavailableReason ??
+              "Restart the Codex Web server and recreate ordinary terminal tabs"
+            }
+            onClick={onRestartServer}
+          >
+            Restart server
+          </button>
           <button
             type="button"
             disabled={restartDisabled}

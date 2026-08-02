@@ -188,11 +188,17 @@ fn spawn_control_watcher(control_directory: PathBuf, version: Arc<str>) {
         loop {
             if let Ok(bytes) = tokio::fs::read(&control_path).await
                 && let Ok(request) = serde_json::from_slice::<ControlRequest>(&bytes)
-                && request.action == "restart"
                 && request.version == version.as_ref()
             {
-                let _ = tokio::fs::remove_file(&control_path).await;
-                process::exit(update_bootstrap::UPDATE_RESTART_EXIT_CODE);
+                let exit_code = match request.action.as_str() {
+                    "restart" => Some(update_bootstrap::UPDATE_RESTART_EXIT_CODE),
+                    "serverRestart" => Some(update_bootstrap::SERVER_RESTART_EXIT_CODE),
+                    _ => None,
+                };
+                if let Some(exit_code) = exit_code {
+                    let _ = tokio::fs::remove_file(&control_path).await;
+                    process::exit(exit_code);
+                }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }

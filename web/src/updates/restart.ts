@@ -1,4 +1,10 @@
-import { getHealth, readSessionToken, type HealthSnapshot } from "../api";
+import {
+  getHealth,
+  listSessions,
+  readSessionToken,
+  type HealthSnapshot,
+  type SessionSnapshot,
+} from "../api";
 import type { UpdateState } from "./api";
 
 const UPDATE_POLL_STATES: ReadonlySet<UpdateState> = new Set([
@@ -26,7 +32,12 @@ export interface WaitForServerVersionOptions {
   signal?: AbortSignal;
   attempts?: number;
   intervalMs?: number;
+  previousPrimaryTerminalId?: string;
   readHealth?: (token: string, signal?: AbortSignal) => Promise<HealthSnapshot>;
+  readSessions?: (
+    token: string,
+    signal?: AbortSignal,
+  ) => Promise<SessionSnapshot[]>;
   wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 }
 
@@ -61,7 +72,9 @@ export async function waitForServerVersion({
   signal,
   attempts = 90,
   intervalMs = 1_000,
+  previousPrimaryTerminalId,
   readHealth = getHealth,
+  readSessions = listSessions,
   wait = waitForDelay,
 }: WaitForServerVersionOptions): Promise<boolean> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -80,7 +93,14 @@ export async function waitForServerVersion({
     try {
       const health = await readHealth(token, signal);
       if (health.serverVersion === expectedVersion) {
-        return true;
+        if (!previousPrimaryTerminalId) {
+          return true;
+        }
+        const sessions = await readSessions(token, signal);
+        const primary = sessions.find((session) => session.isPrimary);
+        if (primary && primary.terminalId !== previousPrimaryTerminalId) {
+          return true;
+        }
       }
     } catch {
       // A short connection failure is expected while the server is replaced.

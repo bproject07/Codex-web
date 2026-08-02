@@ -29,6 +29,7 @@ The most important properties are:
 ```text
 .
 ├── AGENTS.md                  Agent workflow and invariants
+├── CLAUDE.md                  Claude-specific pointer and no-local-build rule
 ├── BUILDING.md                Windows/Linux build, test, and package guide
 ├── OPERATIONS.md              Runtime, UI, Tailscale, service, and upgrade guide
 ├── TODO.md                    Deliberately unimplemented, security-scoped ideas
@@ -57,7 +58,7 @@ The most important properties are:
 │   ├── mobile-codex-smoke.py  Browser/mobile smoke test
 │   ├── mobile-resize-regression.py
 │   ├── peer-review-regression.py  Native PTY/helper peer workflow
-│   ├── updater-supervisor-regression.py  Stable-root update/rollback fixture
+│   ├── updater-supervisor-regression.py  Stable-root update/restart/rollback fixture
 │   ├── generate-release-package-manifest.py  Updater package identity marker
 │   ├── generate-third-party-licenses.py  Release license/NOTICE gate
 │   ├── validate-release-archive.py  Bounded archive/layout/binary validation
@@ -68,7 +69,7 @@ The most important properties are:
 │   ├── Cargo.toml
 │   ├── Cargo.lock
 │   ├── examples/
-│   │   └── updater-supervisor-fixture.rs  Native update/rollback fixture
+│   │   └── updater-supervisor-fixture.rs  Native update/restart/rollback fixture
 │   ├── src/
 │   │   ├── agents.rs          Agent discovery and install-guidance catalog
 │   │   ├── auth.rs            Token validation, throttling, Origin checks
@@ -140,6 +141,10 @@ not source and must not be committed.
    running binary. Do not restart or replace a live server unless requested.
 5. Never print or commit tokens, passwords, Git credentials, Codex
    authentication data, or credential-bearing local launch files.
+6. Do not run builds, compilers, tests, package scripts, or browser regressions
+   locally. GitHub Actions is the validation environment for this repository.
+   Make source and documentation changes locally, then report validation as
+   pending until the GitHub workflow completes.
 
 ## Platform launch invariant
 
@@ -213,6 +218,23 @@ preflight, PTY startup, or process termination requires:
 - The primary entry cannot be deleted.
 - `terminalId` is stable for the managed entry.
 - `sessionId` identifies one PTY generation and changes on restart.
+- A controlled **Restart server** or software update destroys every PTY and
+  server-side registry entry. Before either action, the initiating browser tab
+  stores a bounded `sessionStorage` restore plan containing only each ordinary
+  non-primary tab's agent, opaque directory ID, order, and selection. Once the
+  server version is an allowed source/target and the primary `terminalId` has
+  changed, it recreates those tabs as fresh PTYs. New entries receive new
+  `terminalId` and `sessionId` values.
+- Never describe restored tabs as resumed processes. PTY output, shell/agent
+  conversational state, stopped/exited lifecycle state, and in-memory `@cwt`
+  reviewer threads are not restored. Dedicated peer sessions are excluded.
+  If the initiating tab cannot persist a non-empty restore plan, it must refuse
+  the restart/update instead of silently losing the ordinary tabs.
+- Same-version server restart is enabled only when the serving process is
+  direct or its stable root explicitly passed the private restart-capability
+  marker. A worker updated under an older root must report restart as
+  unsupported and remain running. The operator must install the complete new
+  release as the stable launcher before using this action.
 - Output from an old generation must never be appended to the active buffer.
 - A browser attach changes only the displayed session.
 - Managed children and version probes must not inherit the parent-session
@@ -385,8 +407,16 @@ when changing batching or reconnect behavior.
   is routed to the connected terminal and its browser default is suppressed.
   Do not intercept modified shortcuts, form input, dialogs, IME composition,
   or coarse-pointer/mobile input.
-- `Top`, `PgUp`, `PgDn`, and `Live` manipulate client scrollback; they are not
-  terminal input.
+- Mobile `PgUp` and `PgDn` send the standard terminal Page Up/Page Down
+  sequences to the selected PTY, just like the other terminal-input buttons.
+  `Top` and `Live` manipulate only xterm's client scrollback.
+- The Android IME guard translates Gboard/Chrome replacement edits into the
+  minimal terminal Backspace-plus-suffix sequence and restores xterm's helper
+  textarea baseline so its keyCode-229 fallback cannot duplicate the word.
+  Never record the replaced text in diagnostics.
+- On coarse-pointer devices, xterm's custom vertical scrollbar keeps a narrow
+  visible thumb but uses a 28 px draggable target. Desktop keeps xterm's
+  default width.
 - Diagnostics must not include token, keystrokes, or terminal content.
 - Screenshots must use only synthetic fixtures. They must not contain account,
   organization, company, device, or host names; credentials; tokens; private
@@ -436,10 +466,10 @@ per-session working directories also require on both Windows and Linux:
 ## Required validation
 
 Every code change, bug fix, refactor, or dependency update requires validation
-on both Windows and Linux. This rule applies even when a change looks
-platform-independent. A Windows-only result is incomplete. If Linux is not
-available locally, use GitHub Actions, a Linux VM, or a Linux host you control;
-do not skip or simulate the platform result.
+on both Windows and Linux through GitHub Actions. This rule applies even when a
+change looks platform-independent. Agents must not execute the commands in this
+section locally; they define the CI validation contract. A Windows-only result
+is incomplete, and platform results must never be skipped or simulated.
 
 ### Frontend
 
@@ -553,10 +583,14 @@ pending/active state. Pass the current token to a worker only through
 `CODEX_WEB_TOKEN`, never argv or update files, and consume/remove it before
 application threads start. Pass a fresh per-launch readiness nonce through the
 private worker environment and consume/remove it there as well. A worker may
-request another generation only with the reserved exit status and a matching
-pending source. Pointer writes must remain private and atomic. Resume only a
-strict pending transition that matches the known active generation; clear an
-already committed pending record and quarantine malformed or stale state.
+request another update generation only with reserved exit status `75` and a
+matching pending source. A controlled same-version **Restart server** uses the
+distinct reserved status `76`; the stable root must relaunch the exact current
+generation and require the same authenticated nonce-bound readiness checks.
+It must not create or mutate an update pointer. Pointer writes must remain
+private and atomic. Resume only a strict pending transition that matches the
+known active generation; clear an already committed pending record and
+quarantine malformed or stale state.
 
 Persist the matching pending transition while holding `update.lock`, release
 that lock before activation delivery, and only then begin orderly shutdown.
@@ -569,10 +603,12 @@ terminate/wait the candidate, keep the pointer unchanged, and restart the exact
 prior executable; rollback is successful only after the prior generation also
 passes readiness. Preserve one rollback worker release.
 
-Treat the root/worker marker, reserved exit status, pending/active schemas, and
-readiness exchange as a stable security protocol. A change may require a
-manual full-archive launcher replacement because ordinary worker updates
-cannot replace the running root. The v0.1-to-v0.2 transition is always manual.
+Treat the root/worker marker, both reserved exit statuses, pending/active
+schemas, and readiness exchange as a stable security protocol. A change may
+require a manual full-archive launcher replacement because ordinary worker
+updates cannot replace the running root. The v0.1-to-v0.2 transition is always manual.
+The private same-version restart capability must be stripped from managed PTYs,
+agent probes, updater probes, diagnostics, and logs.
 For systemd keep `ExecStart` on the bootstrap package with
 `Restart=on-failure`, `KillSignal=SIGINT`, and `KillMode=control-group`.
 

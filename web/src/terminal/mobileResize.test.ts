@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { isMobileRowOnlyResize } from "./mobileResize";
+import {
+  isMobileRowOnlyResize,
+  terminalScrollbarWidth,
+} from "./mobileResize";
+
+describe("terminalScrollbarWidth", () => {
+  it("doubles xterm's default touch scrollbar target without changing desktop", () => {
+    expect(terminalScrollbarWidth(true)).toBe(28);
+    expect(terminalScrollbarWidth(false)).toBeUndefined();
+  });
+});
 
 describe("isMobileRowOnlyResize", () => {
   it("detects mobile row-only shrink and growth", () => {

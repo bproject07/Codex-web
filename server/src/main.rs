@@ -37,7 +37,9 @@ enum StopCause {
     Public(ServerTaskResult),
     Peer(ServerTaskResult),
     Update(UpdateActivation),
+    Restart,
     UpdateChannelClosed,
+    RestartChannelClosed,
 }
 
 fn main() -> Result<()> {
@@ -80,6 +82,7 @@ async fn run(
     }
     let supervised_worker = worker_context.supervised;
     let readiness_nonce = worker_context.readiness_nonce;
+    let server_restart_supported = worker_context.server_restart_supported;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -125,6 +128,7 @@ async fn run(
             )
         })?;
     let (update_tx, mut update_rx) = mpsc::channel(1);
+    let (restart_tx, mut restart_rx) = mpsc::channel(1);
     let updates = UpdateManager::new(config.state_dir.clone(), config.update_policy, update_tx)?;
 
     let bind_address = SocketAddr::new(config.host, config.port);
@@ -179,6 +183,8 @@ async fn run(
         directories,
         workspaces,
         updates: updates.clone(),
+        restart_tx,
+        server_restart_supported,
         shutdown: public_shutdown.clone(),
         readiness_nonce,
     };
@@ -216,6 +222,7 @@ async fn run(
         &mut public_server,
         &mut peer_server,
         &mut update_rx,
+        &mut restart_rx,
     )
     .await;
 
@@ -275,6 +282,19 @@ async fn run(
             )
             .await
         }
+        StopCause::Restart => {
+            await_server_task(&mut public_server, "HTTP server").await?;
+            await_server_task(&mut peer_server, "private peer bridge").await?;
+            if supervised_worker {
+                std::process::exit(update_bootstrap::SERVER_RESTART_EXIT_CODE);
+            }
+            update_bootstrap::restart_and_supervise(
+                &config,
+                &token,
+                &previous_executable,
+            )
+            .await
+        }
         StopCause::UpdateChannelClosed => {
             if let Err(error) = await_server_task(&mut public_server, "HTTP server").await {
                 tracing::error!(%error, "HTTP server cleanup failed");
@@ -284,6 +304,15 @@ async fn run(
             }
             bail!("update control channel closed unexpectedly")
         }
+        StopCause::RestartChannelClosed => {
+            if let Err(error) = await_server_task(&mut public_server, "HTTP server").await {
+                tracing::error!(%error, "HTTP server cleanup failed");
+            }
+            if let Err(error) = await_server_task(&mut peer_server, "private peer bridge").await {
+                tracing::error!(%error, "private peer bridge cleanup failed");
+            }
+            bail!("restart control channel closed unexpectedly")
+        }
     }
 }
 
@@ -292,6 +321,7 @@ async fn wait_for_stop_cause<S>(
     public_server: &mut JoinHandle<io::Result<()>>,
     peer_server: &mut JoinHandle<io::Result<()>>,
     update_rx: &mut mpsc::Receiver<UpdateActivation>,
+    restart_rx: &mut mpsc::Receiver<()>,
 ) -> StopCause
 where
     S: Future<Output = io::Result<()>>,
@@ -304,6 +334,10 @@ where
         activation = update_rx.recv() => match activation {
             Some(activation) => StopCause::Update(activation),
             None => StopCause::UpdateChannelClosed,
+        },
+        restart = restart_rx.recv() => match restart {
+            Some(()) => StopCause::Restart,
+            None => StopCause::RestartChannelClosed,
         },
     }
 }
@@ -425,6 +459,7 @@ mod tests {
         let mut public_server = tokio::spawn(std::future::pending::<io::Result<()>>());
         let mut peer_server = tokio::spawn(async { Ok(()) });
         let (_update_tx, mut update_rx) = mpsc::channel(1);
+        let (_restart_tx, mut restart_rx) = mpsc::channel(1);
 
         let cause = timeout(
             Duration::from_secs(1),
@@ -433,6 +468,7 @@ mod tests {
                 &mut public_server,
                 &mut peer_server,
                 &mut update_rx,
+                &mut restart_rx,
             ),
         )
         .await
@@ -448,6 +484,34 @@ mod tests {
 
         public_server.abort();
         let _ = public_server.await;
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_restart_signal_selects_controlled_restart() {
+        let mut public_server = tokio::spawn(std::future::pending::<io::Result<()>>());
+        let mut peer_server = tokio::spawn(std::future::pending::<io::Result<()>>());
+        let (_update_tx, mut update_rx) = mpsc::channel(1);
+        let (restart_tx, mut restart_rx) = mpsc::channel(1);
+        restart_tx.send(()).await.expect("queue restart");
+
+        let cause = timeout(
+            Duration::from_secs(1),
+            wait_for_stop_cause(
+                std::future::pending(),
+                &mut public_server,
+                &mut peer_server,
+                &mut update_rx,
+                &mut restart_rx,
+            ),
+        )
+        .await
+        .expect("restart selected");
+
+        assert!(matches!(cause, StopCause::Restart));
+        public_server.abort();
+        peer_server.abort();
+        let _ = public_server.await;
+        let _ = peer_server.await;
     }
 
     #[tokio::test]

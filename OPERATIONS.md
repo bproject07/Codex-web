@@ -821,27 +821,52 @@ begins with Enter and the arrow keys, followed by Esc, Ctrl+C, Tab, Ctrl mode,
 Page Up/Down, Ctrl+L, Top, Live, and Hide, so the interrupt keys stay inside
 the first screenful on a narrow phone.
 
-- **PgUp/PgDn** moves through xterm's client-side scrollback.
+- **PgUp/PgDn** sends the standard terminal Page Up/Page Down input sequences
+  to the selected PTY, including full-screen alternate-buffer TUIs.
 - **Top** moves to the oldest retained client-side line.
 - **Live** returns to current terminal output.
 - **Ctrl** applies Ctrl to the next typed ASCII letter and then turns off.
 - **Hide** hides the toolbar; it can be shown again from Settings.
 
+On a touch/coarse-pointer device, xterm's vertical scrollbar uses a wider
+drag target while keeping a narrow visible thumb. You can still swipe anywhere
+inside the terminal to move through scrollback.
+
+On Android, replacement/autocorrect events are converted to terminal
+Backspace-plus-suffix input. Diagnostics count these translations but never
+include the original or replacement text.
+
 ### Settings
 
 **Settings** opens from the header Menu and now contains only preferences and
 maintenance: font size, client scrollback, theme, cursor blinking, the mobile
-toolbar, software updates, diagnostics, **Restart _agent_**,
+toolbar, software updates, diagnostics, **Restart server**, **Restart _agent_**,
 **Terminate _agent_**, and **Forget token**. **Copy diagnostics** captures
 mobile viewport measurements after terminal focus; it does not include the
 authentication token, keyboard input, or terminal text.
+
+**Restart server** is a real orderly backend restart, not a page refresh. It
+ends every PTY and in-memory `@cwt` thread. The initiating browser tab then
+recreates ordinary non-primary tabs, in order, using the same allowlisted
+agent and opaque directory ID. Each is a fresh PTY with new terminal/session
+identity; old output and conversational context are not resumed. Dedicated
+reviewer tabs are excluded. If a non-empty plan cannot be saved in that tab's
+`sessionStorage`, the restart is refused.
+
+The button is enabled only when the direct server or stable root supports the
+same-version restart protocol. A worker installed by the built-in updater
+under an older root stays running and shows why the button is disabled. Install
+the complete new release as the stable launcher to enable it; do not overwrite
+a running package in place.
 
 **Software updates** shows the running server version and the newest official
 stable release. **Check for updates** performs a read-only request to the fixed
 GitHub repository. For a marked official package, **Update to X.Y.Z and restart**
 downloads and validates the complete native archive side-by-side. It is
 enabled only after explicitly confirming that all PTYs and `@cwt` reviewer
-threads will end. Favorites and Recent remain in the state directory.
+threads will end. The initiating browser tab applies the same bounded ordinary
+tab restoration used by **Restart server**. Favorites and Recent remain in the
+state directory.
 
 Source/development builds show the release but cannot self-install it. Update
 them with the reviewed source/build procedure. The browser never supplies a
@@ -882,7 +907,8 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.2.0",
+  "serverVersion": "0.3.0",
+  "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,
   "connectedClients": 0,
@@ -904,6 +930,8 @@ Important distinction:
   they are removed or closed.
 - `serverVersion` is the native backend version. The update UI accepts the new
   process only when this equals the staged release version.
+- `serverRestartSupported` is `false` when a built-in update is running under
+  an older stable launcher that cannot safely interpret same-version restart.
 
 The frontend can still load while a PTY is failed so diagnostics and restart
 controls remain available.
@@ -1099,6 +1127,11 @@ the bootstrap again. A service stop sends SIGINT to the root, which first asks
 its current worker to stop; `KillMode=control-group` remains the final
 service-wide containment boundary.
 
+The Settings **Restart server** action also keeps `MainPID` stable after the
+bootstrap is supervising a worker. The worker performs orderly shutdown with
+the dedicated same-version restart status, and the root starts the exact
+current executable only after the normal authenticated readiness exchange.
+
 This hardened example discards stdout because startup stdout contains the
 authenticated URL. It also discards the normal structured tracing stream,
 which currently uses stdout. Service state is still available with:
@@ -1150,8 +1183,10 @@ Resolve the exact service, PID, and port first.
 
 ## Upgrade procedure
 
-Server restarts terminate all managed PTYs. Save or finish important agent work
-before upgrading.
+Server restarts terminate all managed PTYs. Save or finish important agent
+work before upgrading. A restart initiated by the current Settings page can
+recreate ordinary tab definitions as fresh PTYs, but it cannot preserve live
+processes, output, agent context, or `@cwt` reviewer threads.
 
 ### Built-in update for an official package
 
@@ -1185,7 +1220,9 @@ After that:
    returns that exact nonce. It then
    atomically commits `active.json` with the active and exact previous
    versions, clears the matching pending record, and continues supervising
-   that worker. The browser reloads only after the same version check.
+   that worker. The browser reloads only after the same version check and a new
+   primary terminal identity, then recreates the initiating tab's saved
+   ordinary sessions with the same agents and directories.
 7. If package validation, startup, readiness, or active-pointer commit fails,
    the candidate is terminated and waited for, `active.json` remains on the
    previous version, and the root starts the exact prior executable and

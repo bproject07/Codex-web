@@ -14,7 +14,7 @@ describe("mobile Ctrl conversion", () => {
 
   it("defines standard VT navigation sequences", () => {
     expect(MOBILE_KEY_SEQUENCES.arrowUp).toBe("\u001b[A");
+    expect(MOBILE_KEY_SEQUENCES.pageUp).toBe("\u001b[5~");
     expect(MOBILE_KEY_SEQUENCES.pageDown).toBe("\u001b[6~");
   });
 });
-

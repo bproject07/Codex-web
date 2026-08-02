@@ -774,6 +774,21 @@ button:disabled {
   scrollbar-width: thin;
 }
 
+@media (pointer: coarse) {
+  /* xterm 6 renders its own 14px scrollbar. TerminalView doubles that
+     pointer target on touch devices; the transparent border keeps the
+     painted thumb slim while the full slider remains draggable. */
+  .terminal-view
+    .xterm-scrollable-element
+    > .scrollbar.vertical
+    > .slider {
+    box-sizing: border-box;
+    border-inline: 8px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+  }
+}
+
 .terminal-atomic-frame {
   position: absolute;
   z-index: 2;
@@ -2498,7 +2513,14 @@ details.peer-composer__readiness p {
   padding-top: 1rem;
 }
 
-/* Restart and Terminate act on the live agent process; Forget token is last. */
+.settings-danger-note {
+  flex: 1 1 100%;
+  color: #d4b779;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+/* Restart actions and Terminate are destructive; Forget token is last. */
 .settings-danger button:not(:last-child) {
   border-color: #7d3f3f;
   color: #ffb5b5;

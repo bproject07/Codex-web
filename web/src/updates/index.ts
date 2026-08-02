@@ -17,3 +17,9 @@ export {
   reloadForUpdatedServer,
   waitForServerVersion,
 } from "./restart";
+export {
+  discardSessionRestorePlan,
+  discardSessionRestorePlanForOriginalGeneration,
+  restoreSessionTabs,
+  stageSessionRestorePlan,
+} from "./sessionRestore";

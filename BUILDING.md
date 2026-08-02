@@ -630,8 +630,15 @@ built-in update the same root PID launches and supervises verified workers from
 `<state-dir>/updates/releases`. A worker never launches the next worker; while
 holding the update lock it writes a bounded pending record containing only the
 request ID and source/target versions, releases the lock, initiates orderly
-shutdown, and exits with the private restart status. The root validates that
-exact transition before acting.
+   shutdown, and exits with private update status `75`. The root validates that
+exact transition before acting. A user-requested same-version server restart
+uses distinct status `76`; it has no pending/active pointer mutation and
+relaunches the exact current executable.
+
+An older v0.2 root does not know status `76`. New roots therefore pass a
+private capability marker to supervised workers. A worker without that marker
+reports server restart as unsupported and must not exit; installing the
+complete new archive as the launcher is required to enable the action.
 
 The root passes the token only through the worker environment; the worker
 consumes/removes it before application threads start. It also supplies a fresh
@@ -645,7 +652,7 @@ the same readiness check.
 
 This makes the v0.2 root a compatibility and security boundary. Normal release
 archives update workers, not the already running root. A change to the
-root/worker marker, reserved exit status, pending/active schema, readiness
+   root/worker marker, either reserved exit status, pending/active schema, readiness
 contract, or supervisor trust logic must include a migration plan and release
 notes that require a manual full-archive launcher replacement when the old
 root cannot safely implement it. Never remove the bootstrap package used by a
@@ -768,11 +775,12 @@ python -B .\scripts\updater-supervisor-regression.py `
 ```
 
 The fixture uses an isolated temporary state directory and loopback port. It
-performs two sequential forward transitions, asserts that the original root
-PID survives while each worker PID changes, rejects a nested supervisor,
-waits for active state to commit after readiness, then forces a candidate
-readiness failure and verifies exact-prior rollback with the active version
-unchanged. By default the fixture is both the root and the synthetic worker.
+   performs two sequential forward transitions, asserts that the original root
+   PID survives while each worker PID changes, exercises a same-version restart
+   with an unchanged active pointer, rejects a nested supervisor, waits for
+   active state to commit after readiness, then forces a candidate readiness
+   failure and verifies exact-prior rollback with the active version unchanged.
+   By default the fixture is both the root and the synthetic worker.
 
 After building a complete package, repeat the same regression with the real
 packaged server as the stable root and the fixture only as its supervised
@@ -789,8 +797,7 @@ python3 -B ./scripts/updater-supervisor-regression.py \
 ```
 
 The release workflow runs this packaged-root mode on both Windows and Linux.
-Run it locally as well whenever updater process, package, or readiness behavior
-changes.
+Repository agents rely on that GitHub workflow and do not run it locally.
 
 The cross-platform registry test in `server/src/registry.rs` uses a synthetic
 command that prints its native current working directory; it proves that the
@@ -1035,8 +1042,9 @@ The Android IME regression loads an already-running frontend with a Chrome 150
 Samsung-sized mobile context. It replaces the HTTP API and WebSocket with
 synthetic in-browser routes, so no generated keystroke can reach a PTY. It
 checks duplicate `keyCode 229`, composition commits, deferred composition
-Enter, soft-keyboard line breaks, and intentionally repeated input. The script
-refuses to run against the live port `8789`:
+Enter, soft-keyboard line breaks, replacement/autocorrect edits with and
+without keydown, and intentionally repeated input. The script refuses to run
+against the live port `8789`:
 
 ```powershell
 python -B .\scripts\android-ime-input-regression.py `

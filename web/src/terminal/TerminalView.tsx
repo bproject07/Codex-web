@@ -25,7 +25,10 @@ import {
   type ConnectionStatus,
 } from "./reconnect";
 import { applyCtrlToInput } from "./mobileKeys";
-import { isMobileRowOnlyResize } from "./mobileResize";
+import {
+  isMobileRowOnlyResize,
+  terminalScrollbarWidth,
+} from "./mobileResize";
 import { takeReplayBatch, type BufferedReplay } from "./replay";
 import {
   TERMINAL_THEMES,
@@ -40,7 +43,6 @@ export interface TerminalViewHandle {
   send: (data: string) => void;
   focus: () => void;
   fit: () => void;
-  scrollPages: (pageCount: number) => void;
   scrollToTop: () => void;
   scrollToBottom: () => void;
   inspect: () => TerminalDiagnostics | null;
@@ -60,6 +62,7 @@ export interface TerminalDiagnostics {
   androidImeDuplicateInputsSuppressed: number;
   androidDuplicateEntersSuppressed: number;
   androidSoftEntersTranslated: number;
+  androidImeReplacementsTranslated: number;
   ptyCols: number | null;
   ptyRows: number | null;
 }
@@ -208,6 +211,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     const androidImeDuplicateInputsSuppressedRef = useRef(0);
     const androidDuplicateEntersSuppressedRef = useRef(0);
     const androidSoftEntersTranslatedRef = useRef(0);
+    const androidImeReplacementsTranslatedRef = useRef(0);
     const freezeFrameRef = useRef<HTMLDivElement | null>(null);
     const freezeFrameTimerRef = useRef<number | null>(null);
     const replayCountRef = useRef(0);
@@ -455,7 +459,6 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         send,
         focus: () => terminalRef.current?.focus(),
         fit,
-        scrollPages: (pageCount) => terminalRef.current?.scrollPages(pageCount),
         scrollToTop: () => terminalRef.current?.scrollToTop(),
         scrollToBottom: () => terminalRef.current?.scrollToBottom(),
         inspect: () => {
@@ -482,6 +485,8 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
               androidDuplicateEntersSuppressedRef.current,
             androidSoftEntersTranslated:
               androidSoftEntersTranslatedRef.current,
+            androidImeReplacementsTranslated:
+              androidImeReplacementsTranslatedRef.current,
             ptyCols: lastSentSizeRef.current?.cols ?? null,
             ptyRows: lastSentSizeRef.current?.rows ?? null,
           };
@@ -496,12 +501,17 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         return;
       }
 
+      const scrollbarWidth = terminalScrollbarWidth(
+        window.matchMedia("(pointer: coarse)").matches,
+      );
       const terminal = new Terminal({
         cursorBlink: settings.cursorBlink,
         convertEol: false,
         scrollback: settings.scrollback,
         scrollOnUserInput: false,
         smoothScrollDuration: 0,
+        overviewRuler:
+          scrollbarWidth === undefined ? undefined : { width: scrollbarWidth },
         fontFamily:
           '"Cascadia Mono", "Cascadia Code", Consolas, "Roboto Mono", "Noto Sans Mono", "Droid Sans Mono", monospace',
         fontSize: settings.fontSize,
@@ -535,6 +545,9 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
             },
             onSoftEnterTranslated: () => {
               androidSoftEntersTranslatedRef.current += 1;
+            },
+            onReplacementTranslated: () => {
+              androidImeReplacementsTranslatedRef.current += 1;
             },
           })
         : null;

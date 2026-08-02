@@ -209,9 +209,17 @@ built-in update. During that update it remains alive under the same process ID,
 starts the verified package as a supervised worker, and becomes the sole
 supervisor for every later worker generation. Workers never create another
 supervisor. A later worker persists a matching bounded `pending.json` before
-initiating orderly shutdown, then requests the transition with its reserved
-exit status. The record contains only the request ID, source version, and
-target version—never a path, URL, command, checksum, or token.
+initiating orderly shutdown, then requests the update transition with reserved
+exit status `75`. A same-version **Restart server** uses distinct status `76`
+and does not mutate update pointers. The pending record contains only the
+request ID, source version, and target version—never a path, URL, command,
+checksum, or token.
+
+Because built-in worker updates cannot replace an older stable root, the
+restart action is capability-gated. A newly updated worker remains fully
+usable but shows **Restart server** as unavailable until the complete new
+release is installed as the stable launcher. This prevents an older root from
+misinterpreting the new restart status.
 
 The candidate receives the existing token only through `CODEX_WEB_TOKEN`, not
 argv or update state, and consumes/removes that inherited variable before
@@ -226,14 +234,21 @@ candidate is terminated and waited for, the pointer remains unchanged, and the
 root starts the exact prior executable and requires it to become ready before
 supervision continues.
 
-Updating terminates all PTYs and in-memory `@cwt` threads. It preserves the
-same effective server settings, authentication token, port, project,
-Favorites, and Recent state for the controlled restart. The browser waits for
-the expected server version and reloads. If the browser has blocked
-`sessionStorage`, that one same-origin reload carries the token in the query
-string and removes it from the visible address again as soon as the frontend
-starts. Keep enough free space for the download, extraction, current release,
-and one rollback release.
+Updating terminates all PTYs and in-memory `@cwt` threads. Before applying it,
+the initiating browser tab saves the ordinary non-primary tab layout in
+`sessionStorage`: agent, opaque directory ID, order, and current selection
+only. After the expected server version and a new primary generation appear,
+the page reloads and recreates those ordinary tabs as fresh PTYs in the same
+folders. Their old output and agent context are not resumed, and dedicated
+reviewer tabs are not restored. An update is refused when ordinary tabs exist
+but this browser tab cannot save the restore plan.
+
+The controlled restart also preserves the same effective server settings,
+authentication token, port, project, Favorites, and Recent state. If browser
+storage is unavailable and there are no extra tabs, the one same-origin reload
+can still carry the token in the query string and removes it from the visible
+address as soon as the frontend starts. Keep enough free space for the
+download, extraction, current release, and one rollback release.
 
 Only GitHub release packages carry the required marker. `dist`, `dist-linux`,
 `cargo run`, and locally modified/source-built packages can check and link to a
@@ -384,8 +399,9 @@ identity), and the connection-status dot), then the ellipsis **Menu** button
 the WebSocket automatically with increasing delays. The Menu holds the general
 application actions — **New terminal**, **Settings**, **Manage sessions**, and
 **Full screen** — while **Settings** itself keeps only preferences,
-diagnostics, software updates, and the restart/terminate controls. The Menu
-button shows the update badge when a new release is available.
+diagnostics, software updates, **Restart server**, and the selected-agent
+restart/terminate controls. The Menu button shows the update badge when a new
+release is available.
 **New terminal** creates another live agent PTY and first opens **Choose a
 project folder**:
 
@@ -844,7 +860,7 @@ Endpoints:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/health` | Server version plus aggregate installation, process, session/client counts, and configured `maxSessions` capacity |
+| `GET` | `/api/health` | Server version, restart capability, aggregate installation/process/session/client counts, and configured `maxSessions` capacity |
 | `GET` | `/api/update` | Read the in-memory official application update state; never performs host mutation |
 | `POST` | `/api/update/check` | Check the fixed official GitHub release feed now |
 | `POST` | `/api/update/apply` | Start verified side-by-side installation after exact-version and session-termination confirmation |
@@ -862,6 +878,7 @@ Endpoints:
 | `POST` | `/api/sessions/{terminalId}/restart` | Terminate and recreate one agent PTY |
 | `POST` | `/api/sessions/{terminalId}/terminate` | Terminate one agent PTY without removing its entry |
 | `DELETE` | `/api/sessions/{terminalId}` | Terminate and remove a non-primary session |
+| `POST` | `/api/server/restart` | With explicit session-termination confirmation, orderly-restart the same server generation |
 | `GET` | `/api/peer/threads` | List active supervised peer threads and their current bounded turn |
 | `POST` | `/api/peer/threads` | Create a fresh dedicated reviewer for one running source terminal |
 | `GET` | `/api/peer/threads/{threadId}` | Read one active peer thread |
@@ -1050,7 +1067,14 @@ The mobile toolbar begins with Enter and the arrow keys, followed by Esc,
 Ctrl+C, Tab, Ctrl mode, Page Up/Down, Ctrl+L, Top, Live, and Hide, keeping the
 interrupt keys inside the first screenful on a narrow phone. Its Ctrl mode
 converts the next typed ASCII letter to the matching control character, then
-automatically turns off.
+automatically turns off. Page Up/Down send the standard terminal input
+sequences to the selected PTY, including full-screen alternate-buffer TUIs.
+Top and Live continue to navigate xterm's client-side scrollback.
+On touch/coarse-pointer devices, xterm's vertical scrollbar has a 28 px
+draggable target while its painted thumb stays narrow.
+The Android IME guard also converts keyboard replacement/autocorrect edits to
+the corresponding terminal Backspace-plus-suffix input, avoiding duplicated
+whole-word output from overlapping Chrome/Gboard and xterm fallbacks.
 
 The header's session tabs and the **New terminal** and **Manage sessions**
 actions in the ellipsis Menu operate on independent live PTYs. **New

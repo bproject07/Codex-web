@@ -21,7 +21,9 @@ use crate::{
         CWT_TERMINAL_ID_ENV,
     },
     process_tree::{BoundedProcessOptions, run_bounded},
-    update_bootstrap::{READINESS_NONCE_ENV, SUPERVISED_WORKER_ENV},
+    update_bootstrap::{
+        READINESS_NONCE_ENV, SERVER_RESTART_CAPABILITY_ENV, SUPERVISED_WORKER_ENV,
+    },
 };
 
 pub const INITIAL_COLS: u16 = 120;
@@ -240,6 +242,7 @@ fn remove_server_secret_environment(command: &mut CommandBuilder) {
     command.env_remove(CODEX_WEB_TOKEN_ENV);
     command.env_remove(SUPERVISED_WORKER_ENV);
     command.env_remove(READINESS_NONCE_ENV);
+    command.env_remove(SERVER_RESTART_CAPABILITY_ENV);
 }
 
 fn resolve_command(command: &str, agent: AgentKind) -> Result<ResolvedCommand> {
@@ -562,7 +565,8 @@ fn configure_version_probe_environment(command: &mut Command, agent: AgentKind) 
         .env_remove(CLAUDE_NESTING_ENV)
         .env_remove(CODEX_WEB_TOKEN_ENV)
         .env_remove(SUPERVISED_WORKER_ENV)
-        .env_remove(READINESS_NONCE_ENV);
+        .env_remove(READINESS_NONCE_ENV)
+        .env_remove(SERVER_RESTART_CAPABILITY_ENV);
     for name in PEER_ENVIRONMENT_NAMES {
         command.env_remove(name);
     }
@@ -693,6 +697,9 @@ mod command_tests {
         let mut command = CommandBuilder::new("codex");
         command.env(CODEX_THREAD_ID_ENV, "parent-thread");
         command.env(CODEX_WEB_TOKEN_ENV, "server-bearer-token");
+        command.env(SUPERVISED_WORKER_ENV, "1");
+        command.env(READINESS_NONCE_ENV, "internal-nonce");
+        command.env(SERVER_RESTART_CAPABILITY_ENV, "1");
         for name in PEER_ENVIRONMENT_NAMES {
             command.env(name, "stale-peer-value");
         }
@@ -704,6 +711,9 @@ mod command_tests {
         assert_eq!(command.get_env(CODEX_THREAD_ID_ENV), None);
         assert_eq!(command.get_env(CLAUDE_NESTING_ENV), None);
         assert_eq!(command.get_env(CODEX_WEB_TOKEN_ENV), None);
+        assert_eq!(command.get_env(SUPERVISED_WORKER_ENV), None);
+        assert_eq!(command.get_env(READINESS_NONCE_ENV), None);
+        assert_eq!(command.get_env(SERVER_RESTART_CAPABILITY_ENV), None);
         for name in PEER_ENVIRONMENT_NAMES {
             assert_eq!(command.get_env(name), None);
         }
@@ -765,6 +775,7 @@ mod command_tests {
             .env(CODEX_THREAD_ID_ENV, "parent-codex")
             .env(CLAUDE_NESTING_ENV, "parent-claude")
             .env(CODEX_WEB_TOKEN_ENV, "server-bearer-token")
+            .env(SERVER_RESTART_CAPABILITY_ENV, "1")
             .env("CWT_PEER_CAPABILITY", "stale-peer-secret");
         configure_version_probe_environment(&mut claude, AgentKind::Claude);
         let claude_environment = environment(&claude);
@@ -778,6 +789,10 @@ mod command_tests {
         );
         assert_eq!(
             claude_environment.get(OsStr::new(CODEX_WEB_TOKEN_ENV)),
+            Some(&None)
+        );
+        assert_eq!(
+            claude_environment.get(OsStr::new(SERVER_RESTART_CAPABILITY_ENV)),
             Some(&None)
         );
         assert_eq!(

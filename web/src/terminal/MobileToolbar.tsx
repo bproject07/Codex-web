@@ -5,7 +5,6 @@ interface MobileKeysProps {
   ctrlMode: boolean;
   onCtrlModeChange: (active: boolean) => void;
   onSend: (data: string) => void;
-  onScrollPages: (pageCount: number) => void;
   onScrollToTop: () => void;
   onScrollToBottom: () => void;
   onHide: () => void;
@@ -56,6 +55,8 @@ const LEADING_KEYS: KeyButton[] = [
 ];
 
 const TRAILING_KEYS: KeyButton[] = [
+  { label: "PgUp", data: MOBILE_KEY_SEQUENCES.pageUp, title: "Page up" },
+  { label: "PgDn", data: MOBILE_KEY_SEQUENCES.pageDown, title: "Page down" },
   { label: "Ctrl+L", data: MOBILE_KEY_SEQUENCES.ctrlL, title: "Clear screen" },
 ];
 
@@ -63,7 +64,6 @@ export function MobileToolbar({
   ctrlMode,
   onCtrlModeChange,
   onSend,
-  onScrollPages,
   onScrollToTop,
   onScrollToBottom,
   onHide,
@@ -98,22 +98,6 @@ export function MobileToolbar({
           onClick={() => onCtrlModeChange(!ctrlMode)}
         >
           Ctrl
-        </button>
-        <button
-          className="key-button key-button--history"
-          type="button"
-          title="Scroll terminal history up one page"
-          onClick={() => onScrollPages(-1)}
-        >
-          PgUp
-        </button>
-        <button
-          className="key-button key-button--history"
-          type="button"
-          title="Scroll terminal history down one page"
-          onClick={() => onScrollPages(1)}
-        >
-          PgDn
         </button>
         {TRAILING_KEYS.map((key) => (
           <button

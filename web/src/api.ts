@@ -75,6 +75,7 @@ export interface HealthSnapshot {
   sessionCount: number;
   runningSessions: number;
   maxSessions: number;
+  serverRestartSupported: boolean;
 }
 
 export interface SessionSnapshot {
@@ -257,6 +258,7 @@ export async function getHealth(
     sessionCount: health.sessionCount,
     runningSessions: health.runningSessions,
     maxSessions: health.maxSessions,
+    serverRestartSupported: health.serverRestartSupported === true,
   };
 }
 
@@ -513,6 +515,14 @@ export async function deleteSession(
     token,
     { method: "DELETE" },
   );
+}
+
+export async function restartServer(token: string): Promise<void> {
+  await apiRequest<{ status: "restarting" }>("/api/server/restart", token, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmSessionTermination: true }),
+  });
 }
 
 type LegacySessionSnapshot = Omit<

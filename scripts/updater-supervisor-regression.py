@@ -246,6 +246,13 @@ def request_restart(state_directory: Path, version: str) -> None:
     )
 
 
+def request_server_restart(state_directory: Path, version: str) -> None:
+    write_json_atomic(
+        state_directory / CONTROL_DIRECTORY / CONTROL_FILE,
+        {"action": "serverRestart", "version": version},
+    )
+
+
 def select_port(requested: int) -> int:
     if requested == LIVE_PORT:
         raise RegressionFailure(f"refusing to use live port {LIVE_PORT}")
@@ -464,6 +471,7 @@ def run_regression(args: argparse.Namespace) -> dict[str, Any]:
         environment = os.environ.copy()
         environment.pop("CWT_INTERNAL_SUPERVISED_WORKER", None)
         environment.pop("CWT_INTERNAL_READINESS_NONCE", None)
+        environment.pop("CWT_INTERNAL_SERVER_RESTART", None)
         environment["CODEX_WEB_TOKEN"] = FIXTURE_TOKEN
         environment["HTTP_PROXY"] = "http://127.0.0.1:1"
         environment["HTTPS_PROXY"] = "http://127.0.0.1:1"
@@ -535,6 +543,21 @@ def run_regression(args: argparse.Namespace) -> dict[str, Any]:
                 args.timeout,
             )
 
+            request_server_restart(state_directory, second_version)
+            restarted = wait_for_generation(
+                process,
+                port,
+                second_version,
+                root_process_id,
+                args.timeout,
+                reported_root_process_id=reported_root_process_id,
+                previous_worker_id=second_worker_id,
+            )
+            restarted_worker_id = int(restarted["processId"])
+            current_worker_id = restarted_worker_id
+            assert_active(state_directory, second_version, first_version)
+            assert_pending_removed(state_directory)
+
             create_release(
                 state_directory,
                 fixture,
@@ -550,7 +573,7 @@ def run_regression(args: argparse.Namespace) -> dict[str, Any]:
                 root_process_id,
                 args.timeout,
                 reported_root_process_id=reported_root_process_id,
-                previous_worker_id=second_worker_id,
+                previous_worker_id=restarted_worker_id,
             )
             rollback_worker_id = int(rollback["processId"])
             current_worker_id = rollback_worker_id
@@ -745,6 +768,12 @@ def run_regression(args: argparse.Namespace) -> dict[str, Any]:
                 "secondActivation": {
                     "version": second_version,
                     "workerProcessId": second_worker_id,
+                },
+                "sameGenerationRestart": {
+                    "version": second_version,
+                    "workerProcessId": restarted_worker_id,
+                    "rootProcessId": root_process_id,
+                    "activePointerUnchanged": True,
                 },
                 "failedCandidateVersion": failed_version,
                 "rollback": {

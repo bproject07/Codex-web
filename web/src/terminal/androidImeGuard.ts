@@ -45,6 +45,7 @@ interface AndroidImeGuardOptions {
   onDuplicateInputSuppressed?: () => void;
   onDuplicateEnterSuppressed?: () => void;
   onSoftEnterTranslated?: () => void;
+  onReplacementTranslated?: () => void;
 }
 
 export interface AndroidImeGuardDisposable {
@@ -87,6 +88,27 @@ export function isEnterInputType(inputType: string): boolean {
   return inputType === "insertLineBreak" || inputType === "insertParagraph";
 }
 
+export function translateAndroidImeReplacement(
+  previousValue: string,
+  nextValue: string,
+): string {
+  const previous = Array.from(previousValue);
+  const next = Array.from(nextValue);
+  let commonPrefixLength = 0;
+  while (
+    commonPrefixLength < previous.length &&
+    commonPrefixLength < next.length &&
+    previous[commonPrefixLength] === next[commonPrefixLength]
+  ) {
+    commonPrefixLength += 1;
+  }
+
+  return (
+    "\u007f".repeat(previous.length - commonPrefixLength) +
+    next.slice(commonPrefixLength).join("")
+  );
+}
+
 export function installAndroidImeGuard(
   container: HTMLElement,
   textarea: HTMLTextAreaElement,
@@ -96,6 +118,7 @@ export function installAndroidImeGuard(
     onDuplicateInputSuppressed,
     onDuplicateEnterSuppressed,
     onSoftEnterTranslated,
+    onReplacementTranslated,
   }: AndroidImeGuardOptions,
 ): AndroidImeGuardDisposable {
   if (!enabled) {
@@ -114,7 +137,9 @@ export function installAndroidImeGuard(
   let pendingBlurRestore: PendingBlurRestore | null = null;
   let compositionCommitPending = false;
   let suppressNextCompositionEnd = false;
+  let replacementBeforeInputValue: string | null = null;
   const deferredEnterTimers = new Set<number>();
+  const replacementRestoreTimers = new Set<number>();
 
   const dispatchSyntheticCompositionEnd = () => {
     textarea.dispatchEvent(
@@ -333,6 +358,7 @@ export function installAndroidImeGuard(
     if (event.target !== textarea) {
       return;
     }
+    replacementBeforeInputValue = null;
 
     const pendingCompositionTransaction = enterTransaction;
     if (
@@ -411,6 +437,7 @@ export function installAndroidImeGuard(
     if (event.target !== textarea) {
       return;
     }
+    replacementBeforeInputValue = null;
     suppressNextCompositionEnd = false;
     const pendingCompositionTransaction = enterTransaction;
     if (
@@ -462,12 +489,42 @@ export function installAndroidImeGuard(
     armPendingInput("compositionend");
   };
 
+  const onBeforeInput = (event: Event) => {
+    if (
+      event.target !== textarea ||
+      !(event instanceof InputEvent) ||
+      isComposing ||
+      event.isComposing
+    ) {
+      return;
+    }
+    replacementBeforeInputValue =
+      event.inputType === "insertReplacementText" ? textarea.value : null;
+  };
+
   const onInput = (event: Event) => {
     if (event.target !== textarea || !(event instanceof InputEvent)) {
       return;
     }
 
     const currentPendingInput = pendingInput;
+    const currentValue = textarea.value;
+    const pendingValue =
+      currentPendingInput?.source === "key229"
+        ? currentPendingInput.textareaValueBefore
+        : null;
+    const replacementValue =
+      currentPendingInput?.source === "compositionend"
+        ? null
+        : pendingValue ?? replacementBeforeInputValue;
+    const replacementLikeInput =
+      event.inputType === "insertReplacementText" ||
+      (currentPendingInput?.source === "key229" &&
+        event.inputType === "insertText" &&
+        replacementValue !== null &&
+        replacementValue.length > 0 &&
+        !currentValue.startsWith(replacementValue));
+    replacementBeforeInputValue = null;
 
     if (isEnterInputType(event.inputType)) {
       if (currentPendingInput?.source !== "compositionend") {
@@ -500,6 +557,42 @@ export function installAndroidImeGuard(
       return;
     }
 
+    if (
+      replacementLikeInput &&
+      replacementValue !== null &&
+      currentValue !== replacementValue
+    ) {
+      const translated = translateAndroidImeReplacement(
+        replacementValue,
+        currentValue,
+      );
+      // xterm's keyCode-229 fallback compares the textarea after this event.
+      // Restore its baseline so that helper emits nothing, then send the
+      // minimal terminal edit ourselves instead of duplicating the whole word.
+      textarea.value = replacementValue;
+      const replacementRestoreTimer = window.setTimeout(() => {
+        replacementRestoreTimers.delete(replacementRestoreTimer);
+        if (
+          !isComposing &&
+          document.activeElement === textarea &&
+          textarea.value === replacementValue
+        ) {
+          // xterm's zero-delay keyCode-229 diff has now observed the unchanged
+          // baseline. Keep the helper synchronized with the accepted edit so a
+          // following replacement or character starts from the right value.
+          textarea.value = currentValue;
+        }
+      }, 0);
+      replacementRestoreTimers.add(replacementRestoreTimer);
+      clearPendingInput();
+      event.stopPropagation();
+      onReplacementTranslated?.();
+      if (translated) {
+        onTerminalInput(translated);
+      }
+      return;
+    }
+
     clearPendingInput();
     if (currentPendingInput) {
       const suppress = shouldSuppressAndroidImeInput({
@@ -528,6 +621,7 @@ export function installAndroidImeGuard(
 
   const onBlur = () => {
     isComposing = false;
+    replacementBeforeInputValue = null;
     clearPendingInput();
     if (enterTransaction?.mode !== "composition") {
       clearEnterTransaction(true);
@@ -591,6 +685,7 @@ export function installAndroidImeGuard(
   container.addEventListener("keypress", onKeyPress, true);
   container.addEventListener("compositionstart", onCompositionStart, true);
   container.addEventListener("compositionend", onCompositionEnd, true);
+  container.addEventListener("beforeinput", onBeforeInput, true);
   container.addEventListener("input", onInput, true);
   container.addEventListener("blur", onBlurCapture, true);
   textarea.addEventListener("blur", onBlur);
@@ -606,6 +701,7 @@ export function installAndroidImeGuard(
         true,
       );
       container.removeEventListener("compositionend", onCompositionEnd, true);
+      container.removeEventListener("beforeinput", onBeforeInput, true);
       container.removeEventListener("input", onInput, true);
       container.removeEventListener("blur", onBlurCapture, true);
       textarea.removeEventListener("blur", onBlur);
@@ -615,10 +711,15 @@ export function installAndroidImeGuard(
       pendingBlurRestore = null;
       compositionCommitPending = false;
       suppressNextCompositionEnd = false;
+      replacementBeforeInputValue = null;
       for (const timer of deferredEnterTimers) {
         window.clearTimeout(timer);
       }
       deferredEnterTimers.clear();
+      for (const timer of replacementRestoreTimers) {
+        window.clearTimeout(timer);
+      }
+      replacementRestoreTimers.clear();
     },
   };
 }

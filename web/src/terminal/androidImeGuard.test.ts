@@ -4,6 +4,7 @@ import {
   isEnterInputType,
   shouldEnableAndroidImeGuard,
   shouldSuppressAndroidImeInput,
+  translateAndroidImeReplacement,
 } from "./androidImeGuard";
 
 describe("shouldEnableAndroidImeGuard", () => {
@@ -114,5 +115,20 @@ describe("isEnterInputType", () => {
     expect(isEnterInputType("insertLineBreak")).toBe(true);
     expect(isEnterInputType("insertParagraph")).toBe(true);
     expect(isEnterInputType("insertText")).toBe(false);
+  });
+});
+
+describe("translateAndroidImeReplacement", () => {
+  it("rewrites only the changed suffix with terminal backspaces", () => {
+    expect(translateAndroidImeReplacement("teh", "the")).toBe(
+      "\u007f\u007fhe",
+    );
+    expect(translateAndroidImeReplacement("dont", "don't")).toBe(
+      "\u007f\u007f\u007f\u007fon't",
+    );
+  });
+
+  it("counts a Unicode scalar as one terminal deletion", () => {
+    expect(translateAndroidImeReplacement("go🙂", "go!")).toBe("\u007f!");
   });
 });

@@ -28,7 +28,9 @@ use crate::{
 
 pub const SUPERVISED_WORKER_ENV: &str = "CWT_INTERNAL_SUPERVISED_WORKER";
 pub const READINESS_NONCE_ENV: &str = "CWT_INTERNAL_READINESS_NONCE";
+pub const SERVER_RESTART_CAPABILITY_ENV: &str = "CWT_INTERNAL_SERVER_RESTART";
 pub const UPDATE_RESTART_EXIT_CODE: i32 = 75;
+pub const SERVER_RESTART_EXIT_CODE: i32 = 76;
 
 const ACTIVE_POINTER_SCHEMA_VERSION: u32 = 2;
 const PENDING_POINTER_SCHEMA_VERSION: u32 = 1;
@@ -92,16 +94,19 @@ enum GenerationExit {
 pub struct WorkerContext {
     pub supervised: bool,
     pub readiness_nonce: Option<String>,
+    pub server_restart_supported: bool,
 }
 
 pub fn take_worker_context() -> Result<WorkerContext> {
     let marker = env::var_os(SUPERVISED_WORKER_ENV);
     let readiness_nonce = env::var(READINESS_NONCE_ENV).ok();
+    let server_restart_capability = env::var_os(SERVER_RESTART_CAPABILITY_ENV);
     // SAFETY: this function is called by the synchronous outer main before a
     // Tokio runtime or any application threads are created.
     unsafe {
         env::remove_var(SUPERVISED_WORKER_ENV);
         env::remove_var(READINESS_NONCE_ENV);
+        env::remove_var(SERVER_RESTART_CAPABILITY_ENV);
     }
 
     let supervised = match marker {
@@ -117,10 +122,20 @@ pub fn take_worker_context() -> Result<WorkerContext> {
         }
         (true, None) => bail!("a supervised worker is missing its readiness nonce"),
     }
+    let server_restart_supported = match (supervised, server_restart_capability) {
+        (false, None) => true,
+        (false, Some(_)) => {
+            bail!("the internal server-restart capability requires a supervised worker")
+        }
+        (true, None) => false,
+        (true, Some(value)) if value == "1" => true,
+        (true, Some(_)) => bail!("the internal server-restart capability is invalid"),
+    };
 
     Ok(WorkerContext {
         supervised,
         readiness_nonce,
+        server_restart_supported,
     })
 }
 
@@ -374,6 +389,23 @@ pub async fn activate_and_supervise(
     supervise_generation(config, token, generation).await
 }
 
+pub async fn restart_and_supervise(
+    config: &Config,
+    token: &str,
+    current_executable: &Path,
+) -> Result<()> {
+    let version =
+        Version::parse(env!("CARGO_PKG_VERSION")).context("the running version is invalid")?;
+    let spec = GenerationSpec {
+        version,
+        executable: current_executable.to_path_buf(),
+    };
+    let Some(generation) = launch_generation(config, token, spec, false).await? else {
+        return Ok(());
+    };
+    supervise_generation(config, token, generation).await
+}
+
 async fn supervise_generation(
     config: &Config,
     token: &str,
@@ -396,6 +428,14 @@ async fn supervise_generation(
                 let Some(next) =
                     activate_or_rollback(config, token, previous, pending, false).await?
                 else {
+                    return Ok(());
+                };
+                generation = next;
+            }
+            GenerationExit::Status(status) if status.code() == Some(SERVER_RESTART_EXIT_CODE) => {
+                generation.process.terminate_descendants();
+                let current = generation.spec.clone();
+                let Some(next) = launch_generation(config, token, current, false).await? else {
                     return Ok(());
                 };
                 generation = next;
@@ -573,6 +613,7 @@ fn start_server(
         .env("CODEX_WEB_TOKEN", token)
         .env(SUPERVISED_WORKER_ENV, "1")
         .env(READINESS_NONCE_ENV, readiness_nonce)
+        .env(SERVER_RESTART_CAPABILITY_ENV, "1")
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -584,6 +625,7 @@ fn is_internal_environment(name: &OsStr) -> bool {
     let name = name.to_string_lossy();
     name.eq_ignore_ascii_case(SUPERVISED_WORKER_ENV)
         || name.eq_ignore_ascii_case(READINESS_NONCE_ENV)
+        || name.eq_ignore_ascii_case(SERVER_RESTART_CAPABILITY_ENV)
         || name.eq_ignore_ascii_case("CODEX_THREAD_ID")
         || name.eq_ignore_ascii_case("CLAUDECODE")
         || name

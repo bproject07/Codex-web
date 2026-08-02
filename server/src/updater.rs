@@ -33,8 +33,8 @@ use crate::{
     config::UpdatePolicy,
     process_tree::{BoundedProcessOptions, run_bounded},
     update_bootstrap::{
-        READINESS_NONCE_ENV, SUPERVISED_WORKER_ENV, persist_pending_activation,
-        remove_matching_pending_activation,
+        READINESS_NONCE_ENV, SERVER_RESTART_CAPABILITY_ENV, SUPERVISED_WORKER_ENV,
+        persist_pending_activation, remove_matching_pending_activation,
     },
     update_fs::{
         UpdateFileLock, ensure_private_directory, safe_remove_tree, validate_regular_directory,
@@ -1108,6 +1108,7 @@ fn is_probe_secret(name: &OsStr) -> bool {
     name.eq_ignore_ascii_case("CODEX_WEB_TOKEN")
         || name.eq_ignore_ascii_case(SUPERVISED_WORKER_ENV)
         || name.eq_ignore_ascii_case(READINESS_NONCE_ENV)
+        || name.eq_ignore_ascii_case(SERVER_RESTART_CAPABILITY_ENV)
         || name.eq_ignore_ascii_case("CODEX_THREAD_ID")
         || name.eq_ignore_ascii_case("CLAUDECODE")
         || name
@@ -1162,6 +1163,7 @@ mod tests {
             .env("CODEX_WEB_TOKEN", "server-secret")
             .env(SUPERVISED_WORKER_ENV, "1")
             .env(READINESS_NONCE_ENV, "internal-nonce")
+            .env(SERVER_RESTART_CAPABILITY_ENV, "1")
             .env("CODEX_THREAD_ID", "parent-codex")
             .env("CLAUDECODE", "parent-claude")
             .env("CWT_PEER_FUTURE_SECRET", "peer-secret");
@@ -1176,6 +1178,7 @@ mod tests {
             "CODEX_WEB_TOKEN",
             SUPERVISED_WORKER_ENV,
             READINESS_NONCE_ENV,
+            SERVER_RESTART_CAPABILITY_ENV,
             "CODEX_THREAD_ID",
             "CLAUDECODE",
             "CWT_PEER_FUTURE_SECRET",

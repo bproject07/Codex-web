@@ -30,7 +30,7 @@ const TOKEN: &str = "workspace-api-test-token";
 #[tokio::test]
 async fn health_reports_the_configured_session_capacity() {
     let fixture = tempfile::tempdir().expect("temporary project");
-    let (app, _, _) = test_router_with_options(fixture.path(), None, 7).await;
+    let (app, _, _) = test_router_with_options(fixture.path(), None, 7, true).await;
 
     let health = json_response(
         app.oneshot(request("GET", "/api/health", None, true))
@@ -41,6 +41,7 @@ async fn health_reports_the_configured_session_capacity() {
 
     assert_eq!(health["sessionCount"], 1);
     assert_eq!(health["maxSessions"], 7);
+    assert_eq!(health["serverRestartSupported"], true);
     assert_eq!(health["serverVersion"], env!("CARGO_PKG_VERSION"));
 }
 
@@ -68,9 +69,64 @@ async fn update_status_is_authenticated_and_reports_disabled_policy() {
 }
 
 #[tokio::test]
+async fn server_restart_requires_authentication_and_explicit_confirmation() {
+    let fixture = tempfile::tempdir().expect("temporary project");
+    let app = test_router(fixture.path()).await;
+
+    let unauthorized = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/server/restart",
+            Some(json!({ "confirmSessionTermination": true })),
+            false,
+        ))
+        .await
+        .expect("unauthorized restart response");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let unconfirmed = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/server/restart",
+            Some(json!({ "confirmSessionTermination": false })),
+            true,
+        ))
+        .await
+        .expect("unconfirmed restart response");
+    assert_eq!(unconfirmed.status(), StatusCode::CONFLICT);
+
+    let accepted = app
+        .oneshot(request(
+            "POST",
+            "/api/server/restart",
+            Some(json!({ "confirmSessionTermination": true })),
+            true,
+        ))
+        .await
+        .expect("accepted restart response");
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+    let unsupported_fixture = tempfile::tempdir().expect("unsupported project");
+    let (unsupported_app, _, _) =
+        test_router_with_options(unsupported_fixture.path(), None, 7, false).await;
+    let unsupported = unsupported_app
+        .oneshot(request(
+            "POST",
+            "/api/server/restart",
+            Some(json!({ "confirmSessionTermination": true })),
+            true,
+        ))
+        .await
+        .expect("unsupported restart response");
+    assert_eq!(unsupported.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn session_creation_reports_the_configured_capacity_conflict() {
     let fixture = tempfile::tempdir().expect("temporary project");
-    let (app, sessions, _) = test_router_with_options(fixture.path(), None, 1).await;
+    let (app, sessions, _) = test_router_with_options(fixture.path(), None, 1, true).await;
 
     let response = app
         .oneshot(request(
@@ -98,6 +154,7 @@ async fn peer_provisioning_rolls_back_when_session_capacity_is_full() {
         fixture.path(),
         Some(command.to_string_lossy().into_owned()),
         1,
+        true,
     )
     .await;
     sessions
@@ -617,13 +674,14 @@ async fn test_router_with_command(
     project: &Path,
     command: Option<String>,
 ) -> (axum::Router, SessionRegistry, PeerBroker) {
-    test_router_with_options(project, command, DEFAULT_MAX_SESSIONS).await
+    test_router_with_options(project, command, DEFAULT_MAX_SESSIONS, true).await
 }
 
 async fn test_router_with_options(
     project: &Path,
     command: Option<String>,
     max_sessions: usize,
+    server_restart_supported: bool,
 ) -> (axum::Router, SessionRegistry, PeerBroker) {
     let project = dunce::canonicalize(project).expect("canonical project");
     let state_dir = project.join("state");
@@ -666,6 +724,10 @@ async fn test_router_with_options(
         tokio::sync::mpsc::channel(1).0,
     )
     .expect("update manager");
+    let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        while restart_rx.recv().await.is_some() {}
+    });
     let state = AppState {
         config,
         auth: AuthState::new(TOKEN.to_owned()),
@@ -677,6 +739,8 @@ async fn test_router_with_options(
             .await
             .expect("workspace store"),
         updates,
+        restart_tx,
+        server_restart_supported,
         shutdown: CancellationToken::new(),
         readiness_nonce: None,
     };

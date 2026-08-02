@@ -37,6 +37,7 @@ describe("UpdatePanel", () => {
     expect(html).toContain("Update available");
     expect(html).toContain("Latest release 0.3.0");
     expect(html).toContain("ends every running terminal and");
+    expect(html).toContain("recreates ordinary terminal");
     expect(html).toContain("Favorites and Recent folders remain saved");
     expect(html).toContain("disabled");
   });

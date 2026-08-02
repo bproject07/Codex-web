@@ -25,6 +25,8 @@ RESERVED_LIVE_PORT = 8789
 TERMINAL_ID = "android-ime-regression"
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 TEXT_PAYLOAD = b"test"
+MISSPELLED_PAYLOAD = b"teh"
+REPLACEMENT_PAYLOAD = b"\x7f\x7fhe"
 GO_PAYLOAD = b"go"
 LETTER_PAYLOAD = b"l"
 ENTER_PAYLOAD = b"\r"
@@ -348,6 +350,56 @@ def expired_keydown_229_then_input_only(page: Page) -> None:
           );
           ime.input(
             "input", "insertText", "test", false, true, "test",
+          );
+        }"""
+    )
+
+
+def keydown_229_replacement_text(page: Page) -> None:
+    page.evaluate(
+        r"""() => {
+          const ime = window.__androidIme;
+          ime.keyboard("keydown", "Unidentified", "", 229, 0, true);
+          ime.input("beforeinput", "insertText", "teh", false, false);
+          ime.input("input", "insertText", "teh", false, false, "teh");
+          ime.keyboard("keyup", "Unidentified", "", 229, 0, false);
+        }"""
+    )
+    page.wait_for_timeout(20)
+    page.evaluate(
+        r"""() => {
+          const ime = window.__androidIme;
+          ime.keyboard("keydown", "Unidentified", "", 229, 0, true);
+          ime.input(
+            "beforeinput", "insertReplacementText", "the", false, true,
+          );
+          ime.input(
+            "input", "insertReplacementText", "the", false, true, "the",
+          );
+          ime.keyboard("keyup", "Unidentified", "", 229, 0, false);
+        }"""
+    )
+
+
+def replacement_text_without_keydown(page: Page) -> None:
+    page.evaluate(
+        r"""() => {
+          const ime = window.__androidIme;
+          ime.keyboard("keydown", "Unidentified", "", 229, 0, true);
+          ime.input("beforeinput", "insertText", "teh", false, false);
+          ime.input("input", "insertText", "teh", false, false, "teh");
+          ime.keyboard("keyup", "Unidentified", "", 229, 0, false);
+        }"""
+    )
+    page.wait_for_timeout(20)
+    page.evaluate(
+        r"""() => {
+          const ime = window.__androidIme;
+          ime.input(
+            "beforeinput", "insertReplacementText", "the", false, true,
+          );
+          ime.input(
+            "input", "insertReplacementText", "the", false, true, "the",
           );
         }"""
     )
@@ -1027,6 +1079,20 @@ def main() -> int:
                     "expired_keydown229_then_input_only",
                     [TEXT_PAYLOAD],
                     expired_keydown_229_then_input_only,
+                ),
+                run_case(
+                    context,
+                    url,
+                    "keydown229_replacement_text",
+                    [MISSPELLED_PAYLOAD, REPLACEMENT_PAYLOAD],
+                    keydown_229_replacement_text,
+                ),
+                run_case(
+                    context,
+                    url,
+                    "replacement_text_without_keydown",
+                    [MISSPELLED_PAYLOAD, REPLACEMENT_PAYLOAD],
+                    replacement_text_without_keydown,
                 ),
                 run_case(
                     context,

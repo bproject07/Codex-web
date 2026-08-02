@@ -10,6 +10,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -24,7 +25,7 @@ use crate::{
     peer_routes,
     registry::{RegistryError, SessionRegistry},
     session::SessionSnapshot,
-    updater::{UpdateManager, UpdateStatus},
+    updater::{UpdateManager, UpdateState, UpdateStatus},
     websocket,
     workspaces::{WorkspaceError, WorkspaceLibrary, WorkspaceStore},
 };
@@ -40,6 +41,8 @@ pub struct AppState {
     pub directories: DirectoryBrowser,
     pub workspaces: WorkspaceStore,
     pub updates: UpdateManager,
+    pub restart_tx: mpsc::Sender<()>,
+    pub server_restart_supported: bool,
     pub shutdown: CancellationToken,
     pub readiness_nonce: Option<String>,
 }
@@ -54,6 +57,7 @@ struct HealthResponse {
     session_count: usize,
     running_sessions: usize,
     max_sessions: usize,
+    server_restart_supported: bool,
     server_version: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     readiness_nonce: Option<String>,
@@ -102,11 +106,19 @@ struct ApplyUpdateRequest {
     confirm_session_termination: bool,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+struct RestartServerRequest {
+    confirm_session_termination: bool,
+}
+
 const MAX_CREATE_SESSION_BODY: usize = 256 * 1024;
 const MAX_DIRECTORY_ID_BODY: usize = 256 * 1024;
 const MAX_RESOLVE_PATH_BODY: usize = 256 * 1024;
 const MAX_FAVORITE_BODY: usize = 256 * 1024;
 const MAX_UPDATE_BODY: usize = 16 * 1024;
+const MAX_RESTART_SERVER_BODY: usize = 16 * 1024;
 
 pub fn build_router(state: AppState, static_directory: Option<PathBuf>) -> Router {
     let protected_api = Router::new()
@@ -116,6 +128,7 @@ pub fn build_router(state: AppState, static_directory: Option<PathBuf>) -> Route
         .route("/api/update", get(update_status))
         .route("/api/update/check", post(check_for_update))
         .route("/api/update/apply", post(apply_update))
+        .route("/api/server/restart", post(restart_server))
         .route("/api/filesystem/roots", get(filesystem_roots))
         .route("/api/filesystem/list", post(list_directory))
         .route("/api/filesystem/resolve", post(resolve_directory))
@@ -171,6 +184,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         session_count: state.sessions.session_count(),
         running_sessions,
         max_sessions: state.sessions.max_sessions(),
+        server_restart_supported: state.server_restart_supported,
         server_version: env!("CARGO_PKG_VERSION"),
         readiness_nonce: state.readiness_nonce.clone(),
     })
@@ -224,6 +238,75 @@ async fn apply_update(State(state): State<AppState>, body: Bytes) -> Response {
             )
                 .into_response()
         }
+    }
+}
+
+async fn restart_server(State(state): State<AppState>, body: Bytes) -> Response {
+    let request: RestartServerRequest = match parse_json_body(
+        &body,
+        MAX_RESTART_SERVER_BODY,
+        false,
+        "The server restart request is too large.",
+        "The server restart request is invalid.",
+    ) {
+        Ok(request) => request,
+        Err(error) => return request_parse_error_response(error),
+    };
+    if !request.confirm_session_termination {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Server restart requires explicit session-termination confirmation.",
+            }),
+        )
+            .into_response();
+    }
+    if !state.server_restart_supported {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Server restart requires a manually upgraded stable launcher.",
+            }),
+        )
+            .into_response();
+    }
+    if matches!(
+        state.updates.status().await.state,
+        UpdateState::Checking
+            | UpdateState::Downloading
+            | UpdateState::Verifying
+            | UpdateState::Staged
+            | UpdateState::Restarting
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Server restart is unavailable while an update operation is active.",
+            }),
+        )
+            .into_response();
+    }
+
+    match state.restart_tx.try_send(()) {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "status": "restarting" })),
+        )
+            .into_response(),
+        Err(mpsc::error::TrySendError::Full(_)) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "A server restart is already pending.",
+            }),
+        )
+            .into_response(),
+        Err(mpsc::error::TrySendError::Closed(_)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "The server is no longer accepting restart requests.",
+            }),
+        )
+            .into_response(),
     }
 }
 

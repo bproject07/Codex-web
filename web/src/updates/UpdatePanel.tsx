@@ -107,7 +107,10 @@ export function UpdatePanel({
         <div className="update-settings__confirmation">
           <p role="alert">
             Updating restarts this server and ends every running terminal and
-            @cwt reviewer session. Favorites and Recent folders remain saved.
+            @cwt reviewer session. This browser tab recreates ordinary terminal
+            tabs with the same agent and folder as fresh sessions; live output
+            and reviewer conversations cannot be resumed. Favorites and Recent
+            folders remain saved.
           </p>
           <label className="checkbox-row">
             <input
