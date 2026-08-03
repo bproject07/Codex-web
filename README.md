@@ -1085,8 +1085,10 @@ The header's session tabs and the **New terminal** and **Manage sessions**
 actions in the ellipsis Menu operate on independent live PTYs. On touch
 screens up to 900 px, the 44 px arrow collapses the project/Menu row while
 retaining the connection dot, tabs, and **@cwt**; tap it again to expand the
-row. **New terminal** selects a server folder before the agent. The active tab
-selects which managed session feeds the same xterm screen. The tab strip
+row. When expanded, **Menu** and the collapse arrow come first so the identity
+can use the remaining width, and ellipsis preserves the rightmost project
+name. **New terminal** selects a server folder before the agent. The active
+tab selects which managed session feeds the same xterm screen. The tab strip
 scrolls horizontally when it overflows; it does not send `/new` or `/resume`
 commands
 into the selected agent's TUI.

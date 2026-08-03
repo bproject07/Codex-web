@@ -121,6 +121,9 @@ def mobile_header_snapshot(page: Page) -> dict[str, Any]:
           const header = document.querySelector(".app-header");
           const context = document.querySelector(".header-context");
           const toggle = document.querySelector(".mobile-header-toggle");
+          const menu = document.querySelector(".header-menu");
+          const identity = document.querySelector(".app-identity");
+          const project = document.querySelector(".app-context-project");
           return {
             collapsed:
               header?.classList.contains(
@@ -129,6 +132,12 @@ def mobile_header_snapshot(page: Page) -> dict[str, Any]:
             expanded: toggle?.getAttribute("aria-expanded") ?? null,
             contextDisplay: context ? getComputedStyle(context).display : null,
             headerHeight: header?.getBoundingClientRect().height ?? null,
+            menuLeft: menu?.getBoundingClientRect().left ?? null,
+            toggleLeft: toggle?.getBoundingClientRect().left ?? null,
+            identityLeft: identity?.getBoundingClientRect().left ?? null,
+            projectDirection: project
+              ? getComputedStyle(project).direction
+              : null,
           };
         }"""
     )
@@ -511,6 +520,15 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                 assert (
                     result["mobileHeader"]["expanded"]["headerHeight"]
                     > result["mobileHeader"]["initial"]["headerHeight"]
+                )
+                assert (
+                    result["mobileHeader"]["expanded"]["menuLeft"]
+                    < result["mobileHeader"]["expanded"]["toggleLeft"]
+                    < result["mobileHeader"]["expanded"]["identityLeft"]
+                )
+                assert (
+                    result["mobileHeader"]["expanded"]["projectDirection"]
+                    == "rtl"
                 )
                 assert (
                     result["mobileHeader"]["collapsedAgain"]

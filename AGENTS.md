@@ -382,15 +382,17 @@ when changing batching or reconnect behavior.
 - The mobile toolbar order starts with Enter and arrows, then history/control
   keys.
 - Session tabs remain horizontally scrollable on overflow. **@cwt** stays
-  outside the inner tab scroller so it remains discoverable. Desktop and an
-  expanded mobile header read left to right: identity area, then the ellipsis
-  **Menu** trigger directly after the status dot, then the left-aligned tabs
-  and **@cwt**. On touch screens up to 900 px, a ≥44 px disclosure may hide
-  the identity/Menu row; the default and last user choice are browser-local.
-  Its collapsed row retains the connection-status dot, disclosure, tabs, and
-  **@cwt**. The tab strip is the only horizontal scroller in the header; the
-  Menu trigger and disclosure must never sit inside it, and the Menu popover
-  must not be clipped by it.
+  outside the inner tab scroller so it remains discoverable. A desktop header
+  reads left to right: identity area, then the
+  ellipsis **Menu** trigger directly after the status dot, then the
+  left-aligned tabs and **@cwt**. An expanded mobile header instead begins
+  with **Menu**, then its collapse disclosure, then the identity; preserve the
+  path's rightmost project name when it ellipsizes. On touch screens up to
+  900 px, a ≥44 px disclosure may hide the identity/Menu row; the default and
+  last user choice are browser-local. Its collapsed row retains the
+  connection-status dot, disclosure, tabs, and **@cwt**. The tab strip is the
+  only horizontal scroller in the header; the Menu trigger and disclosure
+  must never sit inside it, and the Menu popover must not be clipped by it.
 - The Menu trigger is titled and labelled "Menu", uses the ARIA menu-button
   pattern (`aria-haspopup`, `aria-expanded`, `aria-controls`, `role="menu"`
   with `role="menuitem"` entries, arrow-key navigation, Escape returns focus
@@ -420,7 +422,9 @@ when changing batching or reconnect behavior.
   Never record the replaced text in diagnostics.
 - On coarse-pointer devices, xterm's custom vertical scrollbar keeps a narrow
   visible thumb but uses a 28 px draggable target. Desktop keeps xterm's
-  default width.
+  default width. Preserve that desktop default by omitting the
+  `overviewRuler` option entirely; never pass `overviewRuler: undefined`,
+  because xterm reads its `.width` during construction.
 - Diagnostics must not include token, keystrokes, or terminal content.
 - Screenshots must use only synthetic fixtures. They must not contain account,
   organization, company, device, or host names; credentials; tokens; private

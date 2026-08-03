@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isMobileRowOnlyResize,
+  terminalScrollbarOptions,
   terminalScrollbarWidth,
 } from "./mobileResize";
 
@@ -8,6 +9,21 @@ describe("terminalScrollbarWidth", () => {
   it("keeps the established mobile terminal width without changing desktop", () => {
     expect(terminalScrollbarWidth(true)).toBe(28);
     expect(terminalScrollbarWidth(false)).toBeUndefined();
+  });
+});
+
+describe("terminalScrollbarOptions", () => {
+  it("omits overviewRuler on desktop instead of assigning undefined", () => {
+    const options = terminalScrollbarOptions(false);
+
+    expect(options).toEqual({});
+    expect("overviewRuler" in options).toBe(false);
+  });
+
+  it("configures the established mobile scrollbar width", () => {
+    expect(terminalScrollbarOptions(true)).toEqual({
+      overviewRuler: { width: 28 },
+    });
   });
 });
 

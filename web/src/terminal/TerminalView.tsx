@@ -27,7 +27,7 @@ import {
 import { applyCtrlToInput } from "./mobileKeys";
 import {
   isMobileRowOnlyResize,
-  terminalScrollbarWidth,
+  terminalScrollbarOptions,
 } from "./mobileResize";
 import {
   createMobileScrollbarVisibilityController,
@@ -513,17 +513,13 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         return;
       }
 
-      const scrollbarWidth = terminalScrollbarWidth(
-        mobileScrollbarEnabled,
-      );
       const terminal = new Terminal({
         cursorBlink: settings.cursorBlink,
         convertEol: false,
         scrollback: settings.scrollback,
         scrollOnUserInput: false,
         smoothScrollDuration: 0,
-        overviewRuler:
-          scrollbarWidth === undefined ? undefined : { width: scrollbarWidth },
+        ...terminalScrollbarOptions(mobileScrollbarEnabled),
         fontFamily:
           '"Cascadia Mono", "Cascadia Code", Consolas, "Roboto Mono", "Noto Sans Mono", "Droid Sans Mono", monospace',
         fontSize: settings.fontSize,

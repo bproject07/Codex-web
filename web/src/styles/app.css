@@ -2661,6 +2661,32 @@ details.peer-composer__readiness p {
 }
 
 @media (max-width: 760px) and (pointer: coarse) {
+  .app-header:not(.app-header--mobile-context-collapsed) {
+    grid-template-areas:
+      "menu toggle identity"
+      "actions actions actions";
+    grid-template-columns: auto auto minmax(0, 1fr);
+  }
+
+  .app-header:not(.app-header--mobile-context-collapsed) .header-context {
+    display: contents;
+  }
+
+  .app-header:not(.app-header--mobile-context-collapsed) .header-menu {
+    grid-area: menu;
+  }
+
+  .app-header:not(.app-header--mobile-context-collapsed)
+    .mobile-header-toggle {
+    grid-area: toggle;
+  }
+
+  .app-header:not(.app-header--mobile-context-collapsed) .app-identity {
+    grid-area: identity;
+    width: 100%;
+    min-width: 0;
+  }
+
   .app-header--mobile-context-collapsed {
     grid-template-areas: "toggle actions";
     grid-template-columns: auto minmax(0, 1fr);
@@ -2670,16 +2696,26 @@ details.peer-composer__readiness p {
 }
 
 @media (min-width: 761px) and (max-width: 900px) and (pointer: coarse) {
-  .header-context {
+  .app-header:not(.app-header--mobile-context-collapsed) .header-context {
+    display: contents;
+  }
+
+  .app-header:not(.app-header--mobile-context-collapsed) .header-menu {
     order: 1;
   }
 
-  .mobile-header-toggle {
+  .app-header:not(.app-header--mobile-context-collapsed)
+    .mobile-header-toggle {
     order: 2;
   }
 
-  .header-actions {
+  .app-header:not(.app-header--mobile-context-collapsed) .app-identity {
     order: 3;
+    min-width: 0;
+  }
+
+  .app-header:not(.app-header--mobile-context-collapsed) .header-actions {
+    order: 4;
   }
 
   .app-header--mobile-context-collapsed .mobile-header-toggle {
@@ -2688,6 +2724,16 @@ details.peer-composer__readiness p {
 
   .app-header--mobile-context-collapsed .header-actions {
     order: 2;
+  }
+}
+
+@media (max-width: 900px) and (pointer: coarse) {
+  /* The project name is the rightmost part of a native path. Preserve that
+     useful end when the expanded row must ellipsize on a narrow phone. */
+  .app-header:not(.app-header--mobile-context-collapsed)
+    .app-context-project {
+    direction: rtl;
+    text-align: left;
   }
 }
 

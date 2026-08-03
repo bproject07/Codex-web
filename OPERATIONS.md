@@ -612,12 +612,14 @@ highlighted and each tab includes a lifecycle-status dot.
 - On desktop the tabs spread across the full remaining header width; the
   left/right arrows appear (overlaid on the strip's edges) only when the tabs
   genuinely overflow, and a wheel or trackpad scrolls the strip as well.
-- Desktop and the expanded mobile header read left to right: the identity area
-  (project path, agent, status dot), then the ellipsis **Menu** button (`…`,
-  labelled "Menu"), then the left-aligned tabs and **@cwt**. The collapsed
-  mobile row keeps a compact status/disclosure followed by the tabs and
-  **@cwt**. General actions live in the Menu; preferences live in
-  **Settings**, which the Menu opens.
+- Desktop reads left to right: the identity area (project path, agent, status
+  dot), then the ellipsis **Menu** button (`…`, labelled "Menu"), then the
+  left-aligned tabs and **@cwt**. Expanded mobile puts **Menu** and the
+  collapse arrow first, then the identity while preserving the rightmost
+  project name when the full path ellipsizes. The collapsed mobile row keeps
+  a compact status/disclosure followed by the tabs and **@cwt**. General
+  actions live in the Menu; preferences live in **Settings**, which the Menu
+  opens.
 - **New terminal** in the Menu creates another terminal.
 - **Manage sessions** in the Menu opens the detailed session list.
 
@@ -915,7 +917,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.3.3",
+  "serverVersion": "0.3.4",
   "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,
