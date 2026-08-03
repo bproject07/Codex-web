@@ -604,6 +604,8 @@ The header shows one tab for each server-managed terminal. The active tab is
 highlighted and each tab includes a lifecycle-status dot.
 
 - Select a tab to attach the single browser terminal view to that managed PTY.
+- On desktop, hover a tab to see only that terminal's complete project path;
+  its lifecycle status remains available to assistive technology.
 - On mobile, the header starts with the project/Menu row collapsed. Its
   status-and-arrow control expands or collapses that row, retains a 44 px
   touch target, and remembers the choice in that browser. The tabs and
@@ -917,7 +919,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.3.4",
+  "serverVersion": "0.3.5",
   "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,

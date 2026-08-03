@@ -389,7 +389,10 @@ token only in memory; the controlled update reload uses the same one-navigation
 fallback described above.
 
 Use the session tabs in the header to switch between managed terminals. The
-header reads left to right: the identity area (the active project's full
+desktop tooltip for each tab contains only that terminal's complete project
+path; the agent is already identified by the tab, while lifecycle status
+remains available to assistive technology.
+The header reads left to right: the identity area (the active project's full
 server path — it may visually ellipsize on narrow screens while the complete
 value stays in the tooltip and accessible text — the selected session's agent
 (Codex, Claude, or AGY; the backend exposes no finer-grained LLM model

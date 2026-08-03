@@ -75,6 +75,8 @@ describe("SessionTabs", () => {
 
     expect(html).not.toContain("Close Codex 1");
     expect(html).toContain("Close ↳ Claude Review · R-123456");
+    expect(html).toContain('title="C:\\Projects\\demo"');
+    expect(html).not.toContain('title="Open Codex 1');
     expect(html).toContain("session-tab-shell--peer");
     expect(html).toContain("Open @cwt peer collaboration");
     expect(html).toContain("1 peer response ready");

@@ -416,6 +416,9 @@ when changing batching or reconnect behavior.
 - Mobile `PgUp` and `PgDn` send the standard terminal Page Up/Page Down
   sequences to the selected PTY, just like the other terminal-input buttons.
   `Top` and `Live` manipulate only xterm's client scrollback.
+- A desktop session-tab tooltip contains only that session's full project path.
+  Keep the lifecycle status in visually hidden accessible text rather than
+  repeating the tab's visible agent/name information in the tooltip.
 - The Android IME guard translates Gboard/Chrome replacement edits into the
   minimal terminal Backspace-plus-suffix sequence and restores xterm's helper
   textarea baseline so its keyCode-229 fallback cannot duplicate the word.

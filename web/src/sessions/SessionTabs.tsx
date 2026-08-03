@@ -254,9 +254,7 @@ export function SessionTabs({
                   selected ? " session-tab--active" : ""
                 }`}
                 aria-selected={selected}
-                title={`Open ${fullLabel} (${AGENT_LABELS[candidate.agent]}) — ${
-                  peerState ? peerStatusLabel(peerState) : candidate.status
-                }`}
+                title={candidate.project}
                 onClick={() => onSelect(candidate)}
               >
                 <span

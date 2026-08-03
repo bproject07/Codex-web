@@ -9,7 +9,7 @@ on:
       version:
         description: Package version to build and validate without publishing
         required: true
-        default: "0.3.4"
+        default: "0.3.5"
         type: string
 
 permissions:
