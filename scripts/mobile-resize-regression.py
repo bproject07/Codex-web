@@ -14,7 +14,11 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import (
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
 
 
 PHONE_USER_AGENT = (
@@ -127,7 +131,7 @@ def read_diagnostics(page: Page) -> dict[str, Any]:
 
 def mobile_header_snapshot(page: Page) -> dict[str, Any]:
     return page.evaluate(
-        """() => {
+        r"""() => {
           const header = document.querySelector(".app-header");
           const context = document.querySelector(".header-context");
           const toggle = document.querySelector(".mobile-header-toggle");
@@ -180,22 +184,45 @@ def resize_frames(payloads: list[str | bytes]) -> list[dict[str, Any]]:
     return messages
 
 
-def exercise_terminal_wheel_scroll(page: Page) -> dict[str, float]:
+def visible_history_position(page: Page) -> int:
+    position = page.evaluate(
+        r"""() => {
+          const rows = Array.from(
+            document.querySelectorAll(
+              ".terminal-view .xterm-rows > div",
+            ),
+            row => row.textContent ?? "",
+          );
+          for (const row of rows) {
+            const match = /fixture history (\d+)/.exec(row);
+            if (match !== null) {
+              return Number(match[1]);
+            }
+          }
+          return null;
+        }"""
+    )
+    if not isinstance(position, int):
+        raise AssertionError("terminal has no visible fixture history row")
+    return position
+
+
+def exercise_terminal_wheel_scroll(page: Page) -> dict[str, int]:
     scrollable = page.locator(
         ".terminal-view .xterm-scrollable-element"
     )
     scrollable.wait_for(state="attached")
     page.wait_for_function(
-        """() => {
-          const element = document.querySelector(
-            ".terminal-view .xterm-scrollable-element",
+        r"""() => {
+          const rows = document.querySelectorAll(
+            ".terminal-view .xterm-rows > div",
           );
-          return element !== null &&
-            element.scrollHeight > element.clientHeight &&
-            element.scrollTop > 0;
+          return Array.from(rows).some(
+            row => /fixture history \d+/.test(row.textContent ?? ""),
+          );
         }"""
     )
-    before = scrollable.evaluate("element => element.scrollTop")
+    before = visible_history_position(page)
     bounds = scrollable.bounding_box()
     if bounds is None:
         raise AssertionError("terminal scroll viewport has no bounds")
@@ -205,22 +232,56 @@ def exercise_terminal_wheel_scroll(page: Page) -> dict[str, float]:
         bounds["y"] + bounds["height"] / 2,
     )
     page.mouse.wheel(0, -1_600)
-    page.wait_for_function(
-        """before => document.querySelector(
-          ".terminal-view .xterm-scrollable-element",
-        )?.scrollTop < before""",
-        arg=before,
-    )
-    after_up = scrollable.evaluate("element => element.scrollTop")
+    try:
+        page.wait_for_function(
+            r"""before => {
+              for (const row of document.querySelectorAll(
+                ".terminal-view .xterm-rows > div",
+              )) {
+                const match = /fixture history (\d+)/.exec(
+                  row.textContent ?? "",
+                );
+                if (match !== null) {
+                  return Number(match[1]) < before;
+                }
+              }
+              return false;
+            }""",
+            arg=before,
+        )
+    except PlaywrightTimeoutError as error:
+        current = visible_history_position(page)
+        raise AssertionError(
+            "Chrome wheel-up did not move terminal history: "
+            f"before={before}, current={current}"
+        ) from error
+    after_up = visible_history_position(page)
 
     page.mouse.wheel(0, 1_600)
-    page.wait_for_function(
-        """afterUp => document.querySelector(
-          ".terminal-view .xterm-scrollable-element",
-        )?.scrollTop > afterUp""",
-        arg=after_up,
-    )
-    after_down = scrollable.evaluate("element => element.scrollTop")
+    try:
+        page.wait_for_function(
+            r"""afterUp => {
+              for (const row of document.querySelectorAll(
+                ".terminal-view .xterm-rows > div",
+              )) {
+                const match = /fixture history (\d+)/.exec(
+                  row.textContent ?? "",
+                );
+                if (match !== null) {
+                  return Number(match[1]) > afterUp;
+                }
+              }
+              return false;
+            }""",
+            arg=after_up,
+        )
+    except PlaywrightTimeoutError as error:
+        current = visible_history_position(page)
+        raise AssertionError(
+            "Chrome wheel-down did not move terminal history: "
+            f"afterUp={after_up}, current={current}"
+        ) from error
+    after_down = visible_history_position(page)
     return {
         "before": before,
         "afterUp": after_up,
