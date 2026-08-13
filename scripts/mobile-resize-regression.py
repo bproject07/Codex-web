@@ -447,6 +447,10 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                   };
                 }"""
             )
+            # Touching the native scrollbar thumb may leave Chrome positioned
+            # in scrollback. Start the wheel check from the deterministic live
+            # prompt after the thumb geometry/visibility check is complete.
+            return_terminal_to_live(page)
             mobile_wheel_scroll = exercise_terminal_wheel_scroll(page)
             return_terminal_to_live(page)
 
