@@ -919,7 +919,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.3.5",
+  "serverVersion": "0.3.6",
   "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,

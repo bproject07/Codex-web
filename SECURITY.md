@@ -29,6 +29,12 @@ decoded, canonicalized, and checked again by the server. Because the encoding
 is reversible and responses also include display paths, IDs and saved state
 can reveal filesystem layout.
 
+Authentication throttling counts only requests that supply an invalid token.
+Missing credentials return `401` without consuming the per-address failure
+budget, and a valid token remains usable and clears any accumulated failures.
+WebSocket Origin validation runs before token authentication, so rejected
+cross-origin upgrade requests cannot consume that budget.
+
 Directory browsing is intentionally non-recursive and returns only immediate
 child directories, not files, but this is a UI/data-minimization property
 rather than confinement. Anyone with the token must be trusted with the full

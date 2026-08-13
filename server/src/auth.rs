@@ -63,6 +63,10 @@ impl AuthState {
     }
 
     pub fn authenticate(&self, address: IpAddr, candidate: Option<&str>) -> AuthDecision {
+        let Some(candidate) = candidate else {
+            return AuthDecision::Invalid;
+        };
+
         let now = Instant::now();
         let mut failures = self
             .inner
@@ -70,15 +74,15 @@ impl AuthState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
+        if token_matches(&self.inner.token, candidate) {
+            failures.remove(&address);
+            return AuthDecision::Allowed;
+        }
+
         if let Some(record) = failures.get(&address)
             && record.blocked_until.is_some_and(|until| until > now)
         {
             return AuthDecision::Blocked;
-        }
-
-        if candidate.is_some_and(|value| token_matches(&self.inner.token, value)) {
-            failures.remove(&address);
-            return AuthDecision::Allowed;
         }
 
         prune_failure_records(&mut failures, now);
@@ -233,6 +237,46 @@ mod tests {
         assert_eq!(
             auth.authenticate(address, Some("wrong-token-value")),
             AuthDecision::Blocked
+        );
+    }
+
+    #[test]
+    fn missing_tokens_do_not_consume_the_failure_budget() {
+        let auth = AuthState::new("0123456789abcdef".to_owned());
+        let address = "127.0.0.1".parse().expect("valid IP");
+
+        for _ in 0..(MAX_FAILURES * 2) {
+            assert_eq!(auth.authenticate(address, None), AuthDecision::Invalid);
+        }
+
+        for _ in 0..(MAX_FAILURES - 1) {
+            assert_eq!(
+                auth.authenticate(address, Some("wrong-token-value")),
+                AuthDecision::Invalid
+            );
+        }
+        assert_eq!(
+            auth.authenticate(address, Some("wrong-token-value")),
+            AuthDecision::Blocked
+        );
+    }
+
+    #[test]
+    fn valid_tokens_clear_an_active_block() {
+        let auth = AuthState::new("0123456789abcdef".to_owned());
+        let address = "127.0.0.1".parse().expect("valid IP");
+
+        for _ in 0..MAX_FAILURES {
+            let _ = auth.authenticate(address, Some("wrong-token-value"));
+        }
+
+        assert_eq!(
+            auth.authenticate(address, Some("0123456789abcdef")),
+            AuthDecision::Allowed
+        );
+        assert_eq!(
+            auth.authenticate(address, Some("wrong-token-value")),
+            AuthDecision::Invalid
         );
     }
 

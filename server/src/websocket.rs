@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use axum::{
     extract::{
@@ -15,7 +15,7 @@ use tokio::sync::{OwnedSemaphorePermit, broadcast};
 use uuid::Uuid;
 
 use crate::{
-    auth::{AuthDecision, origin_is_allowed},
+    auth::{AuthDecision, AuthState, origin_is_allowed},
     protocol::{
         ClientControl, MAX_INPUT_MESSAGE_SIZE, MAX_WEBSOCKET_MESSAGE_SIZE, ServerControl,
         parse_control_message,
@@ -41,21 +41,24 @@ pub async fn upgrade(
     Query(query): Query<WebSocketQuery>,
     headers: HeaderMap,
 ) -> Response {
-    match state.auth.authenticate(peer.ip(), query.token.as_deref()) {
-        AuthDecision::Allowed => {}
-        AuthDecision::Invalid => return StatusCode::UNAUTHORIZED.into_response(),
-        AuthDecision::Blocked => return StatusCode::TOO_MANY_REQUESTS.into_response(),
-    }
-
     let origin = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok());
     let host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok());
-    if !origin_is_allowed(origin, host, state.config.host) {
-        tracing::warn!(client = %peer.ip(), "rejected WebSocket origin");
-        return StatusCode::FORBIDDEN.into_response();
+    if let Err(status) = authorize_upgrade(
+        &state.auth,
+        peer.ip(),
+        query.token.as_deref(),
+        origin,
+        host,
+        state.config.host,
+    ) {
+        if status == StatusCode::FORBIDDEN {
+            tracing::warn!(client = %peer.ip(), "rejected WebSocket origin");
+        }
+        return status.into_response();
     }
 
     let session = match resolve_session(&state.sessions, query.terminal_id.as_deref()) {
@@ -75,6 +78,25 @@ pub async fn upgrade(
             handle_socket(socket, state, session, peer, terminal_id, client_permit)
         })
         .into_response()
+}
+
+fn authorize_upgrade(
+    auth: &AuthState,
+    address: IpAddr,
+    candidate: Option<&str>,
+    origin_header: Option<&str>,
+    host_header: Option<&str>,
+    bind_host: IpAddr,
+) -> Result<(), StatusCode> {
+    if !origin_is_allowed(origin_header, host_header, bind_host) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    match auth.authenticate(address, candidate) {
+        AuthDecision::Allowed => Ok(()),
+        AuthDecision::Invalid => Err(StatusCode::UNAUTHORIZED),
+        AuthDecision::Blocked => Err(StatusCode::TOO_MANY_REQUESTS),
+    }
 }
 
 async fn handle_socket(
@@ -418,6 +440,39 @@ mod tests {
             resolve_session(&registry, Some(&Uuid::new_v4().to_string())),
             Err(StatusCode::NOT_FOUND)
         ));
+    }
+
+    #[test]
+    fn rejected_origins_do_not_consume_the_auth_failure_budget() {
+        let auth = AuthState::new("0123456789abcdef".to_owned());
+        let address = "127.0.0.1".parse().expect("valid IP");
+        let bind_host = "127.0.0.1".parse().expect("valid IP");
+
+        for _ in 0..10 {
+            assert_eq!(
+                authorize_upgrade(
+                    &auth,
+                    address,
+                    Some("wrong-token-value"),
+                    Some("https://evil.example"),
+                    Some("127.0.0.1:8787"),
+                    bind_host,
+                ),
+                Err(StatusCode::FORBIDDEN)
+            );
+        }
+
+        assert_eq!(
+            authorize_upgrade(
+                &auth,
+                address,
+                Some("wrong-token-value"),
+                Some("http://localhost:5173"),
+                Some("127.0.0.1:8787"),
+                bind_host,
+            ),
+            Err(StatusCode::UNAUTHORIZED)
+        );
     }
 
     #[test]
