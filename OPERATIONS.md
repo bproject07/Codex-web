@@ -99,7 +99,7 @@ Official update commands:
 
 | CLI | Native installation | Package-manager note |
 | --- | --- | --- |
-| Codex | `codex update` | For an npm installation: `npm install --global @openai/codex@latest` |
+| Codex | rerun the platform installer shown by **Check again** | For an npm installation: `npm install --global @openai/codex@latest` |
 | Claude Code | `claude update` | WinGet: `winget upgrade Anthropic.ClaudeCode`; Homebrew: `brew upgrade claude-code` |
 | AGY | Re-run the platform install command; it installs or upgrades | AGY also checks for background updates unless `AGY_CLI_DISABLE_AUTO_UPDATE=true` |
 
@@ -919,7 +919,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.3.6",
+  "serverVersion": "0.3.7",
   "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,

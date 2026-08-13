@@ -123,8 +123,11 @@ Automatic checks use a compile-time fixed GitHub API endpoint for
 checksum, path, command, or executable. Only a newer stable SemVer release
 whose GitHub metadata is published, immutable, and contains the exact native
 asset plus `SHA256SUMS.txt` is eligible. Both assets must be in the uploaded
-state, within bounded sizes, and expose valid SHA-256 metadata. The downloaded
-archive hash must match both GitHub metadata and the checksum file.
+state, within bounded sizes, expose valid SHA-256 metadata, and have GitHub
+attestation metadata tied to this repository. The release must target `main`
+and be published by GitHub Actions. These API checks are repeated immediately
+before download. The downloaded archive hash must match both GitHub metadata
+and the checksum file.
 
 Archive inspection happens before execution in a newly created private state
 directory. Absolute/traversal paths, backslashes, NUL/control characters,
@@ -177,8 +180,11 @@ under the state directory.
 Only official archives contain `release-package.json`. Copying that marker,
 weakening the fixed repository/asset checks, accepting mutable releases, or
 making browser-triggered installation silent is a security-sensitive change.
-GitHub artifact attestation verification remains a recommended manual
-provenance step; checksum verification alone is not described as equivalent.
+The built-in updater checks GitHub's repository attestation metadata but does
+not perform local Sigstore-bundle or exact signer-workflow verification.
+Manual `gh attestation verify --signer-workflow ...` therefore remains the
+stronger recommended provenance step; checksum verification alone is not
+described as equivalent.
 
 ## Reporting a vulnerability
 

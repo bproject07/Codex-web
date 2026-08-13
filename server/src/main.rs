@@ -1,17 +1,27 @@
 use std::{
+    collections::HashMap,
     future::Future,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use axum::{
+    Router,
+    body::Body,
+    extract::ConnectInfo,
+    http::Request,
+};
+use hyper::{body::Incoming, server::conn::http1, service::service_fn};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
-use tokio::task::{JoinError, JoinHandle};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use tower::Service;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
@@ -30,7 +40,56 @@ use codex_web_terminal::{
 };
 
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const PUBLIC_CONNECTION_LIMIT: usize = 512;
+const PUBLIC_CONNECTIONS_PER_IP_LIMIT: usize = 32;
+const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_MAX_HEADERS: usize = 64;
+const HTTP_MAX_BUFFER_BYTES: usize = 64 * 1024;
 type ServerTaskResult = std::result::Result<io::Result<()>, JoinError>;
+
+struct PublicConnectionPermit {
+    _total: OwnedSemaphorePermit,
+    counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    address: IpAddr,
+}
+
+impl PublicConnectionPermit {
+    fn try_acquire(
+        total: Arc<Semaphore>,
+        counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+        address: IpAddr,
+    ) -> Option<Self> {
+        let total = total.try_acquire_owned().ok()?;
+        let mut active = counts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let count = active.entry(address).or_default();
+        if *count >= PUBLIC_CONNECTIONS_PER_IP_LIMIT {
+            return None;
+        }
+        *count += 1;
+        drop(active);
+        Some(Self {
+            _total: total,
+            counts,
+            address,
+        })
+    }
+}
+
+impl Drop for PublicConnectionPermit {
+    fn drop(&mut self) {
+        let mut active = self
+            .counts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(count) = active.get_mut(&self.address) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            active.remove(&self.address);
+        }
+    }
+}
 
 enum StopCause {
     Signal(io::Result<()>),
@@ -199,14 +258,11 @@ async fn run(
     }
 
     let public_shutdown_signal = public_shutdown.clone();
-    let mut public_server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(public_shutdown_signal.cancelled_owned())
-        .await
-    });
+    let mut public_server = tokio::spawn(serve_public_http(
+        listener,
+        app,
+        public_shutdown_signal,
+    ));
     let peer_shutdown_signal = peer_shutdown.clone();
     let mut peer_server = tokio::spawn(async move {
         axum::serve(
@@ -308,6 +364,104 @@ async fn run(
             }
             bail!("restart control channel closed unexpectedly")
         }
+    }
+}
+
+async fn serve_public_http(
+    listener: TcpListener,
+    app: Router,
+    shutdown: CancellationToken,
+) -> io::Result<()> {
+    let capacity = Arc::new(Semaphore::new(PUBLIC_CONNECTION_LIMIT));
+    let connection_counts = Arc::new(Mutex::new(HashMap::new()));
+    let mut connection_tasks = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            accepted = listener.accept() => {
+                let (stream, peer_address) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        tracing::warn!(%error, "public HTTP accept failed; retrying");
+                        tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
+                        }
+                    }
+                };
+                let Some(permit) = PublicConnectionPermit::try_acquire(
+                    capacity.clone(),
+                    connection_counts.clone(),
+                    peer_address.ip(),
+                ) else {
+                    drop(stream);
+                    continue;
+                };
+                let connection_app = app.clone();
+                let connection_shutdown = shutdown.clone();
+                connection_tasks.spawn(async move {
+                    let _permit = permit;
+                    serve_public_connection(
+                        stream,
+                        peer_address,
+                        connection_app,
+                        connection_shutdown,
+                    )
+                    .await;
+                });
+            }
+            Some(joined) = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
+                if let Err(error) = joined {
+                    tracing::debug!(%error, "public HTTP connection task failed");
+                }
+            }
+        }
+    }
+
+    drop(listener);
+    while let Some(joined) = connection_tasks.join_next().await {
+        if let Err(error) = joined {
+            tracing::debug!(%error, "public HTTP connection task failed during shutdown");
+        }
+    }
+    Ok(())
+}
+
+async fn serve_public_connection(
+    stream: tokio::net::TcpStream,
+    peer_address: SocketAddr,
+    app: Router,
+    shutdown: CancellationToken,
+) {
+    let service = service_fn(move |request: Request<Incoming>| {
+        let mut app = app.clone();
+        let mut request = request.map(Body::new);
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(peer_address));
+        async move { Service::call(&mut app, request).await }
+    });
+    let mut builder = http1::Builder::new();
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(HTTP_HEADER_READ_TIMEOUT)
+        .max_headers(HTTP_MAX_HEADERS)
+        .max_buf_size(HTTP_MAX_BUFFER_BYTES);
+    let connection = builder
+        .serve_connection(TokioIo::new(stream), service)
+        .with_upgrades();
+    tokio::pin!(connection);
+
+    let result = tokio::select! {
+        result = connection.as_mut() => result,
+        _ = shutdown.cancelled() => {
+            connection.as_mut().graceful_shutdown();
+            connection.as_mut().await
+        }
+    };
+    if let Err(error) = result {
+        tracing::debug!(%error, %peer_address, "public HTTP connection closed with an error");
     }
 }
 
@@ -448,6 +602,55 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn public_connection_permits_enforce_and_release_the_per_ip_limit() {
+        let total = Arc::new(Semaphore::new(PUBLIC_CONNECTION_LIMIT));
+        let counts = Arc::new(Mutex::new(HashMap::new()));
+        let first_address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let second_address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+        let mut permits = Vec::new();
+
+        for _ in 0..PUBLIC_CONNECTIONS_PER_IP_LIMIT {
+            permits.push(
+                PublicConnectionPermit::try_acquire(
+                    total.clone(),
+                    counts.clone(),
+                    first_address,
+                )
+                .expect("permit below the per-IP limit"),
+            );
+        }
+        assert!(
+            PublicConnectionPermit::try_acquire(
+                total.clone(),
+                counts.clone(),
+                first_address,
+            )
+            .is_none()
+        );
+        let other = PublicConnectionPermit::try_acquire(
+            total.clone(),
+            counts.clone(),
+            second_address,
+        )
+        .expect("a different source address has a separate limit");
+
+        let released = permits.pop().expect("one active permit");
+        drop(released);
+        permits.push(
+            PublicConnectionPermit::try_acquire(total, counts.clone(), first_address)
+                .expect("dropping a permit releases its source-address slot"),
+        );
+        drop(permits);
+        drop(other);
+        assert!(
+            counts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn an_unexpected_private_bridge_exit_is_detected() {

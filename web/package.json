@@ -1,7 +1,7 @@
 {
   "name": "codex-web-terminal-web",
   "private": true,
-  "version": "0.3.6",
+  "version": "0.3.7",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -27,5 +27,8 @@
     "typescript": "^7.0.2",
     "vite": "^8.1.5",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "nanoid": "3.3.17"
   }
 }

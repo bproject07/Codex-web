@@ -882,9 +882,9 @@ creating a Codex conversation.
 The Python utilities in `scripts/` are specialized diagnostics rather than the
 normal unit-test path. They require Python 3. Browser-driving scripts also
 require Python Playwright and a matching browser installation. Check each
-script's help for its platform requirements; some older mobile diagnostics
-are Windows-oriented, while the agent-catalog, workspace-picker, and peer
-regressions own cross-platform fixtures and cleanup.
+script's help for its platform requirements. The agent-catalog,
+workspace-picker, mobile-resize, and peer regressions own cross-platform
+fixtures and cleanup.
 
 Use them only on a disposable test port and never point them at a live
 production session. The standard cross-platform validation remains:
@@ -892,6 +892,28 @@ production session. The standard cross-platform validation remains:
 - frontend Vitest suite and production build;
 - Rust format, test, Clippy, and release build;
 - a separate native PTY/browser smoke test.
+
+The release workflow runs `mobile-resize-regression.py` against the packaged
+binary and the runner's system Google Chrome on both Windows and Linux. It
+asserts real terminal wheel movement in desktop and mobile viewports, the
+coarse-pointer scrollbar target, and the Android keyboard viewport resize
+cycle. For a disposable package check outside repository-agent sessions:
+
+```powershell
+python -m pip install playwright==1.62.0
+python -B .\scripts\mobile-resize-regression.py `
+  --server .\dist\codex-web.exe `
+  --chrome "C:\Program Files\Google\Chrome\Application\chrome.exe" `
+  --port 8816
+```
+
+```bash
+python3 -m pip install playwright==1.62.0
+python3 -B ./scripts/mobile-resize-regression.py \
+  --server ./dist-linux/codex-web \
+  --chrome /usr/bin/google-chrome \
+  --port 8817
+```
 
 The Vitest suite includes the `web/src/workspaces/` model and dialog plus API
 DTO validation. The Rust suite includes native path encoding, bounded

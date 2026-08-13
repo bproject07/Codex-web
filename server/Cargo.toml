@@ -1,6 +1,6 @@
 [package]
 name = "codex-web-terminal"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2024"
 rust-version = "1.88"
 description = "Run Codex, Claude, and AGY CLIs in native PTYs from a browser"
@@ -21,6 +21,8 @@ flate2 = "1.1"
 fs2 = "0.4"
 futures-util = "0.3"
 getrandom = "0.3"
+hyper = { version = "1.7", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 portable-pty = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 semver = "1.0"
@@ -31,12 +33,13 @@ subtle = "2.6"
 tar = "0.4"
 tokio = { version = "1.47", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-tower-http = { version = "0.6", features = ["fs"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "timeout"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2.5"
 uuid = { version = "1.17", features = ["serde", "v4"] }
-webbrowser = "1.0"
+webbrowser = { version = "1.2.4", features = ["hardened"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]

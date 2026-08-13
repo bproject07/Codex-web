@@ -48,6 +48,8 @@ use crate::{
 const GITHUB_LATEST_RELEASE_API: &str =
     "https://api.github.com/repos/bproject07/Codex-web/releases/latest";
 const GITHUB_REPOSITORY: &str = "bproject07/Codex-web";
+const GITHUB_REPOSITORY_ID: u64 = 1_312_275_218;
+const GITHUB_ACTIONS_BOT_ID: u64 = 41_898_282;
 const CHECKSUM_ASSET_NAME: &str = "SHA256SUMS.txt";
 const UPDATE_SCHEMA_VERSION: u32 = 1;
 const API_RESPONSE_LIMIT: u64 = 1024 * 1024;
@@ -137,11 +139,21 @@ struct VerifiedAsset {
 #[derive(Debug, Deserialize)]
 struct GitHubRelease {
     tag_name: String,
+    target_commitish: String,
+    author: GitHubActor,
     draft: bool,
     prerelease: bool,
     #[serde(default)]
     immutable: bool,
     assets: Vec<GitHubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubActor {
+    login: String,
+    id: u64,
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +163,16 @@ struct GitHubAsset {
     size: u64,
     state: String,
     digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubAttestationResponse {
+    attestations: Vec<GitHubAttestation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubAttestation {
+    repository_id: u64,
 }
 
 impl UpdateManager {
@@ -360,6 +382,13 @@ impl UpdateManager {
         if release.draft || release.prerelease {
             bail!("GitHub latest release is not a published stable release");
         }
+        if release.target_commitish != "main"
+            || release.author.login != "github-actions[bot]"
+            || release.author.id != GITHUB_ACTIONS_BOT_ID
+            || release.author.kind != "Bot"
+        {
+            bail!("GitHub latest release was not published by the official release workflow");
+        }
         let version = release
             .tag_name
             .strip_prefix('v')
@@ -382,6 +411,8 @@ impl UpdateManager {
             &version,
             CHECKSUM_LIMIT,
         )?;
+        self.require_asset_attestation(&archive).await?;
+        self.require_asset_attestation(&checksums).await?;
 
         Ok(VerifiedRelease {
             release_url: format!("https://github.com/{GITHUB_REPOSITORY}/releases/tag/v{version}"),
@@ -456,6 +487,8 @@ impl UpdateManager {
         updates_root: &Path,
         work_root: &Path,
     ) -> Result<PathBuf> {
+        self.require_asset_attestation(&release.archive).await?;
+        self.require_asset_attestation(&release.checksums).await?;
         self.replace_status(UpdateState::Downloading, Some(0), None)
             .await;
         let checksum_path = work_root.join(CHECKSUM_ASSET_NAME);
@@ -508,6 +541,30 @@ impl UpdateManager {
         })?;
         validate_package_layout(&final_root, &release.version, current_release_target()?)?;
         Ok(final_root)
+    }
+
+    async fn require_asset_attestation(&self, asset: &VerifiedAsset) -> Result<()> {
+        let digest = sha256_digest_label(&asset.sha256);
+        let url = format!(
+            "https://api.github.com/repos/{GITHUB_REPOSITORY}/attestations/{digest}"
+        );
+        let response = self
+            .inner
+            .client
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("failed to check the attestation for {}", asset.name))?;
+        if !response.status().is_success() {
+            bail!(
+                "{} attestation check returned HTTP {}",
+                asset.name,
+                response.status().as_u16()
+            );
+        }
+        let bytes = bounded_response(response, API_RESPONSE_LIMIT).await?;
+        validate_attestation_response(&bytes)
+            .with_context(|| format!("{} is not attested by the official repository", asset.name))
     }
 
     async fn download_asset(
@@ -739,6 +796,30 @@ fn parse_sha256_digest(value: &str) -> Result<[u8; 32]> {
         .strip_prefix("sha256:")
         .context("asset digest is not SHA-256")?;
     parse_sha256_hex(hexadecimal)
+}
+
+fn sha256_digest_label(digest: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity("sha256:".len() + digest.len() * 2);
+    output.push_str("sha256:");
+    for byte in digest {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn validate_attestation_response(bytes: &[u8]) -> Result<()> {
+    let response: GitHubAttestationResponse =
+        serde_json::from_slice(bytes).context("GitHub returned invalid attestation metadata")?;
+    if !response
+        .attestations
+        .iter()
+        .any(|attestation| attestation.repository_id == GITHUB_REPOSITORY_ID)
+    {
+        bail!("no matching repository attestation was found");
+    }
+    Ok(())
 }
 
 fn parse_sha256_hex(value: &str) -> Result<[u8; 32]> {
@@ -1193,8 +1274,25 @@ mod tests {
             parse_sha256_digest(&format!("sha256:{}", "ab".repeat(32))).expect("valid digest"),
             [0xab; 32]
         );
+        assert_eq!(
+            sha256_digest_label(&[0xab; 32]),
+            format!("sha256:{}", "ab".repeat(32))
+        );
         assert!(parse_sha256_digest(&"ab".repeat(32)).is_err());
         assert!(parse_sha256_digest("sha256:not-a-hash").is_err());
+    }
+
+    #[test]
+    fn attestation_metadata_requires_the_official_repository() {
+        let valid = format!(
+            r#"{{"attestations":[{{"repository_id":{GITHUB_REPOSITORY_ID}}}]}}"#
+        );
+        validate_attestation_response(valid.as_bytes()).expect("official attestation");
+        assert!(validate_attestation_response(br#"{"attestations":[]}"#).is_err());
+        assert!(
+            validate_attestation_response(br#"{"attestations":[{"repository_id":7}]}"#)
+                .is_err()
+        );
     }
 
     #[test]

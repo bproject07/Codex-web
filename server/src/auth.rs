@@ -166,6 +166,14 @@ pub fn origin_is_allowed(
     if !matches!(origin.scheme(), "http" | "https") {
         return false;
     }
+    if origin.username() != ""
+        || origin.password().is_some()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+    {
+        return false;
+    }
 
     let Some(origin_host) = origin.host_str() else {
         return false;
@@ -184,6 +192,14 @@ pub fn origin_is_allowed(
     let Ok(host_url) = Url::parse(&format!("http://{host_header}")) else {
         return false;
     };
+    if host_url.username() != ""
+        || host_url.password().is_some()
+        || host_url.path() != "/"
+        || host_url.query().is_some()
+        || host_url.fragment().is_some()
+    {
+        return false;
+    }
     let Some(request_host) = host_url.host_str() else {
         return false;
     };
@@ -194,7 +210,7 @@ pub fn origin_is_allowed(
 
     match host_url.port() {
         Some(port) => origin.port_or_known_default() == Some(port),
-        None => true,
+        None => origin.port().is_none(),
     }
 }
 
@@ -305,6 +321,16 @@ mod tests {
         ));
         assert!(!origin_is_allowed(
             Some("https://evil.example"),
+            Some("terminal.example"),
+            bind_host
+        ));
+        assert!(!origin_is_allowed(
+            Some("https://terminal.example:8443"),
+            Some("terminal.example"),
+            bind_host
+        ));
+        assert!(!origin_is_allowed(
+            Some("https://terminal.example/unexpected"),
             Some("terminal.example"),
             bind_host
         ));

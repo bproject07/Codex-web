@@ -56,7 +56,7 @@ The most important properties are:
 │   ├── android-ime-input-regression.py
 │   ├── desktop-slash-regression.py
 │   ├── mobile-codex-smoke.py  Browser/mobile smoke test
-│   ├── mobile-resize-regression.py
+│   ├── mobile-resize-regression.py  Chrome wheel/mobile viewport regression
 │   ├── peer-review-regression.py  Native PTY/helper peer workflow
 │   ├── updater-supervisor-regression.py  Stable-root update/restart/rollback fixture
 │   ├── generate-release-package-manifest.py  Updater package identity marker
@@ -715,8 +715,9 @@ A change is complete only when:
    artifact limits, same-account limitation, and Windows/Linux validation.
 6. No secrets, generated artifacts, or unrelated changes are staged.
 7. A release change also passes target-specific license generation, packaged
-   peer regression, archive-layout validation, checksums, and provenance
-   configuration on both supported operating systems.
+   peer and Chrome scroll/mobile regressions, archive-layout validation,
+   checksums, and provenance configuration on both supported operating
+   systems.
 8. Live services created for testing are stopped unless the user asked to keep
    them running.
 9. The final report distinguishes source changes, tests, commit/push state,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise Android keyboard viewport resize against a disposable Codex Web server."""
+"""Exercise Chrome terminal scrolling and mobile viewport resizing."""
 
 from __future__ import annotations
 
@@ -32,16 +32,26 @@ EXPECTED_FIXTURE_BUFFER_LINES = FIXTURE_HISTORY_LINES + 1
 
 def parse_args() -> argparse.Namespace:
     repository = Path(__file__).resolve().parents[1]
+    default_server = (
+        repository / "dist" / "codex-web.exe"
+        if os.name == "nt"
+        else repository / "dist-linux" / "codex-web"
+    )
+    default_chrome = (
+        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+        if os.name == "nt"
+        else Path("/usr/bin/google-chrome")
+    )
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--server",
         type=Path,
-        default=repository / "dist-batched" / "codex-web.exe",
+        default=default_server,
     )
     parser.add_argument(
         "--chrome",
         type=Path,
-        default=Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        default=default_chrome,
     )
     parser.add_argument("--port", type=int, default=8791)
     parser.add_argument("--observe", action="store_true")
@@ -170,9 +180,62 @@ def resize_frames(payloads: list[str | bytes]) -> list[dict[str, Any]]:
     return messages
 
 
+def exercise_terminal_wheel_scroll(page: Page) -> dict[str, float]:
+    scrollable = page.locator(
+        ".terminal-view .xterm-scrollable-element"
+    )
+    scrollable.wait_for(state="attached")
+    page.wait_for_function(
+        """() => {
+          const element = document.querySelector(
+            ".terminal-view .xterm-scrollable-element",
+          );
+          return element !== null &&
+            element.scrollHeight > element.clientHeight &&
+            element.scrollTop > 0;
+        }"""
+    )
+    before = scrollable.evaluate("element => element.scrollTop")
+    bounds = scrollable.bounding_box()
+    if bounds is None:
+        raise AssertionError("terminal scroll viewport has no bounds")
+
+    page.mouse.move(
+        bounds["x"] + bounds["width"] / 2,
+        bounds["y"] + bounds["height"] / 2,
+    )
+    page.mouse.wheel(0, -1_600)
+    page.wait_for_function(
+        """before => document.querySelector(
+          ".terminal-view .xterm-scrollable-element",
+        )?.scrollTop < before""",
+        arg=before,
+    )
+    after_up = scrollable.evaluate("element => element.scrollTop")
+
+    page.mouse.wheel(0, 1_600)
+    page.wait_for_function(
+        """afterUp => document.querySelector(
+          ".terminal-view .xterm-scrollable-element",
+        )?.scrollTop > afterUp""",
+        arg=after_up,
+    )
+    after_down = scrollable.evaluate("element => element.scrollTop")
+    return {
+        "before": before,
+        "afterUp": after_up,
+        "afterDown": after_down,
+    }
+
+
 def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
     repository = Path(__file__).resolve().parents[1]
-    fixture = repository / "scripts" / "fixtures" / "mobile-resize-tui.cmd"
+    fixture_name = (
+        "mobile-resize-tui.cmd"
+        if os.name == "nt"
+        else "mobile-resize-tui.sh"
+    )
+    fixture = repository / "scripts" / "fixtures" / fixture_name
     command = [
         str(args.server),
         "--host",
@@ -232,6 +295,7 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
             )
             page.locator(".xterm-helper-textarea").wait_for(state="attached")
             page.wait_for_timeout(1_500)
+            mobile_wheel_scroll = exercise_terminal_wheel_scroll(page)
 
             header_toggle = page.locator(".mobile-header-toggle")
             header_toggle.wait_for(state="visible")
@@ -483,6 +547,7 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                 "closeResizeFrames": frames,
                 "atomicFrameEvents": atomic_events,
                 "mobileScrollbar": mobile_scrollbar,
+                "mobileWheelScroll": mobile_wheel_scroll,
                 "mobileHeader": mobile_header,
             }
 
@@ -547,6 +612,14 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                         "opacity": "1",
                     },
                 }
+                assert (
+                    result["mobileWheelScroll"]["afterUp"]
+                    < result["mobileWheelScroll"]["before"]
+                )
+                assert (
+                    result["mobileWheelScroll"]["afterDown"]
+                    > result["mobileWheelScroll"]["afterUp"]
+                )
                 assert result["replayCount"][0] == result["replayCount"][1]
                 assert len(result["openResizeFrames"]) == 1
                 assert result["openResizeFrames"][0]["rows"] <= 16
@@ -598,23 +671,57 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                 )
 
             context.close()
+
+            desktop_context = browser.new_context(
+                viewport={"width": 1_280, "height": 720},
+            )
+            desktop_page = desktop_context.new_page()
+            desktop_page.goto(
+                f"http://127.0.0.1:{args.port}/?token={TOKEN}",
+                wait_until="domcontentloaded",
+            )
+            desktop_page.locator(
+                ".xterm-helper-textarea"
+            ).wait_for(state="attached")
+            desktop_page.wait_for_timeout(1_500)
+            result["desktopWheelScroll"] = exercise_terminal_wheel_scroll(
+                desktop_page
+            )
+            if not args.observe:
+                assert (
+                    result["desktopWheelScroll"]["afterUp"]
+                    < result["desktopWheelScroll"]["before"]
+                )
+                assert (
+                    result["desktopWheelScroll"]["afterDown"]
+                    > result["desktopWheelScroll"]["afterUp"]
+                )
+            desktop_context.close()
             browser.close()
             return result
     finally:
         if server.poll() is None:
-            subprocess.run(
-                [
-                    "taskkill",
-                    "/PID",
-                    str(server.pid),
-                    "/T",
-                    "/F",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                creationflags=creation_flags,
-            )
+            if os.name == "nt":
+                subprocess.run(
+                    [
+                        "taskkill",
+                        "/PID",
+                        str(server.pid),
+                        "/T",
+                        "/F",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    creationflags=creation_flags,
+                )
+            else:
+                server.terminate()
+                try:
+                    server.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait(timeout=5)
 
 
 def main() -> int:

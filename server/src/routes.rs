@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -12,7 +12,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::{
+    services::{ServeDir, ServeFile},
+    timeout::RequestBodyTimeoutLayer,
+};
+use url::Url;
 
 use crate::{
     agents::{AgentCatalog, AgentCatalogResponse},
@@ -119,6 +123,11 @@ const MAX_RESOLVE_PATH_BODY: usize = 256 * 1024;
 const MAX_FAVORITE_BODY: usize = 256 * 1024;
 const MAX_UPDATE_BODY: usize = 16 * 1024;
 const MAX_RESTART_SERVER_BODY: usize = 16 * 1024;
+const REQUEST_BODY_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(15);
+const FALLBACK_CONTENT_SECURITY_POLICY: &str =
+    "default-src 'self'; connect-src 'self'; img-src 'self' data:; \
+     style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; \
+     object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 pub fn build_router(state: AppState, static_directory: Option<PathBuf>) -> Router {
     let protected_api = Router::new()
@@ -171,7 +180,11 @@ pub fn build_router(state: AppState, static_directory: Option<PathBuf>) -> Route
         None => router.fallback(development_fallback),
     };
 
-    router.layer(middleware::from_fn(security_headers))
+    router
+        .layer(RequestBodyTimeoutLayer::new(
+            REQUEST_BODY_INACTIVITY_TIMEOUT,
+        ))
+        .layer(middleware::from_fn(security_headers))
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -848,6 +861,8 @@ async fn development_fallback() -> impl IntoResponse {
 
 async fn security_headers(request: axum::extract::Request, next: Next) -> Response {
     let request_path = request.uri().path().to_owned();
+    let content_security_policy =
+        content_security_policy(request.headers().get(header::HOST));
     let mut response = next.run(request).await;
     let is_html = response
         .headers()
@@ -873,19 +888,74 @@ async fn security_headers(request: axum::extract::Request, next: Next) -> Respon
     );
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
+        content_security_policy,
+    );
+    headers.insert(
+        "permissions-policy",
         HeaderValue::from_static(
-            "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; \
-             style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; \
-             object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
         ),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     response
 }
 
+fn content_security_policy(host_header: Option<&HeaderValue>) -> HeaderValue {
+    let Some(host_header) = host_header.and_then(|value| value.to_str().ok()) else {
+        return HeaderValue::from_static(FALLBACK_CONTENT_SECURITY_POLICY);
+    };
+    let Ok(mut host_url) = Url::parse(&format!("http://{host_header}")) else {
+        return HeaderValue::from_static(FALLBACK_CONTENT_SECURITY_POLICY);
+    };
+    if host_url.username() != ""
+        || host_url.password().is_some()
+        || host_url.path() != "/"
+        || host_url.query().is_some()
+        || host_url.fragment().is_some()
+    {
+        return HeaderValue::from_static(FALLBACK_CONTENT_SECURITY_POLICY);
+    }
+
+    if host_url.set_scheme("ws").is_err() {
+        return HeaderValue::from_static(FALLBACK_CONTENT_SECURITY_POLICY);
+    }
+    let websocket_source = host_url.origin().ascii_serialization();
+    if host_url.set_scheme("wss").is_err() {
+        return HeaderValue::from_static(FALLBACK_CONTENT_SECURITY_POLICY);
+    }
+    let secure_websocket_source = host_url.origin().ascii_serialization();
+    let policy = format!(
+        "default-src 'self'; connect-src 'self' {websocket_source} \
+         {secure_websocket_source}; img-src 'self' data:; style-src 'self' \
+         'unsafe-inline'; script-src 'self'; font-src 'self' data:; \
+         object-src 'none'; base-uri 'none'; form-action 'none'; \
+         frame-ancestors 'none'"
+    );
+    HeaderValue::from_str(&policy)
+        .unwrap_or_else(|_| HeaderValue::from_static(FALLBACK_CONTENT_SECURITY_POLICY))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csp_allows_only_the_request_hosts_websocket_origins() {
+        let policy = content_security_policy(Some(&HeaderValue::from_static(
+            "terminal.example:8443",
+        )));
+        let policy = policy.to_str().expect("ASCII CSP");
+
+        assert!(policy.contains("connect-src 'self' ws://terminal.example:8443 "));
+        assert!(policy.contains("wss://terminal.example:8443;"));
+        assert!(!policy.contains("connect-src 'self' ws: wss:"));
+        assert_eq!(
+            content_security_policy(Some(&HeaderValue::from_static(
+                "user@terminal.example",
+            ))),
+            HeaderValue::from_static(FALLBACK_CONTENT_SECURITY_POLICY)
+        );
+    }
 
     #[test]
     fn empty_create_session_body_remains_backward_compatible() {

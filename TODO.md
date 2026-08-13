@@ -5,10 +5,11 @@ a promise of compatibility or a release schedule.
 
 ## Update hardening
 
-- Consider embedded verification of GitHub release/Sigstore attestations after
-  the checksum-and-immutable-release updater has proven stable. Do not make
-  `gh` a hidden runtime dependency or claim checksum verification is
-  provenance.
+- Consider embedded cryptographic verification of GitHub release/Sigstore
+  attestations and the exact signer workflow. The current updater requires
+  GitHub API attestation metadata tied to this repository for both assets, but
+  it does not verify the Sigstore bundle locally. Do not make `gh` a hidden
+  runtime dependency or claim checksum verification is provenance.
 - Consider an explicitly opt-in unattended update policy only after there is a
   reliable idle definition for every PTY and peer thread. Never silently
   terminate active work.

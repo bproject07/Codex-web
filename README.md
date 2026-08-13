@@ -1124,12 +1124,15 @@ Security measures in this application:
 - versioned, bounded workspace state with corrupt-file quarantine and atomic
   replacement
 - four-client-per-session limit
+- 512-connection public listener cap, 32 active HTTP connections per source
+  address, and bounded HTTP/1 header count, buffer, and read time
+- 15-second request-body inactivity timeout
 - 64 KiB WebSocket message limit
 - 4 KiB JSON control-message limit
 - 16 MiB retained output-buffer limit per session
 - 2 MiB maximum initial replay per browser attachment
-- Content Security Policy, frame denial, no-referrer policy, and MIME sniffing
-  protection
+- same-origin-only Content Security Policy connections, disabled browser
+  permissions, frame denial, no-referrer policy, and MIME sniffing protection
 - structured tracing excludes token, keys, input, and terminal output
 
 The startup console intentionally prints the authenticated URL. Redirected

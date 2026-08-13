@@ -9,7 +9,7 @@ on:
       version:
         description: Package version to build and validate without publishing
         required: true
-        default: "0.3.6"
+        default: "0.3.7"
         type: string
 
 permissions:
@@ -226,6 +226,23 @@ jobs:
             --server .\dist\codex-web.exe `
             --port 8814
 
+      - name: Exercise Chrome terminal scrolling and mobile resize
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check playwright==1.62.0
+          if ($LASTEXITCODE -ne 0) { throw "Playwright install failed" }
+          $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+          if (-not (Test-Path -LiteralPath $chrome -PathType Leaf)) {
+            throw "System Google Chrome was not found at $chrome"
+          }
+          python -B .\scripts\mobile-resize-regression.py `
+            --server .\dist\codex-web.exe `
+            --chrome $chrome `
+            --port 8816
+          if ($LASTEXITCODE -ne 0) {
+            throw "Chrome terminal scroll/mobile resize regression failed"
+          }
+
       - name: Exercise packaged updater supervision and rollback
         shell: pwsh
         run: |
@@ -364,6 +381,19 @@ jobs:
           python3 -B ./scripts/peer-review-regression.py \
             --server ./dist-linux/codex-web \
             --port 8815
+
+      - name: Exercise Chrome terminal scrolling and mobile resize
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install \
+            --disable-pip-version-check \
+            playwright==1.62.0
+          test -x /usr/bin/google-chrome
+          python3 -B ./scripts/mobile-resize-regression.py \
+            --server ./dist-linux/codex-web \
+            --chrome /usr/bin/google-chrome \
+            --port 8817
 
       - name: Exercise packaged updater supervision and rollback
         shell: bash
@@ -511,7 +541,7 @@ jobs:
           )
 
       - name: Attest release archives and checksums
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release-assets/*
 
