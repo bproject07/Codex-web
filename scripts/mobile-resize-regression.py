@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import traceback
 from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -292,6 +293,17 @@ def exercise_terminal_wheel_scroll(page: Page) -> dict[str, int]:
     }
 
 
+def return_terminal_to_live(page: Page) -> None:
+    page.get_by_title("Return to the live terminal output").click()
+    page.wait_for_function(
+        """() => Array.from(document.querySelectorAll(
+          ".terminal-view .xterm-rows > div",
+        )).some(row => (row.textContent ?? "").includes(
+          "fixture prompt redraw=",
+        ))"""
+    )
+
+
 def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
     repository = Path(__file__).resolve().parents[1]
     fixture_name = (
@@ -432,6 +444,7 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                 }"""
             )
             mobile_wheel_scroll = exercise_terminal_wheel_scroll(page)
+            return_terminal_to_live(page)
 
             page.evaluate(
                 """() => {
@@ -794,6 +807,7 @@ def main() -> int:
         result = run_browser_test(args)
     except Exception as error:
         print(f"mobile resize regression failed: {error}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2))
     return 0
