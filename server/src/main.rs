@@ -8,12 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use axum::{
-    Router,
-    body::Body,
-    extract::ConnectInfo,
-    http::Request,
-};
+use axum::{Router, body::Body, extract::ConnectInfo, http::Request};
 use hyper::{body::Incoming, server::conn::http1, service::service_fn};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
@@ -60,7 +55,9 @@ impl PublicConnectionPermit {
         address: IpAddr,
     ) -> Option<Self> {
         let total = total.try_acquire_owned().ok()?;
-        let mut active = counts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut active = counts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let count = active.entry(address).or_default();
         if *count >= PUBLIC_CONNECTIONS_PER_IP_LIMIT {
             return None;
@@ -258,11 +255,7 @@ async fn run(
     }
 
     let public_shutdown_signal = public_shutdown.clone();
-    let mut public_server = tokio::spawn(serve_public_http(
-        listener,
-        app,
-        public_shutdown_signal,
-    ));
+    let mut public_server = tokio::spawn(serve_public_http(listener, app, public_shutdown_signal));
     let peer_shutdown_signal = peer_shutdown.clone();
     let mut peer_server = tokio::spawn(async move {
         axum::serve(
@@ -437,9 +430,7 @@ async fn serve_public_connection(
     let service = service_fn(move |request: Request<Incoming>| {
         let mut app = app.clone();
         let mut request = request.map(Body::new);
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(peer_address));
+        request.extensions_mut().insert(ConnectInfo(peer_address));
         async move { Service::call(&mut app, request).await }
     });
     let mut builder = http1::Builder::new();
@@ -613,28 +604,17 @@ mod tests {
 
         for _ in 0..PUBLIC_CONNECTIONS_PER_IP_LIMIT {
             permits.push(
-                PublicConnectionPermit::try_acquire(
-                    total.clone(),
-                    counts.clone(),
-                    first_address,
-                )
-                .expect("permit below the per-IP limit"),
+                PublicConnectionPermit::try_acquire(total.clone(), counts.clone(), first_address)
+                    .expect("permit below the per-IP limit"),
             );
         }
         assert!(
-            PublicConnectionPermit::try_acquire(
-                total.clone(),
-                counts.clone(),
-                first_address,
-            )
-            .is_none()
+            PublicConnectionPermit::try_acquire(total.clone(), counts.clone(), first_address,)
+                .is_none()
         );
-        let other = PublicConnectionPermit::try_acquire(
-            total.clone(),
-            counts.clone(),
-            second_address,
-        )
-        .expect("a different source address has a separate limit");
+        let other =
+            PublicConnectionPermit::try_acquire(total.clone(), counts.clone(), second_address)
+                .expect("a different source address has a separate limit");
 
         let released = permits.pop().expect("one active permit");
         drop(released);

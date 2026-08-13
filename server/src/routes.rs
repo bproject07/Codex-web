@@ -124,8 +124,7 @@ const MAX_FAVORITE_BODY: usize = 256 * 1024;
 const MAX_UPDATE_BODY: usize = 16 * 1024;
 const MAX_RESTART_SERVER_BODY: usize = 16 * 1024;
 const REQUEST_BODY_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(15);
-const FALLBACK_CONTENT_SECURITY_POLICY: &str =
-    "default-src 'self'; connect-src 'self'; img-src 'self' data:; \
+const FALLBACK_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; connect-src 'self'; img-src 'self' data:; \
      style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; \
      object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
@@ -861,8 +860,7 @@ async fn development_fallback() -> impl IntoResponse {
 
 async fn security_headers(request: axum::extract::Request, next: Next) -> Response {
     let request_path = request.uri().path().to_owned();
-    let content_security_policy =
-        content_security_policy(request.headers().get(header::HOST));
+    let content_security_policy = content_security_policy(request.headers().get(header::HOST));
     let mut response = next.run(request).await;
     let is_html = response
         .headers()
@@ -886,15 +884,10 @@ async fn security_headers(request: axum::extract::Request, next: Next) -> Respon
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        content_security_policy,
-    );
+    headers.insert(header::CONTENT_SECURITY_POLICY, content_security_policy);
     headers.insert(
         "permissions-policy",
-        HeaderValue::from_static(
-            "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
-        ),
+        HeaderValue::from_static("camera=(), geolocation=(), microphone=(), payment=(), usb=()"),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     response
@@ -941,18 +934,15 @@ mod tests {
 
     #[test]
     fn csp_allows_only_the_request_hosts_websocket_origins() {
-        let policy = content_security_policy(Some(&HeaderValue::from_static(
-            "terminal.example:8443",
-        )));
+        let policy =
+            content_security_policy(Some(&HeaderValue::from_static("terminal.example:8443")));
         let policy = policy.to_str().expect("ASCII CSP");
 
         assert!(policy.contains("connect-src 'self' ws://terminal.example:8443 "));
         assert!(policy.contains("wss://terminal.example:8443;"));
         assert!(!policy.contains("connect-src 'self' ws: wss:"));
         assert_eq!(
-            content_security_policy(Some(&HeaderValue::from_static(
-                "user@terminal.example",
-            ))),
+            content_security_policy(Some(&HeaderValue::from_static("user@terminal.example",))),
             HeaderValue::from_static(FALLBACK_CONTENT_SECURITY_POLICY)
         );
     }

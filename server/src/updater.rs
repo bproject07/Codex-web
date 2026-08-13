@@ -545,9 +545,7 @@ impl UpdateManager {
 
     async fn require_asset_attestation(&self, asset: &VerifiedAsset) -> Result<()> {
         let digest = sha256_digest_label(&asset.sha256);
-        let url = format!(
-            "https://api.github.com/repos/{GITHUB_REPOSITORY}/attestations/{digest}"
-        );
+        let url = format!("https://api.github.com/repos/{GITHUB_REPOSITORY}/attestations/{digest}");
         let response = self
             .inner
             .client
@@ -1284,14 +1282,11 @@ mod tests {
 
     #[test]
     fn attestation_metadata_requires_the_official_repository() {
-        let valid = format!(
-            r#"{{"attestations":[{{"repository_id":{GITHUB_REPOSITORY_ID}}}]}}"#
-        );
+        let valid = format!(r#"{{"attestations":[{{"repository_id":{GITHUB_REPOSITORY_ID}}}]}}"#);
         validate_attestation_response(valid.as_bytes()).expect("official attestation");
         assert!(validate_attestation_response(br#"{"attestations":[]}"#).is_err());
         assert!(
-            validate_attestation_response(br#"{"attestations":[{"repository_id":7}]}"#)
-                .is_err()
+            validate_attestation_response(br#"{"attestations":[{"repository_id":7}]}"#).is_err()
         );
     }
 
