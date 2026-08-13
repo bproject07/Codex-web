@@ -217,9 +217,12 @@ def exercise_terminal_wheel_scroll(page: Page) -> dict[str, int]:
           const rows = document.querySelectorAll(
             ".terminal-view .xterm-rows > div",
           );
-          return Array.from(rows).some(
-            row => /fixture history \d+/.test(row.textContent ?? ""),
-          );
+          const text = Array.from(
+            rows,
+            row => row.textContent ?? "",
+          ).join("\n");
+          return /fixture history \d+/.test(text) &&
+            text.includes("fixture prompt redraw=");
         }"""
     )
     before = visible_history_position(page)
@@ -356,7 +359,6 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
             )
             page.locator(".xterm-helper-textarea").wait_for(state="attached")
             page.wait_for_timeout(1_500)
-            mobile_wheel_scroll = exercise_terminal_wheel_scroll(page)
 
             header_toggle = page.locator(".mobile-header-toggle")
             header_toggle.wait_for(state="visible")
@@ -429,6 +431,7 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                   };
                 }"""
             )
+            mobile_wheel_scroll = exercise_terminal_wheel_scroll(page)
 
             page.evaluate(
                 """() => {
