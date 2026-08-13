@@ -703,13 +703,26 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                     f"{result['openResizeFrames']}"
                 )
                 assert result["openResizeFrames"][0]["rows"] <= 16
-                assert len(result["closeResizeFrames"]) == 1, (
-                    "expected one keyboard-close resize frame, received "
+                assert 1 <= len(result["closeResizeFrames"]) <= 2, (
+                    "expected one or two keyboard-close convergence frames, received "
                     f"{result['closeResizeFrames']}"
                 )
-                assert result["closeResizeFrames"][0]["rows"] >= 29
+                assert len(
+                    {
+                        (frame["cols"], frame["rows"])
+                        for frame in result["closeResizeFrames"]
+                    }
+                ) == len(result["closeResizeFrames"]), (
+                    "keyboard-close resize frames repeated instead of converging: "
+                    f"{result['closeResizeFrames']}"
+                )
+                assert result["closeResizeFrames"][-1]["rows"] >= 29
                 assert result["ptyRows"][0] <= 16
                 assert result["ptyRows"][1] >= 29
+                assert (
+                    result["closeResizeFrames"][-1]["rows"]
+                    == result["ptyRows"][1]
+                )
                 assert (
                     result["atomicMobileResizeCommits"][1]
                     > result["atomicMobileResizeCommits"][0]

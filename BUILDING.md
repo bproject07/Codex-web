@@ -897,7 +897,8 @@ The release workflow runs `mobile-resize-regression.py` against the packaged
 binary and the runner's system Google Chrome on both Windows and Linux. It
 asserts real terminal wheel movement in desktop and mobile viewports, the
 coarse-pointer scrollbar target, and the Android keyboard viewport resize
-cycle. For a disposable package check outside repository-agent sessions:
+cycle with at most one distinct intermediate convergence frame. For a
+disposable package check outside repository-agent sessions:
 
 ```powershell
 python -m pip install playwright==1.62.0
