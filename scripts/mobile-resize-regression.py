@@ -698,9 +698,15 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                     > result["mobileWheelScroll"]["afterUp"]
                 )
                 assert result["replayCount"][0] == result["replayCount"][1]
-                assert len(result["openResizeFrames"]) == 1
+                assert len(result["openResizeFrames"]) == 1, (
+                    "expected one keyboard-open resize frame, received "
+                    f"{result['openResizeFrames']}"
+                )
                 assert result["openResizeFrames"][0]["rows"] <= 16
-                assert len(result["closeResizeFrames"]) == 1
+                assert len(result["closeResizeFrames"]) == 1, (
+                    "expected one keyboard-close resize frame, received "
+                    f"{result['closeResizeFrames']}"
+                )
                 assert result["closeResizeFrames"][0]["rows"] >= 29
                 assert result["ptyRows"][0] <= 16
                 assert result["ptyRows"][1] >= 29
