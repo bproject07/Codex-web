@@ -574,6 +574,11 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
             set_mobile_height(cdp, KEYBOARD_CLOSED_HEIGHT)
             page.wait_for_timeout(2_050)
 
+            # Reading the diagnostics opens the collapsed mobile header and
+            # Settings, which legitimately resizes the terminal. Freeze the
+            # keyboard-close frames first so that UI inspection cannot pollute
+            # the viewport transition being measured.
+            frames = resize_frames(sent_frames)
             diagnostics = read_diagnostics(page)
             samples = diagnostics["samples"]
             opened = terminal_sample(
@@ -584,7 +589,6 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
             )
             opened_terminal = opened["terminal"]
             closed_terminal = closed["terminal"]
-            frames = resize_frames(sent_frames)
             atomic_events = page.evaluate("window.__atomicFrameEvents")
 
             result = {
@@ -726,6 +730,10 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                 assert (
                     result["closeResizeFrames"][-1]["rows"]
                     == result["ptyRows"][1]
+                ), (
+                    "keyboard-close frames did not settle on the sampled PTY "
+                    f"size: frames={result['closeResizeFrames']}, "
+                    f"ptyRows={result['ptyRows']}"
                 )
                 assert (
                     result["atomicMobileResizeCommits"][1]
