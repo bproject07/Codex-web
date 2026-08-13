@@ -13,7 +13,7 @@ function redraw() {
   for (let index = 0; index < HISTORY_LINES; index += 1) {
     output.push(
       `fixture history ${String(index).padStart(4, "0")} ` +
-        `redraw=${redrawCount} size=${columns}x${rows}\r\n`,
+        `r=${redrawCount} ${columns}x${rows}\r\n`,
     );
   }
   output.push(`fixture prompt redraw=${redrawCount} size=${columns}x${rows}> `);
