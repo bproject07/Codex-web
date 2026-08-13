@@ -104,7 +104,9 @@ def begin_diagnostics(page: Page) -> None:
             pointerType: "touch",
             isPrimary: true,
           }));
-          document.querySelector(".xterm-helper-textarea")?.focus();
+          element.querySelector(
+            ":scope > .xterm .xterm-helper-textarea",
+          )?.focus();
         }"""
     )
 
@@ -190,7 +192,7 @@ def visible_history_position(page: Page) -> int:
         r"""() => {
           const rows = Array.from(
             document.querySelectorAll(
-              ".terminal-view .xterm-rows > div",
+              ".terminal-view > .xterm .xterm-rows > div",
             ),
             row => row.textContent ?? "",
           );
@@ -210,13 +212,13 @@ def visible_history_position(page: Page) -> int:
 
 def exercise_terminal_wheel_scroll(page: Page) -> dict[str, int]:
     scrollable = page.locator(
-        ".terminal-view .xterm-scrollable-element"
+        ".terminal-view > .xterm .xterm-scrollable-element"
     )
     scrollable.wait_for(state="attached")
     page.wait_for_function(
         r"""() => {
           const rows = document.querySelectorAll(
-            ".terminal-view .xterm-rows > div",
+            ".terminal-view > .xterm .xterm-rows > div",
           );
           const text = Array.from(
             rows,
@@ -240,7 +242,7 @@ def exercise_terminal_wheel_scroll(page: Page) -> dict[str, int]:
         page.wait_for_function(
             r"""before => {
               for (const row of document.querySelectorAll(
-                ".terminal-view .xterm-rows > div",
+                ".terminal-view > .xterm .xterm-rows > div",
               )) {
                 const match = /fixture history (\d+)/.exec(
                   row.textContent ?? "",
@@ -266,7 +268,7 @@ def exercise_terminal_wheel_scroll(page: Page) -> dict[str, int]:
         page.wait_for_function(
             r"""afterUp => {
               for (const row of document.querySelectorAll(
-                ".terminal-view .xterm-rows > div",
+                ".terminal-view > .xterm .xterm-rows > div",
               )) {
                 const match = /fixture history (\d+)/.exec(
                   row.textContent ?? "",
@@ -297,7 +299,7 @@ def return_terminal_to_live(page: Page) -> None:
     page.get_by_title("Return to the live terminal output").click()
     page.wait_for_function(
         """() => Array.from(document.querySelectorAll(
-          ".terminal-view .xterm-rows > div",
+          ".terminal-view > .xterm .xterm-rows > div",
         )).some(row => (row.textContent ?? "").includes(
           "fixture prompt redraw=",
         ))"""
@@ -385,7 +387,7 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
             mobile_header["collapsedAgain"] = mobile_header_snapshot(page)
 
             scrollbar = page.locator(
-                ".terminal-view "
+                ".terminal-view > .xterm "
                 ".xterm-scrollable-element > .scrollbar.vertical"
             )
             slider = scrollbar.locator(":scope > .slider")
@@ -394,11 +396,12 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                 """() => {
                   const terminal = document.querySelector(".terminal-view");
                   const scrollbar = terminal?.querySelector(
-                    ".xterm-scrollable-element > .scrollbar.vertical",
+                    ":scope > .xterm "
+                      + ".xterm-scrollable-element > .scrollbar.vertical",
                   );
                   const slider = scrollbar?.querySelector(":scope > .slider");
                   const overviewRuler = terminal?.querySelector(
-                    ".xterm-decoration-overview-ruler",
+                    ":scope > .xterm .xterm-decoration-overview-ruler",
                   );
                   return {
                     enabled: terminal?.classList.contains(
@@ -431,7 +434,8 @@ def run_browser_test(args: argparse.Namespace) -> dict[str, Any]:
                 """() => {
                   const terminal = document.querySelector(".terminal-view");
                   const scrollbar = terminal?.querySelector(
-                    ".xterm-scrollable-element > .scrollbar.vertical",
+                    ":scope > .xterm "
+                      + ".xterm-scrollable-element > .scrollbar.vertical",
                   );
                   return {
                     visible: terminal?.classList.contains(
