@@ -20,7 +20,7 @@ dunce = "1.0"
 flate2 = "1.1"
 fs2 = "0.4"
 futures-util = "0.3"
-getrandom = "0.3"
+getrandom = "0.4"
 hyper = { version = "1.7", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 portable-pty = "0.9"
