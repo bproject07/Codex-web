@@ -97,6 +97,12 @@ At minimum:
 5. generate and validate the target-specific third-party license bundle;
 6. update every affected Markdown file in the same commit.
 
+Codex launch checks must cover the two fixed arguments `--yolo --no-daemon`
+through Windows PowerShell, Windows `cmd`/batch, and direct Unix execution.
+Version probes must still receive only `--version`. The packaged peer
+regression asserts the primary Codex fixture's arguments inside a native PTY;
+it must pass on both Windows and Linux.
+
 For workspace browsing, persistence, or selected-directory launch changes,
 the Windows and Linux checks must additionally cover native path-ID round
 trips, directory-only one-level listings, manual absolute-path resolution,

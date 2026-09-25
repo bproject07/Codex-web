@@ -340,9 +340,14 @@ authentication. Codex Web Terminal neither copies nor reads agent credentials.
 Each child inherits the server account's environment and existing CLI
 configuration.
 
-Every Codex terminal is launched as `codex --yolo`, including the primary
-terminal, **New**, restarts, and dedicated `@cwt` reviewers. This fixed mode
-disables Codex approval prompts and sandboxing. It is not used for the
+Every Codex terminal is launched as `codex --yolo --no-daemon`, including the
+primary terminal, **New**, restarts, and dedicated `@cwt` reviewers. `--yolo`
+disables Codex approval prompts and sandboxing. `--no-daemon` keeps each agent
+inside its managed PTY instead of using a shared background server, avoiding
+Windows Job Object daemon-detachment failures. Use a Codex CLI version that
+supports `--no-daemon` (documented in the
+[Codex CLI 0.156.0 release notes](https://developers.openai.com/codex/changelog)).
+Trusted wrappers must forward both arguments. Neither argument is used for the
 read-only `codex --version` discovery probe. Run Codex Web Terminal only under
 an operating-system account and on workspaces whose full access is acceptable.
 
@@ -712,10 +717,11 @@ Command values are treated as executable names or file paths, not as arbitrary
 shell expressions. A discovered `.cmd` entry point is always invoked through
 `cmd.exe /d /s /c` on Windows, which is required for the npm Codex package. On
 Unix, the resolved executable is launched directly without a shell wrapper.
-Codex always receives the fixed `--yolo` argument. The two optional permission
-switches add the fixed upstream `--dangerously-skip-permissions` argument to
-Claude or AGY. On Unix and Windows `cmd` launches each remains a distinct
-process argument. The Windows PowerShell wrapper encodes each as a
+Codex always receives the fixed `--yolo` and `--no-daemon` arguments. The two
+optional permission switches add the fixed upstream
+`--dangerously-skip-permissions` argument to Claude or AGY. On Unix and Windows
+`cmd` launches each remains a distinct process argument. The Windows
+PowerShell wrapper encodes each as a
 single-quoted literal with embedded quotes escaped. These arguments cannot be
 selected or altered by a browser client.
 
@@ -745,9 +751,10 @@ paths are useful for services with a restricted `PATH`:
   --agy-command "$env:LOCALAPPDATA\agy\bin\agy.exe"
 ```
 
-Codex starts as `codex --yolo` without an additional server switch. This
-disables both Codex approvals and sandboxing for the primary session, **New**,
-restarts, and `@cwt` reviewers.
+Codex starts as `codex --yolo --no-daemon` without an additional server switch.
+This disables both Codex approvals and sandboxing and bypasses the shared
+background server for the primary session, **New**, restarts, and `@cwt`
+reviewers. `--no-daemon` is a Codex CLI argument, not a `codex-web` option.
 
 Add the following switches only in a trusted, isolated environment when every
 Claude or AGY tool action should run without a permission prompt:

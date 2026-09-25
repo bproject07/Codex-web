@@ -786,6 +786,7 @@ write_event(
     {
         "process": os.getpid(),
         "sessionId": SESSION_ID,
+        "standaloneCodex": sys.argv[1:] == ["--yolo", "--no-daemon"],
     },
 )
 for prompt in input_prompts():
@@ -1116,6 +1117,7 @@ def exercise_peer_flow(
         stderr_log=stderr_log,
         token=token,
     )
+    assert source_ready["standaloneCodex"] is True, source_ready
     source_fixture_process = track_owned_process(
         owned_processes,
         int(source_ready["process"]),

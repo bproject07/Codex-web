@@ -440,12 +440,19 @@ only the inherited nesting markers `CODEX_THREAD_ID` and `CLAUDECODE` before
 version checks and PTY startup; authentication and provider environment
 variables remain untouched.
 
-Every Codex profile receives one fixed `--yolo` process argument. This applies
-to the primary terminal, **New**, restarts, and dedicated `@cwt` reviewers,
-including trusted executable overrides. It disables Codex approval prompts and
-sandboxing. The bounded discovery probe remains exactly `codex --version`.
-There is currently no server or browser opt-out, so custom Codex wrappers must
-accept or forward `--yolo`.
+Every Codex profile receives the fixed `--yolo` and `--no-daemon` process
+arguments. This applies to the primary terminal, **New**, restarts, and
+dedicated `@cwt` reviewers, including trusted executable overrides. `--yolo`
+disables Codex approval prompts and sandboxing. `--no-daemon` bypasses the
+shared background server so the agent stays inside its managed PTY and does
+not attempt to break away from the Windows supervisor's Job Object. Process
+containment remains enabled. The bounded discovery probe remains exactly
+`codex --version`. There is currently no server or browser opt-out, so custom
+Codex wrappers must accept or forward both arguments.
+
+The installed Codex CLI must support `--no-daemon`; OpenAI documents it in the
+[CLI 0.156.0 release notes](https://developers.openai.com/codex/changelog).
+Update an older CLI manually on the server host using the catalog guidance.
 
 To deliberately auto-approve every tool action for both optional profiles:
 
@@ -1314,6 +1321,19 @@ After correcting the host installation, select **Refresh** or **Check again**.
 If startup flags or service environment variables changed, restart the server
 first; understand that restarting destroys its in-memory PTYs. Do not paste
 the displayed install command into the browser developer console.
+
+### Codex reports that a host Job Object prevents daemon detachment
+
+This indicates that Codex tried to start a shared background server from a
+process tree that does not allow detachment. Managed Codex sessions now receive
+`--yolo --no-daemon` on Windows and Linux. Use a complete package containing
+this fix and ensure any configured Codex wrapper forwards both arguments.
+Source edits alone do not update a running packaged server. Deploy the new
+package through the normal controlled upgrade procedure above.
+
+If Codex rejects `--no-daemon` as an unknown argument, update the host CLI
+manually. Do not add `--no-daemon` to the `codex-web` command or embed it in
+`--command`: executable settings accept names or paths, not argument strings.
 
 ### Authentication fails
 

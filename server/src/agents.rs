@@ -235,7 +235,9 @@ fn dangerously_skip_permissions(config: &Config, agent: AgentKind) -> bool {
 
 fn agent_arguments(config: &Config, agent: AgentKind) -> Vec<String> {
     match agent {
-        AgentKind::Codex => vec!["--yolo".to_owned()],
+        // Keep Codex inside the managed PTY's process tree. A shared daemon
+        // cannot detach from the Windows supervisor's non-breakaway job.
+        AgentKind::Codex => vec!["--yolo".to_owned(), "--no-daemon".to_owned()],
         AgentKind::Claude | AgentKind::Agy => dangerously_skip_permissions(config, agent)
             .then(|| "--dangerously-skip-permissions".to_owned())
             .into_iter()
@@ -415,7 +417,7 @@ mod tests {
             .expect("Codex profile");
 
         assert_eq!(codex.command, "trusted-codex-wrapper");
-        assert_eq!(codex.arguments, ["--yolo"]);
+        assert_eq!(codex.arguments, ["--yolo", "--no-daemon"]);
     }
 
     #[test]
@@ -426,8 +428,8 @@ mod tests {
 
         let profiles = build_agent_profiles(&config);
 
-        assert_eq!(profiles.primary.arguments, ["--yolo"]);
-        assert_eq!(profiles.new_session.arguments, ["--yolo"]);
+        assert_eq!(profiles.primary.arguments, ["--yolo", "--no-daemon"]);
+        assert_eq!(profiles.new_session.arguments, ["--yolo", "--no-daemon"]);
         assert_eq!(
             profiles
                 .additional
@@ -445,6 +447,34 @@ mod tests {
                 .expect("AGY profile")
                 .arguments,
             ["--dangerously-skip-permissions"]
+        );
+    }
+
+    #[test]
+    fn codex_overrides_keep_fixed_arguments_for_primary_new_and_catalog_profiles() {
+        let mut config = config(AgentKind::Codex);
+        config.command = Some("trusted-primary-wrapper".to_owned());
+        config.new_session_command = Some("trusted-new-wrapper".to_owned());
+
+        let profiles = build_agent_profiles(&config);
+
+        assert_eq!(profiles.primary.command, "trusted-primary-wrapper");
+        assert_eq!(profiles.new_session.command, "trusted-new-wrapper");
+        assert_eq!(profiles.primary.arguments, ["--yolo", "--no-daemon"]);
+        assert_eq!(profiles.new_session.arguments, ["--yolo", "--no-daemon"]);
+        let codex = profiles
+            .catalog
+            .profiles
+            .iter()
+            .find(|profile| profile.terminal.agent == AgentKind::Codex)
+            .expect("Codex catalog profile");
+        assert_eq!(codex.terminal.command, "trusted-new-wrapper");
+        assert_eq!(codex.terminal.arguments, ["--yolo", "--no-daemon"]);
+        assert!(
+            profiles
+                .additional
+                .iter()
+                .all(|profile| profile.arguments.is_empty())
         );
     }
 

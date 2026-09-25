@@ -916,7 +916,7 @@ mod tests {
         let config = TerminalConfig {
             project_dir: PathBuf::from(r"C:\project"),
             command: "ignored".to_owned(),
-            arguments: vec!["--yolo".to_owned()],
+            arguments: vec!["--yolo".to_owned(), "--no-daemon".to_owned()],
             agent: AgentKind::Codex,
             shell: ShellKind::Powershell,
         };
@@ -927,7 +927,8 @@ mod tests {
             "-NoLogo".into(),
             "-NoProfile".into(),
             "-Command".into(),
-            "& 'C:\\Program Files\\Codex\\codex.exe' '--yolo'; exit $LASTEXITCODE".into(),
+            "& 'C:\\Program Files\\Codex\\codex.exe' '--yolo' '--no-daemon'; exit $LASTEXITCODE"
+                .into(),
         ];
 
         assert_eq!(command.get_argv(), &expected);
@@ -947,6 +948,43 @@ mod tests {
     }
 
     #[test]
+    fn passes_codex_arguments_separately_through_cmd() {
+        for (path, is_batch_file, shell) in [
+            (
+                r"C:\Program Files\Codex\codex.cmd",
+                true,
+                ShellKind::Powershell,
+            ),
+            (r"C:\Program Files\Codex\codex.exe", false, ShellKind::Cmd),
+        ] {
+            let resolved = ResolvedCommand {
+                path: PathBuf::from(path),
+                is_batch_file,
+            };
+            let config = TerminalConfig {
+                project_dir: PathBuf::from(r"C:\project"),
+                command: "ignored".to_owned(),
+                arguments: vec!["--yolo".to_owned(), "--no-daemon".to_owned()],
+                agent: AgentKind::Codex,
+                shell,
+            };
+            let command = pty_command(&config, &resolved);
+            let expected: Vec<OsString> = vec![
+                "cmd.exe".into(),
+                "/d".into(),
+                "/s".into(),
+                "/c".into(),
+                "call".into(),
+                path.into(),
+                "--yolo".into(),
+                "--no-daemon".into(),
+            ];
+
+            assert_eq!(command.get_argv(), &expected);
+        }
+    }
+
+    #[test]
     fn verifies_a_batch_codex_entry_point_with_spaces_in_its_path() {
         let directory = tempfile::Builder::new()
             .prefix("codex web terminal ")
@@ -955,7 +993,7 @@ mod tests {
         let command_path = directory.path().join("codex.cmd");
         std::fs::write(
             &command_path,
-            "@echo off\r\necho codex-cli 1.0.0\r\nexit /b 0\r\n",
+            "@echo off\r\nif not \"%~1\"==\"--version\" exit /b 8\r\nif not \"%~2\"==\"\" exit /b 9\r\necho codex-cli 1.0.0\r\nexit /b 0\r\n",
         )
         .expect("write fake Codex command");
         let resolved =
@@ -1053,13 +1091,17 @@ mod unix_tests {
         let config = TerminalConfig {
             project_dir: PathBuf::from("/tmp/codex-web-project"),
             command: "ignored".to_owned(),
-            arguments: vec!["--yolo".to_owned()],
+            arguments: vec!["--yolo".to_owned(), "--no-daemon".to_owned()],
             agent: AgentKind::Codex,
             shell: ShellKind::Powershell,
         };
 
         let command = pty_command(&config, &resolved);
-        let expected = vec![resolved.path.clone().into_os_string(), "--yolo".into()];
+        let expected = vec![
+            resolved.path.clone().into_os_string(),
+            "--yolo".into(),
+            "--no-daemon".into(),
+        ];
 
         assert_eq!(
             command.get_argv(),
@@ -1077,7 +1119,7 @@ mod unix_tests {
         let command_path = directory.path().join("fake-codex");
         std::fs::write(
             &command_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  [ -z \"$2\" ] || exit 9\n  echo 'codex-cli 1.0.0'\n  exit 0\nfi\n[ \"$1\" = \"--yolo\" ]\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  [ \"$#\" -eq 1 ] || exit 9\n  echo 'codex-cli 1.0.0'\n  exit 0\nfi\n[ \"$#\" -eq 2 ] && [ \"$1\" = \"--yolo\" ] && [ \"$2\" = \"--no-daemon\" ]\n",
         )
         .expect("write fake Codex command");
 
@@ -1090,7 +1132,7 @@ mod unix_tests {
         let config = TerminalConfig {
             project_dir: directory.path().to_path_buf(),
             command: command_path.to_string_lossy().into_owned(),
-            arguments: vec!["--yolo".to_owned()],
+            arguments: vec!["--yolo".to_owned(), "--no-daemon".to_owned()],
             agent: AgentKind::Codex,
             shell: ShellKind::Powershell,
         };
