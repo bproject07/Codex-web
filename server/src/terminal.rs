@@ -833,6 +833,15 @@ mod command_tests {
             let reader_thread = std::thread::spawn(move || {
                 std::io::copy(&mut terminal.reader, &mut std::io::sink())
             });
+            #[cfg(windows)]
+            {
+                // Answer ConPTY's startup cursor query as xterm does in the browser.
+                terminal
+                    .writer
+                    .write_all(b"\x1b[1;1R")
+                    .expect("answer ConPTY cursor query");
+                terminal.writer.flush().expect("flush cursor response");
+            }
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             let status = loop {
                 if let Some(status) = terminal.child.try_wait().expect("poll Codex fixture") {
@@ -841,7 +850,7 @@ mod command_tests {
                 if std::time::Instant::now() >= deadline {
                     let _ = terminal.child.kill();
                     let _ = terminal.child.wait();
-                    panic!("Codex fixture did not exit");
+                    panic!("Codex fixture {version} did not exit");
                 }
                 std::thread::sleep(Duration::from_millis(10));
             };
