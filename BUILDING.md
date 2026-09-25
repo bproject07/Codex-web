@@ -97,11 +97,14 @@ At minimum:
 5. generate and validate the target-specific third-party license bundle;
 6. update every affected Markdown file in the same commit.
 
-Codex launch checks must cover the two fixed arguments `--yolo --no-daemon`
-through Windows PowerShell, Windows `cmd`/batch, and direct Unix execution.
-Version probes must still receive only `--version`. The packaged peer
-regression asserts the primary Codex fixture's arguments inside a native PTY;
-it must pass on both Windows and Linux.
+Codex launch checks must cover `--yolo --no-daemon` when a bounded `--help`
+probe advertises the flag and `--yolo` alone for legacy CLIs or failed help.
+Cover Windows PowerShell, Windows `cmd`/batch, and direct Unix execution;
+version probes must still receive only `--version`. The native PTY tests
+include legacy fixtures that reject the optional flag and modern fixtures
+that require it. The packaged peer regression also asserts the modern Codex
+fixture's arguments inside a native PTY. These checks must pass on both
+Windows and Linux.
 
 For workspace browsing, persistence, or selected-directory launch changes,
 the Windows and Linux checks must additionally cover native path-ID round

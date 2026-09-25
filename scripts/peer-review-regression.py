@@ -603,11 +603,16 @@ import sys
 import time
 
 
-if len(sys.argv) == 2 and sys.argv[1] == "--version":
+if len(sys.argv) == 2 and sys.argv[1] in {"--version", "--help"}:
     if "CODEX_WEB_TOKEN" in os.environ:
-        print("server bearer token leaked into the version probe", file=sys.stderr)
+        print("server bearer token leaked into a CLI probe", file=sys.stderr)
         raise SystemExit(90)
-    print("synthetic-peer-agent 1.0.0", flush=True)
+    print(
+        "synthetic-peer-agent 1.0.0"
+        if sys.argv[1] == "--version"
+        else "Options:\n  --no-daemon  Run without a shared daemon",
+        flush=True,
+    )
     raise SystemExit(0)
 
 

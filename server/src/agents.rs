@@ -235,9 +235,7 @@ fn dangerously_skip_permissions(config: &Config, agent: AgentKind) -> bool {
 
 fn agent_arguments(config: &Config, agent: AgentKind) -> Vec<String> {
     match agent {
-        // Keep Codex inside the managed PTY's process tree. A shared daemon
-        // cannot detach from the Windows supervisor's non-breakaway job.
-        AgentKind::Codex => vec!["--yolo".to_owned(), "--no-daemon".to_owned()],
+        AgentKind::Codex => vec!["--yolo".to_owned()],
         AgentKind::Claude | AgentKind::Agy => dangerously_skip_permissions(config, agent)
             .then(|| "--dangerously-skip-permissions".to_owned())
             .into_iter()
@@ -417,7 +415,7 @@ mod tests {
             .expect("Codex profile");
 
         assert_eq!(codex.command, "trusted-codex-wrapper");
-        assert_eq!(codex.arguments, ["--yolo", "--no-daemon"]);
+        assert_eq!(codex.arguments, ["--yolo"]);
     }
 
     #[test]
@@ -428,8 +426,8 @@ mod tests {
 
         let profiles = build_agent_profiles(&config);
 
-        assert_eq!(profiles.primary.arguments, ["--yolo", "--no-daemon"]);
-        assert_eq!(profiles.new_session.arguments, ["--yolo", "--no-daemon"]);
+        assert_eq!(profiles.primary.arguments, ["--yolo"]);
+        assert_eq!(profiles.new_session.arguments, ["--yolo"]);
         assert_eq!(
             profiles
                 .additional
@@ -460,8 +458,8 @@ mod tests {
 
         assert_eq!(profiles.primary.command, "trusted-primary-wrapper");
         assert_eq!(profiles.new_session.command, "trusted-new-wrapper");
-        assert_eq!(profiles.primary.arguments, ["--yolo", "--no-daemon"]);
-        assert_eq!(profiles.new_session.arguments, ["--yolo", "--no-daemon"]);
+        assert_eq!(profiles.primary.arguments, ["--yolo"]);
+        assert_eq!(profiles.new_session.arguments, ["--yolo"]);
         let codex = profiles
             .catalog
             .profiles
@@ -469,7 +467,7 @@ mod tests {
             .find(|profile| profile.terminal.agent == AgentKind::Codex)
             .expect("Codex catalog profile");
         assert_eq!(codex.terminal.command, "trusted-new-wrapper");
-        assert_eq!(codex.terminal.arguments, ["--yolo", "--no-daemon"]);
+        assert_eq!(codex.terminal.arguments, ["--yolo"]);
         assert!(
             profiles
                 .additional

@@ -166,13 +166,18 @@ Unix:
 
 Do not unify these paths through a generic shell command string. The command
 configuration intentionally rejects arbitrary shell expressions.
-Every Codex profile appends only the fixed upstream `--yolo` and `--no-daemon`
-arguments; this applies to the primary terminal, **New**, restarts, and
-dedicated peer reviewers, including executable overrides. `--no-daemon` keeps
-the agent in the managed PTY instead of using a shared background server and avoids Windows
-Job Object breakaway failures. Keep process containment enabled. Codex and
-trusted wrappers must support both arguments. Version probes remain exactly
-`codex --version`. Optional Claude and AGY dangerous-mode switches append only
+Every Codex profile appends the fixed upstream `--yolo` argument. Before each
+PTY launch, a separate bounded `--help` probe of the resolved Codex executable
+detects whether it advertises `--no-daemon`; append that fixed argument only
+when supported. Missing, failed, timed-out, or truncated help preserves the
+legacy `--yolo` launch. This applies to the primary terminal, **New**, restarts,
+and dedicated peer reviewers, including executable overrides. Do not infer
+support from a version number or retry an already-started PTY. `--no-daemon`
+keeps the agent in the managed PTY and avoids Windows Job Object breakaway
+failures. Keep process containment enabled. Both probes are read-only, bounded,
+and strip the same server secrets and parent-session markers; help text must
+never be logged or returned to the browser. Discovery version probes remain
+exactly `codex --version`. Optional Claude and AGY dangerous-mode switches append only
 the fixed upstream `--dangerously-skip-permissions` argument. Unix and Windows
 `cmd` launches keep fixed arguments distinct. The Windows PowerShell wrapper
 must encode each fixed argument as an independently single-quoted literal with

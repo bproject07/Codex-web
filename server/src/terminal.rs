@@ -20,7 +20,7 @@ use crate::{
         CWT_PEER_CAPABILITY_ENV, CWT_PEER_ENDPOINT_ENV, CWT_PEER_HELPER_ENV, CWT_SESSION_ID_ENV,
         CWT_TERMINAL_ID_ENV,
     },
-    process_tree::{BoundedProcessOptions, run_bounded},
+    process_tree::{BoundedProcessOptions, BoundedProcessOutput, run_bounded},
     update_bootstrap::{READINESS_NONCE_ENV, SERVER_RESTART_CAPABILITY_ENV, SUPERVISED_WORKER_ENV},
 };
 
@@ -40,6 +40,7 @@ const PEER_ENVIRONMENT_NAMES: [&str; 5] = [
 ];
 const VERSION_OUTPUT_LIMIT: usize = 16 * 1024;
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const HELP_OUTPUT_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct TerminalConfig {
@@ -61,6 +62,7 @@ pub struct SpawnedTerminal {
 #[derive(Debug, Clone)]
 pub struct ResolvedCommand {
     path: PathBuf,
+    codex_no_daemon: bool,
     #[cfg(windows)]
     is_batch_file: bool,
 }
@@ -116,8 +118,11 @@ pub fn inspect_command(config: &TerminalConfig, explicit_override: bool) -> Comm
 
 pub fn preflight(config: &TerminalConfig) -> Result<ResolvedCommand> {
     validate_project_directory(config)?;
-    let resolved = resolve_command(&config.command, config.agent)?;
+    let mut resolved = resolve_command(&config.command, config.agent)?;
     probe_command_version(&resolved, &config.project_dir, config.agent)?;
+    if config.agent == AgentKind::Codex {
+        resolved.codex_no_daemon = probe_codex_no_daemon(&resolved, &config.project_dir);
+    }
     Ok(resolved)
 }
 
@@ -191,24 +196,29 @@ fn pty_command_with_environment(
     resolved: &ResolvedCommand,
     environment: &[(OsString, OsString)],
 ) -> CommandBuilder {
+    let mut arguments = config.arguments.clone();
+    if config.agent == AgentKind::Codex && resolved.codex_no_daemon {
+        arguments.push("--no-daemon".to_owned());
+    }
+
     #[cfg(windows)]
     let mut command = if resolved.is_batch_file || config.shell == ShellKind::Cmd {
         let mut command = CommandBuilder::new("cmd.exe");
         command.args(["/d", "/s", "/c", "call"]);
         command.arg(&resolved.path);
-        command.args(&config.arguments);
+        command.args(&arguments);
         command
     } else {
         let mut command = CommandBuilder::new("powershell.exe");
         command.args(["-NoLogo", "-NoProfile", "-Command"]);
-        command.arg(powershell_invocation(&resolved.path, &config.arguments));
+        command.arg(powershell_invocation(&resolved.path, &arguments));
         command
     };
 
     #[cfg(not(windows))]
     let mut command = {
         let mut command = CommandBuilder::new(&resolved.path);
-        command.args(&config.arguments);
+        command.args(&arguments);
         command
     };
 
@@ -494,6 +504,7 @@ fn resolved_from_existing_path(path: PathBuf, agent: AgentKind) -> Result<Resolv
 
     Ok(ResolvedCommand {
         path: canonical_path,
+        codex_no_daemon: false,
         #[cfg(windows)]
         is_batch_file,
     })
@@ -504,35 +515,12 @@ fn probe_command_version(
     project_dir: &Path,
     agent: AgentKind,
 ) -> Result<String> {
-    #[cfg(windows)]
-    let mut command = if resolved.is_batch_file {
-        let mut command = Command::new("cmd.exe");
-        command.args(["/d", "/s", "/c", "call"]);
-        command.arg(&resolved.path);
-        command.arg("--version");
-        command
-    } else {
-        let mut command = Command::new(&resolved.path);
-        command.arg("--version");
-        command
-    };
-
-    #[cfg(not(windows))]
-    let mut command = {
-        let mut command = Command::new(&resolved.path);
-        command.arg("--version");
-        command
-    };
-
-    configure_version_probe_environment(&mut command, agent);
-    command.current_dir(project_dir);
-    let output = run_bounded(
-        &mut command,
-        BoundedProcessOptions {
-            timeout: VERSION_PROBE_TIMEOUT,
-            stdout_limit: VERSION_OUTPUT_LIMIT,
-            stderr_limit: VERSION_OUTPUT_LIMIT,
-        },
+    let output = run_command_probe(
+        resolved,
+        project_dir,
+        agent,
+        "--version",
+        VERSION_OUTPUT_LIMIT,
     )
     .with_context(|| format!("failed to run `{} --version`", agent.label()))?;
 
@@ -555,6 +543,69 @@ fn probe_command_version(
     sanitized_version(&output.stdout)
         .or_else(|| sanitized_version(&output.stderr))
         .with_context(|| format!("`{} --version` returned no version text", agent.label()))
+}
+
+fn probe_codex_no_daemon(resolved: &ResolvedCommand, project_dir: &Path) -> bool {
+    // Older CLIs and trusted wrappers may not implement this optional flag.
+    // Check the exact executable on each launch, including after a host update.
+    let Ok(output) = run_command_probe(
+        resolved,
+        project_dir,
+        AgentKind::Codex,
+        "--help",
+        HELP_OUTPUT_LIMIT,
+    ) else {
+        return false;
+    };
+    output.status.success()
+        && !output.stdout_truncated
+        && !output.stderr_truncated
+        && (help_advertises_no_daemon(&output.stdout) || help_advertises_no_daemon(&output.stderr))
+}
+
+fn help_advertises_no_daemon(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output)
+        .lines()
+        .any(|line| matches!(line.split_whitespace().next(), Some("--no-daemon")))
+}
+
+fn run_command_probe(
+    resolved: &ResolvedCommand,
+    project_dir: &Path,
+    agent: AgentKind,
+    argument: &'static str,
+    output_limit: usize,
+) -> Result<BoundedProcessOutput> {
+    #[cfg(windows)]
+    let mut command = if resolved.is_batch_file {
+        let mut command = Command::new("cmd.exe");
+        command.args(["/d", "/s", "/c", "call"]);
+        command.arg(&resolved.path);
+        command.arg(argument);
+        command
+    } else {
+        let mut command = Command::new(&resolved.path);
+        command.arg(argument);
+        command
+    };
+
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = Command::new(&resolved.path);
+        command.arg(argument);
+        command
+    };
+
+    configure_version_probe_environment(&mut command, agent);
+    command.current_dir(project_dir);
+    run_bounded(
+        &mut command,
+        BoundedProcessOptions {
+            timeout: VERSION_PROBE_TIMEOUT,
+            stdout_limit: output_limit,
+            stderr_limit: output_limit,
+        },
+    )
 }
 
 fn configure_version_probe_environment(command: &mut Command, agent: AgentKind) {
@@ -691,6 +742,112 @@ mod command_tests {
     use super::*;
 
     #[test]
+    fn no_daemon_requires_an_exact_help_option() {
+        assert!(help_advertises_no_daemon(
+            b"Options:\r\n      --no-daemon  Run without the background server\r\n"
+        ));
+        for text in [
+            "Options:\n  --yolo  Disable approvals\n",
+            "error: unexpected argument '--no-daemon' found",
+            "Use --no-daemon with a newer CLI",
+            "  --no-daemon-extra\n",
+            "  --no-daemon=<value>\n",
+        ] {
+            assert!(!help_advertises_no_daemon(text.as_bytes()), "{text}");
+        }
+    }
+
+    #[test]
+    fn native_codex_launch_preserves_legacy_and_detects_standalone_support() {
+        for (version, help, help_status, standalone) in [
+            ("0.155.1", "  --yolo", 0, false),
+            ("0.156.0", "  --no-daemon  Disable daemon", 0, true),
+            ("0.156.0-alpha.1", "  --no-daemon", 0, true),
+            ("9.0.0", "  --yolo", 0, false),
+            ("0.155.1", "  --no-daemon", 2, false),
+        ] {
+            let directory = tempfile::Builder::new()
+                .prefix("codex web compatibility ")
+                .tempdir()
+                .expect("temporary fixture directory");
+            #[cfg(windows)]
+            let command_path = directory.path().join("codex.cmd");
+            #[cfg(not(windows))]
+            let command_path = directory.path().join("codex");
+            #[cfg(windows)]
+            let source = format!(
+                "@echo off\r\n\
+                 if \"%~1\"==\"--version\" goto version\r\n\
+                 if \"%~1\"==\"--help\" goto help\r\n\
+                 if not \"%~1\"==\"--yolo\" exit /b 41\r\n\
+                 if not \"%~2\"==\"{}\" exit /b 42\r\n\
+                 if not \"%~3\"==\"\" exit /b 43\r\n\
+                 exit /b 0\r\n\
+                 :version\r\n\
+                 if not \"%~2\"==\"\" exit /b 44\r\n\
+                 echo codex-cli {version}\r\n\
+                 exit /b 0\r\n\
+                 :help\r\n\
+                 if not \"%~2\"==\"\" exit /b 45\r\n\
+                 echo {help}\r\n\
+                 exit /b {help_status}\r\n",
+                if standalone { "--no-daemon" } else { "" },
+            );
+            #[cfg(not(windows))]
+            let source = format!(
+                "#!/bin/sh\n\
+                 if [ \"$1\" = --version ]; then\n\
+                   [ \"$#\" -eq 1 ] || exit 44\n\
+                   echo 'codex-cli {version}'\n\
+                   exit 0\n\
+                 fi\n\
+                 if [ \"$1\" = --help ]; then\n\
+                   [ \"$#\" -eq 1 ] || exit 45\n\
+                   echo '{help}'\n\
+                   exit {help_status}\n\
+                 fi\n\
+                 [ \"$#\" -eq {} ] && [ \"$1\" = --yolo ] && [ \"$2\" = '{}' ]\n",
+                if standalone { 2 } else { 1 },
+                if standalone { "--no-daemon" } else { "" },
+            );
+            std::fs::write(&command_path, source).expect("write Codex fixture");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&command_path, std::fs::Permissions::from_mode(0o700))
+                    .expect("make Codex fixture executable");
+            }
+            let config = TerminalConfig {
+                project_dir: dunce::canonicalize(directory.path()).expect("canonical fixture path"),
+                command: command_path.to_string_lossy().into_owned(),
+                arguments: vec!["--yolo".to_owned()],
+                agent: AgentKind::Codex,
+                shell: ShellKind::Powershell,
+            };
+            let resolved = preflight(&config).expect("Codex fixture preflight");
+            assert_eq!(resolved.codex_no_daemon, standalone, "version {version}");
+            let mut terminal = spawn_resolved(&config, &resolved).expect("native Codex fixture PTY");
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let status = loop {
+                if let Some(status) = terminal.child.try_wait().expect("poll Codex fixture") {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = terminal.child.kill();
+                    let _ = terminal.child.wait();
+                    panic!("Codex fixture did not exit");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert_eq!(
+                status.exit_code(),
+                0,
+                "version {version}, help status {help_status}"
+            );
+        }
+    }
+
+    #[test]
     fn child_agents_do_not_inherit_parent_session_markers() {
         let mut command = CommandBuilder::new("codex");
         command.env(CODEX_THREAD_ID_ENV, "parent-thread");
@@ -728,6 +885,7 @@ mod command_tests {
         };
         let resolved = ResolvedCommand {
             path: PathBuf::from("codex"),
+            codex_no_daemon: false,
             #[cfg(windows)]
             is_batch_file: false,
         };
@@ -911,12 +1069,13 @@ mod tests {
     fn passes_fixed_arguments_to_an_executable_through_powershell() {
         let resolved = ResolvedCommand {
             path: PathBuf::from(r"C:\Program Files\Codex\codex.exe"),
+            codex_no_daemon: true,
             is_batch_file: false,
         };
         let config = TerminalConfig {
             project_dir: PathBuf::from(r"C:\project"),
             command: "ignored".to_owned(),
-            arguments: vec!["--yolo".to_owned(), "--no-daemon".to_owned()],
+            arguments: vec!["--yolo".to_owned()],
             agent: AgentKind::Codex,
             shell: ShellKind::Powershell,
         };
@@ -959,12 +1118,13 @@ mod tests {
         ] {
             let resolved = ResolvedCommand {
                 path: PathBuf::from(path),
+                codex_no_daemon: true,
                 is_batch_file,
             };
             let config = TerminalConfig {
                 project_dir: PathBuf::from(r"C:\project"),
                 command: "ignored".to_owned(),
-                arguments: vec!["--yolo".to_owned(), "--no-daemon".to_owned()],
+                arguments: vec!["--yolo".to_owned()],
                 agent: AgentKind::Codex,
                 shell,
             };
@@ -1087,11 +1247,12 @@ mod unix_tests {
     fn builds_a_direct_executable_command_for_unix() {
         let resolved = ResolvedCommand {
             path: PathBuf::from("/opt/codex/bin/codex"),
+            codex_no_daemon: true,
         };
         let config = TerminalConfig {
             project_dir: PathBuf::from("/tmp/codex-web-project"),
             command: "ignored".to_owned(),
-            arguments: vec!["--yolo".to_owned(), "--no-daemon".to_owned()],
+            arguments: vec!["--yolo".to_owned()],
             agent: AgentKind::Codex,
             shell: ShellKind::Powershell,
         };
@@ -1119,7 +1280,7 @@ mod unix_tests {
         let command_path = directory.path().join("fake-codex");
         std::fs::write(
             &command_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  [ \"$#\" -eq 1 ] || exit 9\n  echo 'codex-cli 1.0.0'\n  exit 0\nfi\n[ \"$#\" -eq 2 ] && [ \"$1\" = \"--yolo\" ] && [ \"$2\" = \"--no-daemon\" ]\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  [ \"$#\" -eq 1 ] || exit 9\n  echo 'codex-cli 1.0.0'\n  exit 0\nfi\nif [ \"$1\" = \"--help\" ]; then\n  [ \"$#\" -eq 1 ] || exit 9\n  echo '  --no-daemon'\n  exit 0\nfi\n[ \"$#\" -eq 2 ] && [ \"$1\" = \"--yolo\" ] && [ \"$2\" = \"--no-daemon\" ]\n",
         )
         .expect("write fake Codex command");
 
@@ -1132,7 +1293,7 @@ mod unix_tests {
         let config = TerminalConfig {
             project_dir: directory.path().to_path_buf(),
             command: command_path.to_string_lossy().into_owned(),
-            arguments: vec!["--yolo".to_owned(), "--no-daemon".to_owned()],
+            arguments: vec!["--yolo".to_owned()],
             agent: AgentKind::Codex,
             shell: ShellKind::Powershell,
         };

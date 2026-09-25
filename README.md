@@ -340,15 +340,17 @@ authentication. Codex Web Terminal neither copies nor reads agent credentials.
 Each child inherits the server account's environment and existing CLI
 configuration.
 
-Every Codex terminal is launched as `codex --yolo --no-daemon`, including the
-primary terminal, **New**, restarts, and dedicated `@cwt` reviewers. `--yolo`
-disables Codex approval prompts and sandboxing. `--no-daemon` keeps each agent
-inside its managed PTY instead of using a shared background server, avoiding
-Windows Job Object daemon-detachment failures. Use a Codex CLI version that
-supports `--no-daemon` (documented in the
-[Codex CLI 0.156.0 release notes](https://developers.openai.com/codex/changelog)).
-Trusted wrappers must forward both arguments. Neither argument is used for the
-read-only `codex --version` discovery probe. Run Codex Web Terminal only under
+Every Codex terminal receives `--yolo`, including the primary terminal, **New**,
+restarts, and dedicated `@cwt` reviewers. It disables Codex approval prompts
+and sandboxing. Before each launch, a bounded read-only `--help` probe checks
+the resolved executable for `--no-daemon`. When advertised, that flag keeps
+the agent inside its managed PTY and avoids Windows Job Object detachment
+failures. Older CLIs without the flag retain the `codex --yolo` launch. Failed,
+timed-out, or truncated help also leaves the optional flag out; no version
+threshold is assumed. OpenAI documents the flag in the
+[Codex CLI 0.156.0 release notes](https://learn.chatgpt.com/docs/changelog).
+Trusted wrappers should forward `--help` and the supported launch arguments.
+The discovery probe remains exactly `codex --version`. Run Codex Web Terminal only under
 an operating-system account and on workspaces whose full access is acceptable.
 
 The browser shows missing or misconfigured agents together with an official
@@ -717,7 +719,8 @@ Command values are treated as executable names or file paths, not as arbitrary
 shell expressions. A discovered `.cmd` entry point is always invoked through
 `cmd.exe /d /s /c` on Windows, which is required for the npm Codex package. On
 Unix, the resolved executable is launched directly without a shell wrapper.
-Codex always receives the fixed `--yolo` and `--no-daemon` arguments. The two
+Codex always receives fixed `--yolo`, plus `--no-daemon` only when its bounded
+`--help` probe confirms support. The two
 optional permission switches add the fixed upstream
 `--dangerously-skip-permissions` argument to Claude or AGY. On Unix and Windows
 `cmd` launches each remains a distinct process argument. The Windows
@@ -751,10 +754,11 @@ paths are useful for services with a restricted `PATH`:
   --agy-command "$env:LOCALAPPDATA\agy\bin\agy.exe"
 ```
 
-Codex starts as `codex --yolo --no-daemon` without an additional server switch.
-This disables both Codex approvals and sandboxing and bypasses the shared
-background server for the primary session, **New**, restarts, and `@cwt`
-reviewers. `--no-daemon` is a Codex CLI argument, not a `codex-web` option.
+Codex starts with `--yolo`, disabling approvals and sandboxing. When its help
+advertises `--no-daemon`, that argument is added automatically to bypass the
+shared background server for the primary session, **New**, restarts, and
+`@cwt` reviewers. Older CLIs keep working without the optional flag.
+`--no-daemon` is a Codex CLI argument, not a `codex-web` option.
 
 Add the following switches only in a trusted, isolated environment when every
 Claude or AGY tool action should run without a permission prompt:
