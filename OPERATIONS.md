@@ -926,7 +926,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.3.7",
+  "serverVersion": "0.3.8",
   "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,
