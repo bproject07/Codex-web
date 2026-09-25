@@ -826,7 +826,8 @@ mod command_tests {
             };
             let resolved = preflight(&config).expect("Codex fixture preflight");
             assert_eq!(resolved.codex_no_daemon, standalone, "version {version}");
-            let mut terminal = spawn_resolved(&config, &resolved).expect("native Codex fixture PTY");
+            let mut terminal =
+                spawn_resolved(&config, &resolved).expect("native Codex fixture PTY");
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             let status = loop {
                 if let Some(status) = terminal.child.try_wait().expect("poll Codex fixture") {
