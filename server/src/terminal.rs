@@ -828,6 +828,11 @@ mod command_tests {
             assert_eq!(resolved.codex_no_daemon, standalone, "version {version}");
             let mut terminal =
                 spawn_resolved(&config, &resolved).expect("native Codex fixture PTY");
+            // ConPTY needs its output drained even when the command only exits.
+            // The real session reader does this continuously as well.
+            let reader_thread = std::thread::spawn(move || {
+                std::io::copy(&mut terminal.reader, &mut std::io::sink())
+            });
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             let status = loop {
                 if let Some(status) = terminal.child.try_wait().expect("poll Codex fixture") {
@@ -840,6 +845,9 @@ mod command_tests {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             };
+            drop(terminal.writer);
+            drop(terminal.master);
+            let _ = reader_thread.join().expect("join fixture output reader");
             assert_eq!(
                 status.exit_code(),
                 0,
