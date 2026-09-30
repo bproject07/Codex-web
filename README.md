@@ -118,6 +118,8 @@ session's bounded terminal output buffer before it resumes live output.
 - A fresh dedicated reviewer PTY for every new peer thread; ordinary sessions
   are never selected or reused as reviewers
 - One 16 MiB bounded raw terminal output buffer per session
+- Final PTY output remains readable when process exit precedes the last read;
+  restarted sessions reject output from the previous generation
 - Up to the newest 2 MiB replayed to each newly attached client
 - Initial PTY size of 120 columns by 35 rows
 - Validated browser resize range: 20–500 columns and 5–300 rows

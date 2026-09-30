@@ -854,10 +854,17 @@ impl SessionManager {
     fn publish_output(&self, session_id: Uuid, data: &[u8]) {
         let is_current = {
             let record = lock(&self.inner.record);
+            // Process exit can win the race with the reader draining the PTY.
+            // Keep those final bytes for this generation; the buffer also
+            // rejects stale generations if a restart races with this append.
             record.session_id == Some(session_id)
                 && matches!(
                     record.machine.state(),
-                    Lifecycle::Starting | Lifecycle::Running | Lifecycle::Terminating
+                    Lifecycle::Starting
+                        | Lifecycle::Running
+                        | Lifecycle::Terminating
+                        | Lifecycle::Exited
+                        | Lifecycle::Terminated
                 )
         };
         if !is_current {
@@ -1307,6 +1314,80 @@ mod tests {
         let mut machine = SessionStateMachine::new();
         assert!(machine.transition(Lifecycle::Running).is_err());
         assert_eq!(machine.state(), Lifecycle::Idle);
+    }
+
+    #[test]
+    fn final_pty_bytes_survive_exit_but_never_enter_a_restarted_generation() {
+        for terminated in [false, true] {
+            let manager = test_session_manager();
+            let session_id = Uuid::new_v4();
+            {
+                let mut record = lock(&manager.inner.record);
+                record.session_id = Some(session_id);
+                record
+                    .machine
+                    .transition(Lifecycle::Starting)
+                    .expect("start");
+                record.machine.transition(Lifecycle::Running).expect("run");
+                if terminated {
+                    record
+                        .machine
+                        .transition(Lifecycle::Terminating)
+                        .expect("terminate");
+                }
+            }
+            lock(&manager.inner.output).reset(session_id);
+            manager.publish_output(session_id, b"before\r\n");
+            let mut output_receiver = manager.subscribe_output();
+            manager.process_exited(session_id, Some(0));
+
+            // Force the order that a fast native process can produce: its exit
+            // is observed before the reader receives the final raw bytes.
+            reader_loop(
+                manager.clone(),
+                session_id,
+                Box::new(std::io::Cursor::new(b"\x1b[31mlast\r\n".to_vec())),
+            );
+            let snapshot = manager.output_snapshot();
+            let output: Vec<_> = snapshot
+                .chunks
+                .into_iter()
+                .flat_map(|chunk| chunk.data)
+                .collect();
+            assert_eq!(output, b"before\r\n\x1b[31mlast\r\n");
+            assert_eq!(snapshot.session_id, Some(session_id));
+            assert!(output_receiver.has_changed().expect("output notification"));
+            assert_eq!(*output_receiver.borrow_and_update(), snapshot.last_sequence);
+            assert_eq!(
+                manager.snapshot().status,
+                if terminated {
+                    Lifecycle::Terminated
+                } else {
+                    Lifecycle::Exited
+                }
+            );
+
+            let replacement_id = Uuid::new_v4();
+            {
+                let mut record = lock(&manager.inner.record);
+                record.session_id = Some(replacement_id);
+                record
+                    .machine
+                    .transition(Lifecycle::Starting)
+                    .expect("restart");
+            }
+            lock(&manager.inner.output).reset(replacement_id);
+            reader_loop(
+                manager.clone(),
+                session_id,
+                Box::new(std::io::Cursor::new(b"stale final bytes".to_vec())),
+            );
+            manager.process_exited(session_id, Some(1));
+            assert!(manager.output_snapshot().chunks.is_empty());
+            assert!(!output_receiver.has_changed().expect("no stale notification"));
+            assert_eq!(manager.snapshot().session_id, Some(replacement_id));
+            assert_eq!(manager.snapshot().status, Lifecycle::Starting);
+        }
     }
 
     #[test]

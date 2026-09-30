@@ -992,6 +992,11 @@ directory browsing, workspace persistence, registry selected-CWD tests, and
 `server/tests/workspace_api.rs`. Keep these cases in the normal suites rather
 than making the launcher depend on an optional browser utility.
 
+The Rust suite forces process exit before the final PTY read and verifies that
+the raw bytes remain available without changing the exited/terminated status.
+The same test rejects old-reader output and exit notifications after restart.
+The native selected-working-directory test also covers a short-lived PTY.
+
 The normal suites also cover the `@cwt` peer state model, strict frontend DTO
 normalization, composer Preview/Return behavior, non-nested close buttons,
 dedicated session metadata, per-generation capability rotation/revocation,

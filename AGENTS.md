@@ -247,6 +247,9 @@ preflight, PTY startup, or process termination requires:
   unsupported and remain running. The operator must install the complete new
   release as the stable launcher before using this action.
 - Output from an old generation must never be appended to the active buffer.
+- The reader may drain final PTY bytes after process exit or termination is
+  observed. Retain those bytes for the same generation without changing its
+  lifecycle status; a restarted generation must still reject them.
 - A browser attach changes only the displayed session.
 - Managed children and version probes must not inherit the parent-session
   markers `CODEX_THREAD_ID` or `CLAUDECODE`; each terminal must start
