@@ -141,7 +141,11 @@ class SyntheticPeers:
         }
         self.connections.append(connection)
         socket.on_message(lambda data: connection["sent"].append(data))
-        socket.on_close(lambda *_: connection.update(closed=True))
+        def close_connection(code: int | None, reason: str | None) -> None:
+            connection["closed"] = True
+            socket.close(code=code or 1000, reason=reason or "")
+
+        socket.on_close(close_connection)
         # No connect_to_server call: all bytes and all endpoints are synthetic.
         socket.send(json.dumps({"type": "session", "session": snapshot}))
         socket.send(json.dumps({"type": "replay_start", "sessionId": snapshot["sessionId"]}))
@@ -490,7 +494,7 @@ def run_desktop(browser: Browser, url: str) -> None:
 
         # A deleted background session is pruned without selecting another tab.
         peers.sessions = peers.sessions[1:]
-        peers.connection(0)["socket"].close()
+        peers.connection(0)["socket"].close(code=1000, reason="Synthetic session removed")
         page.locator(f'.terminal-pane[data-terminal-id="{session(0)["terminalId"]}"]').wait_for(state="detached")
         assert page.locator(".app-context-project").inner_text() == session(1)["project"]
         assert not failures, failures
@@ -545,7 +549,7 @@ def run_attach_recovery(browser: Browser, url: str) -> None:
             reads = peers.session_reads
             terminal_id = session(0)["terminalId"]
             closes = page.evaluate("id => window.syntheticSocketCloses[id] ?? 0", terminal_id)
-            peers.connection(0)["socket"].close()
+            peers.connection(0)["socket"].close(code=1000, reason="Synthetic reconnect")
             page.wait_for_function(
                 "([id, before]) => (window.syntheticSocketCloses[id] ?? 0) > before",
                 arg=[terminal_id, closes],
