@@ -944,8 +944,8 @@ python3 -B ./scripts/session-cache-regression.py \
 
 Both workflows also run the existing native PTY
 `scripts/mobile-resize-regression.py` on each platform. These checks require
-Playwright and system Chrome. Validation for this change remains pending
-until those GitHub Actions jobs complete; do not run it locally as an agent.
+Playwright and system Chrome. Both GitHub Actions platform jobs must pass
+before publication; agents must not run these checks locally.
 
 ### Other browser regressions
 

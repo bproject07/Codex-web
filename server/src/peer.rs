@@ -1187,8 +1187,10 @@ impl PeerBroker {
             return Err(invalid_state("the peer thread is closing"));
         }
         let turn = current_turn(thread, turn_id)?;
-        let response_is_returned = matches!(turn.status, PeerStatus::Returning | PeerStatus::Returned)
-            || (turn.status == PeerStatus::ResponseReady && thread.return_delivery_token.is_some());
+        let response_is_returned =
+            matches!(turn.status, PeerStatus::Returning | PeerStatus::Returned)
+                || (turn.status == PeerStatus::ResponseReady
+                    && thread.return_delivery_token.is_some());
         if thread.source_terminal_id != subject.terminal_id
             || turn.source_session_id != subject.session_id
             || !response_is_returned
@@ -1455,8 +1457,10 @@ fn validate_return_delivery(
         ));
     }
     let turn = current_turn(thread, delivery.thread.current_turn.id)?;
-    if !matches!(thread.status, PeerStatus::ResponseReady | PeerStatus::Returned)
-        || turn.status != thread.status
+    if !matches!(
+        thread.status,
+        PeerStatus::ResponseReady | PeerStatus::Returned
+    ) || turn.status != thread.status
         || turn.response.is_none()
     {
         return Err(invalid_state("the peer response is not ready to return"));
@@ -2461,7 +2465,11 @@ mod tests {
             .expect("reviewer capability")
             .secret
             .clone();
-        assert!(broker.acknowledge_response(&peer_capability, turn_id).is_err());
+        assert!(
+            broker
+                .acknowledge_response(&peer_capability, turn_id)
+                .is_err()
+        );
 
         let received = broker
             .acknowledge_response(&source_capability, turn_id)
@@ -2511,7 +2519,9 @@ mod tests {
     fn unread_return_requires_discard_of_the_exact_turn_and_close_rollback_preserves_it() {
         let (broker, source_capability, ready) = response_ready_review();
         let turn_id = ready.current_turn.id;
-        broker.return_response(ready.id, turn_id).expect("queue return");
+        broker
+            .return_response(ready.id, turn_id)
+            .expect("queue return");
         assert!(
             broker
                 .begin_close_with_discard(ready.id, Some(Uuid::new_v4()))
@@ -2557,7 +2567,9 @@ mod tests {
             .find(|(_, record)| matches!(record.purpose, SessionPurpose::Peer { .. }))
             .expect("reviewer capability")
             .0;
-        broker.return_response(ready.id, turn_id).expect("queue return");
+        broker
+            .return_response(ready.id, turn_id)
+            .expect("queue return");
         broker.revoke_session(reviewer_id, reviewer_session_id);
         assert_eq!(
             broker.get_thread(ready.id).expect("unread thread").status,
@@ -2598,7 +2610,9 @@ mod tests {
             broker.get_thread(ready.id).expect("failed thread").status,
             PeerStatus::Failed
         );
-        broker.close_thread(ready.id).expect("close after source exit");
+        broker
+            .close_thread(ready.id)
+            .expect("close after source exit");
     }
 
     #[test]

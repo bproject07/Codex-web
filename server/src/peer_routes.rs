@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::{
     config::AgentKind,
     peer::{
-        MAX_PEER_ARTIFACT_BYTES, PeerAction, PeerArtifactKind, PeerBroker, PeerError, PeerErrorKind,
-        PeerStatus, PeerThread, SessionPurpose,
+        MAX_PEER_ARTIFACT_BYTES, PeerAction, PeerArtifactKind, PeerBroker, PeerError,
+        PeerErrorKind, PeerStatus, PeerThread, SessionPurpose,
     },
     peer_cli::{INTERNAL_PEER_PATH, InternalPeerRequest, InternalPeerResponse},
     registry::RegistryError,
