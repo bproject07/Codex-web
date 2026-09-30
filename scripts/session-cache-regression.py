@@ -373,6 +373,7 @@ def run_desktop(browser: Browser, url: str) -> None:
         assert len([frame for frame in peers.frames(0) if isinstance(frame, bytes)]) == 1
         background["socket"].send(json.dumps({"type": "session", "session": peers.sessions[0]}))
         select(page, 0)
+        page.locator(f"{ACTIVE_PANE} .terminal-view").dispatch_event("pointerdown", {"pointerType": "mouse"})
         page.get_by_title("Return to the live terminal output").click()
         page.wait_for_function("""() => document.querySelector(
           '.terminal-pane:not([hidden]) .xterm-rows')?.textContent?.includes('BACKGROUND-OUTPUT')""")
@@ -530,6 +531,8 @@ def run_desktop(browser: Browser, url: str) -> None:
         # screen/viewport state, never browser storage or authenticated URLs.
         print(json.dumps({"desktopFailure": page.evaluate("""() => ({
           pendingRender: window.syntheticRenderPending(),
+          replays: window.syntheticReplayEnds,
+          binaryFrames: window.syntheticBinaryFrames,
           panes: [...document.querySelectorAll('.terminal-pane')].map(pane => ({
             id: pane.dataset.terminalId,
             hidden: pane.hidden,
@@ -540,7 +543,14 @@ def run_desktop(browser: Browser, url: str) -> None:
                 scrollHeight: viewport.scrollHeight};
             })(),
           })),
-        })""")}))
+        })"""), "connections": [
+            {"id": item["id"], "closed": item["closed"]} for item in peers.connections
+        ]}))
+        open_settings(page)
+        diagnostics = page.locator('textarea[aria-label="Viewport diagnostics text"]')
+        if diagnostics.count():
+            samples = json.loads(diagnostics.input_value())["samples"]
+            print(json.dumps({"syntheticTerminalSamples": [sample["terminal"] for sample in samples]}))
         raise
     finally:
         context.close()
