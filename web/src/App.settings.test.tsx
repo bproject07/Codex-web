@@ -42,6 +42,7 @@ describe("SettingsPanel", () => {
     expect(html).toContain("Theme");
     expect(html).toContain("Blinking cursor");
     expect(html).toContain("Show mobile keys");
+    expect(html).toContain("Keep terminals when switching tabs");
     expect(html).toContain("Copy diagnostics");
     expect(html).toContain("Restart server");
     expect(html).toContain("Restart Codex");
@@ -56,6 +57,17 @@ describe("SettingsPanel", () => {
     expect(html).not.toContain("session-manage-button");
     expect(html).not.toContain("settings-actions");
     expect(html).not.toContain("Reconnect");
+  });
+
+  it("enables terminal retention by default and shows an explicit opt-out", () => {
+    const checkbox = (html: string) => html.match(
+      /<input[^>]*aria-describedby="preserve-tabs-help"[^>]*>/,
+    )?.[0];
+    expect(checkbox(renderPanel())).toContain("checked");
+    expect(checkbox(renderPanel({
+      settings: { ...DEFAULT_SETTINGS, preserveTabs: false },
+    }))).not.toContain("checked");
+    expect(renderPanel()).toContain("last 6 visited terminals");
   });
 
   it("disables restarting a dedicated peer reviewer", () => {

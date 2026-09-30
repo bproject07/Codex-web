@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -678,7 +679,9 @@ def run_helper(
     operation: str,
     turn_id: str,
     content: str | None = None,
-) -> str:
+    *,
+    expected_failure_status: int | None = None,
+) -> str | dict[str, int]:
     arguments = [HELPER, "__cwt-peer", operation, "--turn", turn_id]
     if operation == "submit":
         arguments.append("--stdin")
@@ -695,6 +698,17 @@ def run_helper(
             subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         ),
     )
+    if expected_failure_status is not None:
+        if completed.returncode == 0 or completed.stdout:
+            raise RuntimeError("discarded response remained readable through the helper")
+        match = re.search(r"peer broker request failed with HTTP (\d{3}):", completed.stderr)
+        broker_status = int(match.group(1)) if match else None
+        if broker_status != expected_failure_status:
+            raise RuntimeError(
+                f"expected broker HTTP {expected_failure_status}, got {broker_status} "
+                f"with helper exit {completed.returncode}"
+            )
+        return {"brokerStatus": broker_status, "returncode": completed.returncode}
     if completed.returncode != 0:
         detail = completed.stderr.strip()[-1000:]
         raise RuntimeError(
@@ -759,6 +773,17 @@ def submit_review(sequence: int, turn_id: str) -> None:
 
 
 def receive_response(sequence: int, turn_id: str) -> None:
+    write_event("return-waiting", sequence, {"turnId": turn_id})
+    deadline = time.monotonic() + 30
+    while not (EVENTS / f"{turn_id}-allow-receipt").is_file():
+        if (EVENTS / f"{turn_id}-discarded").is_file():
+            rejection = run_helper("receive", turn_id, expected_failure_status=404)
+            assert isinstance(rejection, dict)
+            write_event("response-discarded", sequence, {"turnId": turn_id, **rejection})
+            return
+        if time.monotonic() > deadline:
+            raise TimeoutError("synthetic response receipt was not released")
+        time.sleep(0.05)
     response = run_helper("receive", turn_id)
     write_event(
         "response-received",
@@ -961,6 +986,8 @@ def run_turn(
     sequence: int,
     stdout_log: Path,
     stderr_log: Path,
+    discard_response: bool = False,
+    stale_turn_id: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     preview = wait_for_thread_status(
         port,
@@ -1061,7 +1088,54 @@ def run_turn(
             "sourceReady": True,
         },
     )
-    assert returned["status"] == "returned", returned
+    assert returned["status"] == "returning", returned
+    wait_for_event(
+        process, events, source["terminalId"], "return-waiting", sequence,
+        stdout_log=stdout_log, stderr_log=stderr_log, token=token,
+    )
+    request_json(
+        port, token, f"/api/peer/threads/{thread_id}",
+        method="DELETE", expected_status=409,
+    )
+    request_json(
+        port, token, f"/api/sessions/{reviewer['terminalId']}",
+        method="DELETE", expected_status=409,
+    )
+    request_json(
+        port, token, f"/api/peer/threads/{thread_id}/turns",
+        method="POST", expected_status=409,
+        payload={"action": "recheck", "instruction": "Too early", "sourceReady": True},
+    )
+    request_json(
+        port, token, f"/api/peer/threads/{thread_id}",
+        method="DELETE", expected_status=409,
+        payload={"discardUnreadTurnId": str(uuid.uuid4())},
+    )
+    if stale_turn_id is not None:
+        assert stale_turn_id != current_turn["id"]
+        request_json(
+            port, token, f"/api/peer/threads/{thread_id}",
+            method="DELETE", expected_status=409,
+            payload={"discardUnreadTurnId": stale_turn_id},
+        )
+    if discard_response:
+        request_json(
+            port, token, f"/api/peer/threads/{thread_id}",
+            method="DELETE", expected_status=204,
+            payload={"discardUnreadTurnId": current_turn["id"]},
+        )
+        # Release only the synthetic source's wait after the real close has
+        # succeeded. Its helper must now reject retrieval of that artifact.
+        (events / f"{current_turn['id']}-discarded").write_text("discarded", encoding="utf-8")
+        discarded = wait_for_event(
+            process, events, source["terminalId"], "response-discarded", sequence,
+            stdout_log=stdout_log, stderr_log=stderr_log, token=token,
+        )
+        assert discarded["turnId"] == current_turn["id"], discarded
+        assert discarded["brokerStatus"] == 404, discarded
+        assert discarded["returncode"] != 0, discarded
+        return response_ready, response
+    (events / f"{current_turn['id']}-allow-receipt").write_text("ready", encoding="utf-8")
     source_event = wait_for_event(
         process,
         events,
@@ -1074,7 +1148,88 @@ def run_turn(
     )
     assert source_event["turnId"] == current_turn["id"], source_event
     assert source_event["responseSha256"] == sha256_text(response), source_event
+    received = request_json(port, token, f"/api/peer/threads/{thread_id}")
+    assert received["status"] == "returned", received
     return response_ready, response
+
+
+def exercise_unread_discard(
+    *,
+    port: int,
+    token: str,
+    process: subprocess.Popen[bytes],
+    events: Path,
+    source: dict[str, Any],
+    source_attachment: WebSocketAttachment,
+    source_fixture_pid: int,
+    reviewer_directory_id: str,
+    attachments: list[WebSocketAttachment],
+    owned_processes: list[OwnedProcess],
+    stdout_log: Path,
+    stderr_log: Path,
+) -> dict[str, bool]:
+    before = sessions(port, token)
+    created = request_json(
+        port, token, "/api/peer/threads", method="POST", expected_status=201,
+        payload={
+            "sourceTerminalId": source["terminalId"],
+            "directoryId": reviewer_directory_id,
+            "targetAgent": "agy",
+            "action": "review",
+            "instruction": "Review the synthetic case whose unread response will be discarded.",
+            "sourceReady": True,
+        },
+    )
+    thread_id = created["id"]
+    reviewer_id = created["reviewerTerminalId"]
+    assert created["targetAgent"] == "agy", created
+    reviewer = session_by_id(sessions(port, token), reviewer_id)
+    assert reviewer["agent"] == "agy", reviewer
+    reviewer_root = track_owned_process(owned_processes, int(reviewer["pid"]), "discard reviewer PTY root")
+    attachments.append(attach_terminal(port, token, reviewer_id))
+    ready = wait_for_event(
+        process, events, reviewer_id, "ready", 0,
+        stdout_log=stdout_log, stderr_log=stderr_log, token=token,
+    )
+    reviewer_fixture = track_owned_process(owned_processes, int(ready["process"]), "discard reviewer agent")
+    run_turn(
+        port=port, token=token, process=process, events=events,
+        thread_id=thread_id, source=source, reviewer=reviewer, sequence=1,
+        stdout_log=stdout_log, stderr_log=stderr_log, discard_response=True,
+    )
+    status, _ = http_request(port, f"/api/peer/threads/{thread_id}", token=token)
+    assert status == 404, status
+    assert all(item["id"] != thread_id for item in request_json(port, token, "/api/peer/threads"))
+    remaining = sessions(port, token)
+    assert all(item["terminalId"] != reviewer_id for item in remaining), remaining
+    assert {item["terminalId"] for item in remaining} == {item["terminalId"] for item in before}
+    for previous in before:
+        unchanged = session_by_id(remaining, previous["terminalId"])
+        assert unchanged["sessionId"] == previous["sessionId"], unchanged
+        assert unchanged["pid"] == previous["pid"], unchanged
+        assert unchanged["status"] == previous["status"], unchanged
+    wait_for(
+        "the discarded reviewer's process tree to exit", process, events,
+        lambda: (
+            True
+            if not owned_process_is_running(reviewer_root)
+            and not owned_process_is_running(reviewer_fixture)
+            else None
+        ),
+        stdout_log=stdout_log, stderr_log=stderr_log, token=token, timeout=10,
+    )
+    source_after = session_by_id(remaining, source["terminalId"])
+    assert source_after["sessionId"] == source["sessionId"], source_after
+    assert source_after["pid"] == source["pid"], source_after
+    assert source_after["status"] == "running", source_after
+    source_attachment.send(0x2, b"[CWT regression health]\r")
+    health = wait_for_event(
+        process, events, source["terminalId"], "health", 0,
+        stdout_log=stdout_log, stderr_log=stderr_log, token=token,
+    )
+    assert health["sessionId"] == source["sessionId"], health
+    assert int(health["process"]) == source_fixture_pid, health
+    return {"threadPurged": True, "helperReceiptRejected": True, "sourceStayedRunning": True}
 
 
 def exercise_peer_flow(
@@ -1303,6 +1458,7 @@ def exercise_peer_flow(
         sequence=2,
         stdout_log=stdout_log,
         stderr_log=stderr_log,
+        stale_turn_id=first_ready["currentTurn"]["id"],
     )
     assert artifact_field(second_response, "review-count") == "2", second_response
     assert (
@@ -1372,12 +1528,24 @@ def exercise_peer_flow(
     assert source_health["sessionId"] == source_session_id, source_health
     assert int(source_health["process"]) == source_fixture_process.pid
 
+    # Use the untouched ordinary terminal as a new source so its sequence-1
+    # fixture events cannot be confused with the completed primary review.
+    unread_discard = exercise_unread_discard(
+        port=port, token=token, process=process, events=events,
+        source=ordinary, source_attachment=ordinary_attachment,
+        source_fixture_pid=int(ordinary_ready["process"]),
+        reviewer_directory_id=reviewer_directory["id"],
+        attachments=attachments, owned_processes=owned_processes,
+        stdout_log=stdout_log, stderr_log=stderr_log,
+    )
+
     return {
         "threadPurged": True,
         "freshReviewer": reviewer_terminal_id != ordinary["terminalId"],
         "selectedReviewerDirectory": True,
         "restartControlsBlocked": True,
         "sourceStayedRunning": True,
+        "unreadDiscard": unread_discard,
         "firstTurn": {
             "status": first_ready["status"],
             "handoffRevision": first_ready["currentTurn"]["handoffRevision"],

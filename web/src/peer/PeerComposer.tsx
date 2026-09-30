@@ -101,6 +101,10 @@ export function PeerComposer({
     threads.find((thread) => thread.id === initialThreadId) ?? null;
   const selectionScope = `${sourceSession.terminalId}:${initialThreadId ?? ""}`;
   const dialogRef = useRef<HTMLElement>(null);
+  const folderButtonRef = useRef<HTMLButtonElement>(null);
+  const returningFromPickerRef = useRef(false);
+  const submittingRef = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
   const [initializedSelectionScope, setInitializedSelectionScope] = useState<
     string | null
   >(() =>
@@ -211,8 +215,13 @@ export function PeerComposer({
   }, [selectedThread]);
 
   useEffect(() => {
+    if (workspacePickerOpen) {
+      returningFromPickerRef.current = true;
+      return;
+    }
     const frame = window.requestAnimationFrame(() => {
       const preferred =
+        (returningFromPickerRef.current ? folderButtonRef.current : null) ??
         dialogRef.current?.querySelector<HTMLElement>(
           "[data-peer-initial-focus]:not([disabled])",
         ) ??
@@ -220,11 +229,12 @@ export function PeerComposer({
           "button:not([disabled]), textarea:not([disabled])",
         );
       (preferred ?? dialogRef.current)?.focus({ preventScroll: true });
+      returningFromPickerRef.current = false;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, []);
+  }, [workspacePickerOpen]);
 
-  const pending = operation !== null;
+  const pending = operation !== null || submitting;
   const waitingForInitialThread =
     initialThreadId !== null &&
     initializedSelectionScope !== selectionScope;
@@ -297,6 +307,9 @@ export function PeerComposer({
 
   const submitInstruction = async (event: FormEvent) => {
     event.preventDefault();
+    if (submittingRef.current || operation !== null) {
+      return;
+    }
     const nextInstruction = instruction.trim();
     if (!nextInstruction) {
       setFormError("Add the question or task for the other agent.");
@@ -317,6 +330,8 @@ export function PeerComposer({
     setFormError(null);
     onClearError();
 
+    submittingRef.current = true;
+    setSubmitting(true);
     try {
       const next = selectedThread
           ? await onCreateTurn(selectedThread.id, {
@@ -337,6 +352,9 @@ export function PeerComposer({
       setInstruction("");
     } catch {
       // The controller exposes the sanitized API error in the dialog.
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
     }
   };
 
@@ -407,6 +425,9 @@ export function PeerComposer({
     if (!first || !last) {
       event.preventDefault();
       dialogRef.current?.focus({ preventScroll: true });
+    } else if (!focusable.includes(document.activeElement as HTMLElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus({ preventScroll: true });
     } else if (event.shiftKey && document.activeElement === first) {
       event.preventDefault();
       last.focus({ preventScroll: true });
@@ -667,6 +688,22 @@ export function PeerComposer({
                 </button>
               </div>
             </section>
+          ) : selectedThread?.currentTurn.status === "returning" ? (
+            <section className="peer-progress" role="status" aria-live="polite">
+              <span className="peer-progress__spinner" aria-hidden="true" />
+              <div>
+                <strong>Returning to source</strong>
+                <p>
+                  Waiting for {sourceSession.name} to receive the response.
+                  Follow-ups stay unavailable until receipt is confirmed.
+                </p>
+                <p>
+                  If this does not advance, inspect the source terminal for an
+                  approval or unsent prompt. Closing the reviewer requires
+                  explicitly discarding the unread response.
+                </p>
+              </div>
+            </section>
           ) : selectedThread &&
             (selectedThread.currentTurn.status === "preparing_handoff" ||
               selectedThread.currentTurn.status === "reviewing") ? (
@@ -767,6 +804,7 @@ export function PeerComposer({
                       </small>
                     </div>
                     <button
+                      ref={folderButtonRef}
                       type="button"
                       disabled={pending || freshThreadBlocked}
                       onClick={() => setWorkspacePickerOpen(true)}

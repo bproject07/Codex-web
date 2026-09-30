@@ -40,6 +40,7 @@ export const ACTIVE_PEER_STATUSES = new Set<PeerStatus>([
   "preparing_handoff",
   "awaiting_preview",
   "reviewing",
+  "returning",
 ]);
 
 export function actionsForThread(
@@ -65,6 +66,8 @@ export function peerStatusLabel(status: PeerStatus): string {
       return "Reviewer working";
     case "response_ready":
       return "Response ready";
+    case "returning":
+      return "Returning to source";
     case "returned":
       return "Returned";
     case "failed":

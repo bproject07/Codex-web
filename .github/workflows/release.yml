@@ -9,7 +9,7 @@ on:
       version:
         description: Package version to build and validate without publishing
         required: true
-        default: "0.3.8"
+        default: "0.3.9"
         type: string
 
 permissions:
@@ -242,6 +242,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Chrome terminal scroll/mobile resize regression failed"
           }
+          python -B .\scripts\session-cache-regression.py `
+            --web-dir .\dist\web --chrome $chrome
+          if ($LASTEXITCODE -ne 0) {
+            throw "Terminal tab retention regression failed"
+          }
 
       - name: Exercise packaged updater supervision and rollback
         shell: pwsh
@@ -394,6 +399,8 @@ jobs:
             --server ./dist-linux/codex-web \
             --chrome /usr/bin/google-chrome \
             --port 8817
+          python3 -B ./scripts/session-cache-regression.py \
+            --web-dir ./dist-linux/web --chrome /usr/bin/google-chrome
 
       - name: Exercise packaged updater supervision and rollback
         shell: bash

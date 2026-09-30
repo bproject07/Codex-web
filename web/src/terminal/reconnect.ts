@@ -13,6 +13,7 @@ export type ConnectionEvent =
   | { type: "authentication_rejected" };
 
 const RECONNECT_DELAYS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+export const AUTH_RETRY_DELAY_MS = 60_000;
 
 export function reconnectDelay(attempt: number): number {
   const index = Math.min(Math.max(attempt, 0), RECONNECT_DELAYS.length - 1);
@@ -36,4 +37,3 @@ export function reduceConnectionStatus(
       return "authentication_failed";
   }
 }
-

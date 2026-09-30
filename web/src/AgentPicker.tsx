@@ -63,11 +63,10 @@ export function AgentPicker({
     const frame = window.requestAnimationFrame(() => {
       const preferred =
         dialogRef.current?.querySelector<HTMLElement>(
-          "[data-agent-start]:not([disabled])",
-        ) ??
-        dialogRef.current?.querySelector<HTMLElement>(
-          "button:not([disabled]), a[href]",
+          ".agent-picker-header button:not([disabled])",
         );
+      // Keep the selected folder and warnings visible when the dialog opens.
+      // The fixed header stays reachable even when the body needs to scroll.
       (preferred ?? dialogRef.current)?.focus({ preventScroll: true });
     });
 
@@ -202,10 +201,6 @@ export function AgentPicker({
           <div className="agent-picker-title-row">
             <div>
               <h2 id="agent-picker-title">New terminal</h2>
-              <p id="agent-picker-description">
-                Choose a CLI installed on {serverSummary}. The agent runs there,
-                not on this browser or phone.
-              </p>
             </div>
             <div className="agent-picker-header-actions">
               <button
@@ -227,199 +222,207 @@ export function AgentPicker({
               </button>
             </div>
           </div>
-          <p className="agent-picker-host-warning">
-            Installation commands must be run on the server host as the account
-            that runs Codex Web Terminal. Review the official instructions
-            before downloading and installing software.
-          </p>
-          {workspacePath && (
-            <div className="agent-picker-workspace">
-              <span>
-                <small>Working folder</small>
-                <code title={workspacePath}>{workspacePath}</code>
-              </span>
-              {onChangeWorkspace && (
-                <button
-                  type="button"
-                  disabled={creating}
-                  onClick={() => {
-                    returnFocusRef.current = null;
-                    onChangeWorkspace();
-                  }}
-                >
-                  Change folder
-                </button>
-              )}
-            </div>
-          )}
-          <div className="agent-picker-announcement" aria-live="polite">
-            {loading
-              ? "Checking installed CLI agents…"
-              : copyFeedback?.message ?? ""}
-          </div>
-          {error && (
-            <div className="agent-picker-error" role="alert">
-              {error}
-            </div>
-          )}
         </div>
-
-        <div className="agent-options" role="list" aria-label="CLI agents">
-          {!catalog && loading && (
-            <div className="agent-picker-empty" role="status">
-              Checking the server for installed CLI agents…
-            </div>
-          )}
-          {!loading && agents.length === 0 && (
-            <div className="agent-picker-empty" role="status">
-              No supported CLI agents were reported. Check the server
-              configuration and try again.
-            </div>
-          )}
-          {agents.map((agent) => {
-            const label = AGENT_LABELS[agent.kind];
-            const isCreating = creatingAgent === agent.kind;
-            const isReady = agent.state === "ready";
-            const hasBrokenOverride =
-              agent.state === "misconfigured" &&
-              agent.configuration === "override";
-            const feedback =
-              copyFeedback?.agent === agent.kind ? copyFeedback : null;
-
-            return (
-              <article
-                key={agent.kind}
-                className={`agent-option agent-option--${agent.kind} agent-option--${agent.state}`}
-                role="listitem"
-                aria-labelledby={`agent-${agent.kind}-name`}
-              >
-                <div className="agent-option-heading">
-                  <span
-                    className={`agent-mark agent-mark--${agent.kind}`}
-                    aria-hidden="true"
+        <div className="agent-picker-body">
+          <div className="agent-picker-context">
+            <p id="agent-picker-description" className="agent-picker-description">
+              Choose a CLI installed on {serverSummary}. The agent runs there,
+              not on this browser or phone.
+            </p>
+            <p className="agent-picker-host-warning">
+              Installation commands must be run on the server host as the account
+              that runs Codex Web Terminal. Review the official instructions
+              before downloading and installing software.
+            </p>
+            {workspacePath && (
+              <div className="agent-picker-workspace">
+                <span>
+                  <small>Working folder</small>
+                  <code title={workspacePath}>{workspacePath}</code>
+                </span>
+                {onChangeWorkspace && (
+                  <button
+                    type="button"
+                    disabled={creating}
+                    onClick={() => {
+                      returnFocusRef.current = null;
+                      onChangeWorkspace();
+                    }}
                   >
-                    {label.slice(0, 1)}
-                  </span>
-                  <span className="agent-option-identity">
-                    <strong id={`agent-${agent.kind}-name`}>{label}</strong>
-                    <small>{AGENT_DESCRIPTIONS[agent.kind]}</small>
-                  </span>
-                  <span
-                    className={`agent-discovery-state agent-discovery-state--${agent.state}`}
-                  >
-                    {STATE_LABELS[agent.state]}
-                  </span>
-                </div>
+                    Change folder
+                  </button>
+                )}
+              </div>
+            )}
+            <div className="agent-picker-announcement" aria-live="polite">
+              {loading
+                ? "Checking installed CLI agents…"
+                : copyFeedback?.message ?? ""}
+            </div>
+            {error && (
+              <div className="agent-picker-error" role="alert">
+                {error}
+              </div>
+            )}
+          </div>
 
-                <div className="agent-option-details">
-                  {isReady ? (
-                    <p className="agent-version">
-                      {agent.version
-                        ? `Installed version ${agent.version}`
-                        : "Installed version unavailable"}
-                    </p>
-                  ) : (
-                    <p className="agent-unavailable-reason">
-                      {hasBrokenOverride
-                        ? `The configured ${label} command could not be started. Repair that exact executable or its permissions, then check again. If the override value must change, update the server startup configuration and restart Codex Web Terminal.`
-                        : agent.state === "missing"
-                          ? `${label} was not found in the server account's PATH or standard per-user install locations.`
-                          : `A ${label} executable was found, but its version check failed. Check permissions, PATH, or the installation.`}
-                    </p>
-                  )}
+          <div className="agent-options" role="list" aria-label="CLI agents">
+            {!catalog && loading && (
+              <div className="agent-picker-empty" role="status">
+                Checking the server for installed CLI agents…
+              </div>
+            )}
+            {!loading && agents.length === 0 && (
+              <div className="agent-picker-empty" role="status">
+                No supported CLI agents were reported. Check the server
+                configuration and try again.
+              </div>
+            )}
+            {agents.map((agent) => {
+              const label = AGENT_LABELS[agent.kind];
+              const isCreating = creatingAgent === agent.kind;
+              const isReady = agent.state === "ready";
+              const hasBrokenOverride =
+                agent.state === "misconfigured" &&
+                agent.configuration === "override";
+              const feedback =
+                copyFeedback?.agent === agent.kind ? copyFeedback : null;
 
-                  {agent.dangerouslySkipPermissions && (
-                    <p className="agent-permission-warning">
-                      <strong>Approvals disabled.</strong> This agent may edit
-                      files and run commands without asking for confirmation.
-                    </p>
-                  )}
-                </div>
-
-                {isReady ? (
-                  <div className="agent-option-actions agent-option-actions--start">
-                    <button
-                      type="button"
-                      className="agent-start-button"
-                      data-agent-start={agent.kind}
-                      disabled={loading || creating}
-                      onClick={() => onSelect(agent.kind)}
+              return (
+                <article
+                  key={agent.kind}
+                  className={`agent-option agent-option--${agent.kind} agent-option--${agent.state}`}
+                  role="listitem"
+                  aria-labelledby={`agent-${agent.kind}-name`}
+                >
+                  <div className="agent-option-heading">
+                    <span
+                      className={`agent-mark agent-mark--${agent.kind}`}
+                      aria-hidden="true"
                     >
-                      {isCreating ? `Starting ${label}…` : `Start ${label}`}
-                    </button>
+                      {label.slice(0, 1)}
+                    </span>
+                    <span className="agent-option-identity">
+                      <strong id={`agent-${agent.kind}-name`}>{label}</strong>
+                      <small>{AGENT_DESCRIPTIONS[agent.kind]}</small>
+                    </span>
+                    <span
+                      className={`agent-discovery-state agent-discovery-state--${agent.state}`}
+                    >
+                      {STATE_LABELS[agent.state]}
+                    </span>
                   </div>
-                ) : (
-                  <div className="agent-install-guide">
-                    {agent.install.command ? (
-                      <>
-                        <div className="agent-install-command">
-                          <code>{agent.install.command}</code>
-                          <button
-                            type="button"
-                            disabled={creating}
-                            onClick={() => void copyInstallCommand(agent)}
-                            aria-label={`Copy ${label} installation command for ${agent.install.shell}`}
-                          >
-                            {feedback && !feedback.failed ? "Copied" : "Copy"}
-                          </button>
-                        </div>
-                        <p className="agent-install-help">
-                          {hasBrokenOverride ? (
-                            <>
-                              The official installer will not replace an
-                              authoritative command override. Repair or install
-                              the executable so the configured name or path
-                              resolves, then check again. If the override value
-                              must change or be removed, update the server
-                              configuration and restart the server.
-                            </>
-                          ) : (
-                            <>
-                              {agent.state === "missing"
-                                ? "Check the server account's PATH first. If the CLI is not installed, run the command above with"
-                                : "After checking permissions and PATH, reinstall if needed by running the command above with"}{" "}
-                              {agent.install.shell}
-                              {agent.install.verifyCommand
-                                ? `, verify with “${agent.install.verifyCommand}”,`
-                                : ""}
-                              {" then check again."}
-                            </>
-                          )}
-                        </p>
-                      </>
+
+                  <div className="agent-option-details">
+                    {isReady ? (
+                      <p className="agent-version">
+                        {agent.version
+                          ? `Installed version ${agent.version}`
+                          : "Installed version unavailable"}
+                      </p>
                     ) : (
-                      <p className="agent-install-help">
-                        This server version did not provide an installation
-                        command. Use the official documentation.
+                      <p className="agent-unavailable-reason">
+                        {hasBrokenOverride
+                          ? `The configured ${label} command could not be started. Repair that exact executable or its permissions, then check again. If the override value must change, update the server startup configuration and restart Codex Web Terminal.`
+                          : agent.state === "missing"
+                            ? `${label} was not found in the server account's PATH or standard per-user install locations.`
+                            : `A ${label} executable was found, but its version check failed. Check permissions, PATH, or the installation.`}
                       </p>
                     )}
-                    <div className="agent-option-actions">
-                      {agent.install.docsUrl && (
-                        <a
-                          className="agent-docs-link"
-                          href={agent.install.docsUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          aria-label={`Open official ${label} installation documentation in a new tab`}
-                        >
-                          Official docs ↗
-                        </a>
-                      )}
+
+                    {agent.dangerouslySkipPermissions && (
+                      <p className="agent-permission-warning">
+                        <strong>Approvals disabled.</strong> This agent may edit
+                        files and run commands without asking for confirmation.
+                      </p>
+                    )}
+                  </div>
+
+                  {isReady ? (
+                    <div className="agent-option-actions agent-option-actions--start">
                       <button
                         type="button"
+                        className="agent-start-button"
+                        data-agent-start={agent.kind}
                         disabled={loading || creating}
-                        onClick={(event) =>
-                          refresh(event.currentTarget, agent.kind)
-                        }
+                        onClick={() => onSelect(agent.kind)}
                       >
-                        {loading ? "Checking…" : "Check again"}
+                        {isCreating ? `Starting ${label}…` : `Start ${label}`}
                       </button>
                     </div>
-                  </div>
-                )}
-              </article>
-            );
-          })}
+                  ) : (
+                    <div className="agent-install-guide">
+                      {agent.install.command ? (
+                        <>
+                          <div className="agent-install-command">
+                            <code>{agent.install.command}</code>
+                            <button
+                              type="button"
+                              disabled={creating}
+                              onClick={() => void copyInstallCommand(agent)}
+                              aria-label={`Copy ${label} installation command for ${agent.install.shell}`}
+                            >
+                              {feedback && !feedback.failed ? "Copied" : "Copy"}
+                            </button>
+                          </div>
+                          <p className="agent-install-help">
+                            {hasBrokenOverride ? (
+                              <>
+                                The official installer will not replace an
+                                authoritative command override. Repair or install
+                                the executable so the configured name or path
+                                resolves, then check again. If the override value
+                                must change or be removed, update the server
+                                configuration and restart the server.
+                              </>
+                            ) : (
+                              <>
+                                {agent.state === "missing"
+                                  ? "Check the server account's PATH first. If the CLI is not installed, run the command above with"
+                                  : "After checking permissions and PATH, reinstall if needed by running the command above with"}{" "}
+                                {agent.install.shell}
+                                {agent.install.verifyCommand
+                                  ? `, verify with “${agent.install.verifyCommand}”,`
+                                  : ""}
+                                {" then check again."}
+                              </>
+                            )}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="agent-install-help">
+                          This server version did not provide an installation
+                          command. Use the official documentation.
+                        </p>
+                      )}
+                      <div className="agent-option-actions">
+                        {agent.install.docsUrl && (
+                          <a
+                            className="agent-docs-link"
+                            href={agent.install.docsUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            aria-label={`Open official ${label} installation documentation in a new tab`}
+                          >
+                            Official docs ↗
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          disabled={loading || creating}
+                          onClick={(event) =>
+                            refresh(event.currentTarget, agent.kind)
+                          }
+                        >
+                          {loading ? "Checking…" : "Check again"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
         </div>
       </section>
     </div>

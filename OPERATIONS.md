@@ -616,7 +616,8 @@ tab. There is no manual reconnect button; reattachment is automatic.
 The header shows one tab for each server-managed terminal. The active tab is
 highlighted and each tab includes a lifecycle-status dot.
 
-- Select a tab to attach the single browser terminal view to that managed PTY.
+- Select a tab to display that managed PTY. Re-selecting the active tab keeps
+  its connection status and displayed output unchanged.
 - On desktop, hover a tab to see only that terminal's complete project path;
   its lifecycle status remains available to assistive technology.
 - On mobile, the header starts with the project/Menu row collapsed. Its
@@ -644,6 +645,29 @@ highlighted and each tab includes a lifecycle-status dot.
 - **Remove** terminates and deletes a non-primary managed session.
 - The primary `<agent> 1` entry (for example `Codex 1`) cannot be removed.
 
+**Keep terminals when switching tabs** is enabled by default in Settings,
+including when older saved preferences do not contain this option. It keeps
+up to six visited terminal views in the current browser tab, with their
+scrollback, scroll position, and live WebSocket connections. Hidden views
+continue processing output and terminal protocol replies. New keyboard input,
+focus, and viewport resize messages belong only to the selected view. An
+Android Enter or composition submit accepted just before switching finishes
+in its original terminal; it is never redirected to the newly selected tab.
+
+Visiting a seventh terminal releases the least recently visited inactive
+view and its connection. Its managed PTY continues running; returning to it
+uses the normal bounded replay. Deleting a session or changing its PTY
+generation discards the matching cached view. A genuine network reconnect
+also uses replay and may reset the view's scroll position.
+
+Uncheck the option to restore output on every tab switch. This takes effect
+immediately and releases hidden views while keeping the active view. The
+checkbox is saved with the other preferences in `sessionStorage`; terminal
+content stays in memory and is never saved to browser storage. A page reload
+discards the retained views. Each retained connection counts toward that
+session's existing four-browser-attachment limit. With retention enabled,
+memory use includes up to six terminals at the chosen scrollback limit.
+
 ### `@cwt` peer workflow
 
 **@cwt** opens a supervised cross-agent composer without changing xterm input
@@ -663,7 +687,29 @@ The operational sequence is:
    prompt;
 5. wait for **Response ready**;
 6. use **Return to source** while the source is at an empty agent prompt;
-7. use a follow-up or **Recheck** to retain that same reviewer context.
+7. wait for **Returning to source** to become **Returned**, then use a
+   follow-up or **Recheck** to retain that same reviewer context.
+
+Queueing the return prompt does not mark the response received. The source
+helper confirms receipt only after writing and flushing the response to its
+output. This confirms delivery through the helper; it does not mean the agent
+has finished evaluating the findings. Until receipt is confirmed, follow-ups
+and ordinary closing are rejected so they cannot erase the unread response.
+To abandon a pending return, close the reviewer and explicitly confirm
+**Discard unread response**. That confirmation applies only to the current
+turn. A failed close keeps the response available. If the source generation
+ends, the turn becomes failed and can be closed normally.
+
+If the helper reports that output succeeded but receipt was not confirmed,
+retry its `__cwt-peer receive --turn …` command for the same turn in the source
+terminal. Receipt acknowledgement is idempotent; the application never
+automatically resends the automation prompt.
+
+Choosing a reviewer folder or cancelling its picker returns keyboard focus to
+**Change folder** in the composer and preserves the instruction. Creating a
+reviewer updates the composer as soon as creation succeeds; refreshing the
+session tabs continues independently, so a slow list response cannot expose
+the same creation form for a second submission.
 
 Concrete example: from a Codex source tab, choose **Verify** with Claude and
 use **Change folder** when Claude should inspect a different project. Enter
@@ -758,6 +804,10 @@ The agent dialog identifies the server operating system and architecture and
 makes clear that the CLI runs on the server host, not in the viewing browser
 or phone. It also displays the chosen working folder.
 
+The title and **Refresh**/Close controls remain visible. Folder details,
+messages, and agent cards share one vertical scroller, so a long folder path
+or a catalog error cannot leave the start buttons below a fixed header.
+
 Each agent card reports:
 
 - **Ready** and `Installed version …` when the fixed version probe succeeds;
@@ -801,6 +851,14 @@ recreates only its WebSocket attachment automatically, with increasing delays;
 reloading the page forces a fresh attachment immediately. Neither touches the
 underlying agent process.
 
+An HTTP 429 response during attachment shows **Connection temporarily limited.
+Retrying in one minute.** and schedules another attempt after 60 seconds,
+including for a retained background tab. HTTP 401 stops automatic attempts;
+use the authenticated URL from the current server. If that failure was
+temporary, switching away and back after a minute permits one new attempt.
+Switching earlier does not bypass the cooldown. Removing a retained view
+cancels its pending retry.
+
 ### Restart
 
 **Restart _agent_** in Settings terminates and recreates the selected agent's
@@ -839,6 +897,11 @@ normal text in form fields and dialogs, and modified shortcuts such as
 
 ### Mobile keys
 
+Main buttons, terminal keys, and dialog controls have touch targets of at
+least 44 px on coarse-pointer devices, including with the keyboard open and
+in landscape. The authentication screen has its own vertical scroller;
+scroll within it to reach **Connect** when the keyboard leaves little height.
+
 The **Show mobile keys** setting shows or hides the mobile toolbar. Its order
 begins with Enter and the arrow keys, followed by Esc, Ctrl+C, Tab, Ctrl mode,
 Page Up/Down, Ctrl+L, Top, Live, and Hide, so the interrupt keys stay inside
@@ -865,7 +928,8 @@ include the original or replacement text.
 
 **Settings** opens from the header Menu and now contains only preferences and
 maintenance: font size, client scrollback, theme, cursor blinking, the mobile
-toolbar, software updates, diagnostics, **Restart server**, **Restart _agent_**,
+toolbar, **Keep terminals when switching tabs**, software updates,
+diagnostics, **Restart server**, **Restart _agent_**,
 **Terminate _agent_**, and **Forget token**. **Copy diagnostics** captures
 mobile viewport measurements after terminal focus; it does not include the
 authentication token, keyboard input, or terminal text.
@@ -932,7 +996,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.3.8",
+  "serverVersion": "0.3.9",
   "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,

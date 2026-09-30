@@ -36,10 +36,8 @@ import {
 } from "./api";
 import { agentLabel } from "./agents";
 import { AgentPicker } from "./AgentPicker";
-import {
-  TerminalView,
-  type TerminalViewHandle,
-} from "./terminal/TerminalView";
+import type { TerminalViewHandle } from "./terminal/TerminalView";
+import { TerminalDeck } from "./terminal/TerminalDeck";
 import { MobileToolbar } from "./terminal/MobileToolbar";
 import type { ConnectionStatus } from "./terminal/reconnect";
 import {
@@ -108,7 +106,6 @@ export function App() {
   );
   const [settings, setSettings] = useState<TerminalSettings>(loadSettings);
   const [ctrlMode, setCtrlMode] = useState(false);
-  const [reconnectNonce, setReconnectNonce] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [mobileHeaderCollapsed, setMobileHeaderCollapsed] = useState(
@@ -152,6 +149,7 @@ export function App() {
   const terminalRef = useRef<TerminalViewHandle>(null);
   const selectedTerminalIdRef = useRef(selectedTerminalId);
   const sessionsRequestEpochRef = useRef(0);
+  const sessionSelectionEpochRef = useRef(0);
   const capacityRequestEpochRef = useRef(0);
   const agentCatalogRequestEpochRef = useRef(0);
   const updateRequestEpochRef = useRef(0);
@@ -556,6 +554,7 @@ export function App() {
       workspacePickerOpen ||
       agentPickerOpen ||
       peerComposerOpen ||
+      confirmRequest !== null ||
       window.matchMedia("(pointer: coarse)").matches
     ) {
       return;
@@ -567,7 +566,7 @@ export function App() {
     return () => window.cancelAnimationFrame(frame);
   }, [
     connectionStatus,
-    reconnectNonce,
+    confirmRequest,
     selectedTerminalId,
     sessionsOpen,
     settingsOpen,
@@ -604,7 +603,8 @@ export function App() {
             sessionsOpen ||
             workspacePickerOpen ||
             agentPickerOpen ||
-            peerComposerOpen,
+            peerComposerOpen ||
+            confirmRequest !== null,
           editableTarget,
           terminalAvailable:
             Boolean(token && selectedTerminalId) &&
@@ -648,6 +648,7 @@ export function App() {
     };
   }, [
     connectionStatus,
+    confirmRequest,
     selectedTerminalId,
     sessionsOpen,
     settingsOpen,
@@ -747,11 +748,17 @@ export function App() {
 
       void refreshCapacity();
       const requestEpoch = ++sessionsRequestEpochRef.current;
+      const selectionEpoch = sessionSelectionEpochRef.current;
       setSessionsLoading(true);
       try {
         const nextSessions = await listSessions(token);
         if (sessionsRequestEpochRef.current === requestEpoch) {
-          applySessionList(nextSessions, preferredTerminalId);
+          applySessionList(
+            nextSessions,
+            sessionSelectionEpochRef.current === selectionEpoch
+              ? preferredTerminalId
+              : undefined,
+          );
         }
       } catch (error) {
         if (sessionsRequestEpochRef.current === requestEpoch) {
@@ -780,6 +787,7 @@ export function App() {
 
     const abortController = new AbortController();
     const requestEpoch = ++sessionsRequestEpochRef.current;
+    const selectionEpoch = sessionSelectionEpochRef.current;
     setSessionsLoading(true);
     void (async () => {
       const nextSessions = await listSessions(token, abortController.signal);
@@ -805,7 +813,12 @@ export function App() {
         if (restoreError) {
           setMessage(restoreError);
         }
-        applySessionList(restoredSessions, preferredTerminalId);
+        applySessionList(
+          restoredSessions,
+          sessionSelectionEpochRef.current === selectionEpoch
+            ? preferredTerminalId
+            : undefined,
+        );
       }
     })()
       .catch((error) => {
@@ -1002,10 +1015,10 @@ export function App() {
         .querySelector(".app-shell")
         ?.getBoundingClientRect();
       const terminalRect = document
-        .querySelector(".terminal-view")
+        .querySelector(".terminal-pane:not([hidden]) .terminal-view")
         ?.getBoundingClientRect();
       const textareaRect = document
-        .querySelector(".xterm-helper-textarea")
+        .querySelector(".terminal-pane:not([hidden]) .xterm-helper-textarea")
         ?.getBoundingClientRect();
       const activeElement = document.activeElement;
 
@@ -1123,13 +1136,17 @@ export function App() {
   }, []);
 
   const handleSession = useCallback((nextSession: SessionSnapshot) => {
-    setSession(nextSession);
+    if (selectedTerminalIdRef.current === nextSession.terminalId) {
+      setSession(nextSession);
+    }
     setSessions((current) => {
       const existingIndex = current.findIndex(
         (candidate) => candidate.terminalId === nextSession.terminalId,
       );
       if (existingIndex === -1) {
-        return [...current, nextSession];
+        // List/create responses own membership. A late socket message must
+        // not resurrect a terminal that was removed while it was attached.
+        return current;
       }
       const updated = [...current];
       updated[existingIndex] = nextSession;
@@ -1137,25 +1154,15 @@ export function App() {
     });
   }, []);
 
-  const handleStatus = useCallback(
-    (status: ConnectionStatus) => {
-      setConnectionStatus(status);
-      if (status === "connected") {
-        void refreshCapacity();
-      }
-    },
-    [refreshCapacity],
-  );
-
   const handleError = useCallback((error: string | null) => {
     setMessage(error);
   }, []);
 
   const handleSessionUnavailable = useCallback(
     (terminalId: string) => {
-      if (selectedTerminalIdRef.current === terminalId) {
-        void refreshSessions("");
-      }
+      void refreshSessions(
+        selectedTerminalIdRef.current === terminalId ? "" : undefined,
+      );
     },
     [refreshSessions],
   );
@@ -1182,7 +1189,8 @@ export function App() {
     setSessionsLoading(false);
     try {
       await restartSession(token, terminalId);
-      setReconnectNonce((value) => value + 1);
+      // The generation from the socket or refreshed list replaces the view.
+      // A separate reconnect here would attach to that generation twice.
       void refreshSessions();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Restart failed.");
@@ -1381,6 +1389,12 @@ export function App() {
   };
 
   const attachSession = (nextSession: SessionSnapshot) => {
+    if (selectedTerminalIdRef.current === nextSession.terminalId) {
+      closeSessions();
+      return;
+    }
+    // Preserve list updates while refusing their older preferred selection.
+    sessionSelectionEpochRef.current += 1;
     selectedTerminalIdRef.current = nextSession.terminalId;
     setSelectedTerminalId(nextSession.terminalId);
     writeSelectedTerminalId(nextSession.terminalId);
@@ -1512,8 +1526,12 @@ export function App() {
     const thread = peerController.threads.find(
       (candidate) => candidate.id === purpose.threadId,
     );
-    const warning =
-      thread?.status === "response_ready"
+    const discardUnreadTurnId = thread?.status === "returning"
+      ? thread.currentTurn.id
+      : undefined;
+    const warning = discardUnreadTurnId
+      ? "The source has not confirmed receiving this response. Closing now permanently discards the unread response and stops its reviewer."
+      : thread?.status === "response_ready"
         ? "Its reviewer response has not finished returning to the source."
         : thread &&
             ["preparing_handoff", "awaiting_preview", "reviewing"].includes(
@@ -1525,7 +1543,7 @@ export function App() {
       !(await requestConfirmation({
         title: `Close "${target.name}"?`,
         body: warning,
-        confirmLabel: "Close review",
+        confirmLabel: discardUnreadTurnId ? "Discard unread response" : "Close review",
         danger: true,
       }))
     ) {
@@ -1534,7 +1552,7 @@ export function App() {
 
     setMessage(null);
     try {
-      await peerController.closeThread(purpose.threadId);
+      await peerController.closeThread(purpose.threadId, discardUnreadTurnId);
       await refreshSessions(
         target.terminalId === selectedTerminalIdRef.current
           ? purpose.parentTerminalId
@@ -1560,7 +1578,9 @@ export function App() {
 
   const handleCreatePeerThread = async (input: CreatePeerThreadInput) => {
     const next = await peerController.createThread(input);
-    await syncPeerReviewer(next);
+    // Let the composer adopt the created thread immediately. Waiting for a
+    // slower session-list request leaves its creation form resubmittable.
+    void syncPeerReviewer(next);
     return next;
   };
 
@@ -1569,7 +1589,7 @@ export function App() {
     input: CreatePeerTurnInput,
   ) => {
     const next = await peerController.createTurn(threadId, input);
-    await syncPeerReviewer(next);
+    void syncPeerReviewer(next);
     return next;
   };
 
@@ -1578,7 +1598,7 @@ export function App() {
     input: DispatchPeerTurnInput,
   ) => {
     const next = await peerController.dispatchTurn(threadId, input);
-    await syncPeerReviewer(next);
+    void syncPeerReviewer(next);
     return next;
   };
 
@@ -1676,7 +1696,6 @@ export function App() {
         onToken={(nextToken) => {
           writeSessionToken(nextToken);
           setToken(nextToken);
-          setReconnectNonce((value) => value + 1);
         }}
       />
     );
@@ -1808,16 +1827,16 @@ export function App() {
 
       <section className="terminal-region">
         {selectedTerminalId && sessionsInitialized ? (
-          <TerminalView
-            key={selectedTerminalId}
+          <TerminalDeck
             ref={terminalRef}
             token={token}
-            terminalId={selectedTerminalId}
+            sessions={sessions}
+            selectedTerminalId={selectedTerminalId}
             settings={settings}
-            reconnectNonce={reconnectNonce}
             ctrlMode={ctrlMode}
             onCtrlConsumed={() => setCtrlMode(false)}
-            onConnectionStatus={handleStatus}
+            onConnectionStatus={setConnectionStatus}
+            onConnected={refreshCapacity}
             onSession={handleSession}
             onSessionUnavailable={handleSessionUnavailable}
             onError={handleError}
@@ -2525,6 +2544,20 @@ export function SettingsPanel({
           />
           Show mobile keys
         </label>
+
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={settings.preserveTabs}
+            aria-describedby="preserve-tabs-help"
+            onChange={(event) => onChange({ preserveTabs: event.target.checked })}
+          />
+          Keep terminals when switching tabs
+        </label>
+        <p id="preserve-tabs-help" className="settings-help">
+          Keeps the last 6 visited terminals and their scroll position in this
+          browser tab. Turn off to reload terminal output on each switch.
+        </p>
 
         <UpdatePanel
           status={updateStatus}

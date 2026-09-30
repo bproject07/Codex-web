@@ -667,7 +667,7 @@ def wait_for_terminal_cwd(page: Page, expected: Path) -> None:
     page.wait_for_function(
         """expected => {
           const terminalText =
-            document.querySelector(".xterm-rows")?.textContent ?? "";
+            document.querySelector(".terminal-pane:not([hidden]) .xterm-rows")?.textContent ?? "";
           return terminalText.includes(expected);
         }""",
         arg=str(expected),

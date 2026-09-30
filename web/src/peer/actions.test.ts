@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   actionsForThread,
+  isPeerWorkPending,
   peerStatusLabel,
   peerThreadDisplayId,
 } from "./actions";
@@ -44,5 +45,8 @@ describe("peer action model", () => {
     expect(peerThreadDisplayId(THREAD.id)).toBe("R-123456");
     expect(peerStatusLabel("awaiting_preview")).toBe("Preview ready");
     expect(peerStatusLabel("response_ready")).toBe("Response ready");
+    expect(peerStatusLabel("returning")).toBe("Returning to source");
+    expect(isPeerWorkPending("returning")).toBe(true);
+    expect(isPeerWorkPending("returned")).toBe(false);
   });
 });

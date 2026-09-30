@@ -93,8 +93,9 @@ Rust server
 
 The server owns up to 20 independent, web-managed agent PTY sessions by
 default. The operator can select a limit from 1 through 256. The browser
-displays one selected session in the same xterm screen and can switch between
-them without terminating the others. Closing the browser page/window or losing
+displays one selected session and, by default, retains up to six visited xterm
+views for switching without a replay. Switching never terminates the other
+sessions. Closing the browser page/window or losing
 the network does not terminate those sessions; using a terminal tab's explicit
 × action does. A reconnecting browser resets xterm and replays the selected
 session's bounded terminal output buffer before it resumes live output.
@@ -429,6 +430,10 @@ its last agent also provides a direct **Start Codex**, **Start Claude**, or
 **Start AGY** shortcut. If that agent is no longer ready, the normal agent
 picker opens instead.
 
+The **New terminal** title, **Refresh**, and Close stay visible while its
+folder details and agent cards scroll together. A long folder path does not
+reserve the space needed for the start actions on a short phone screen.
+
 Every open of **New terminal** forces a fresh server-side agent check so an
 older browser tab cannot reuse stale availability. A missing or misconfigured
 agent displays manual host-side installation guidance and **Refresh** /
@@ -442,6 +447,19 @@ capacity; existing `@cwt` follow-ups remain available because they reuse their
 dedicated reviewer. Dismissing the folder picker returns focus to the Menu
 button. Switching tabs does not stop the previously displayed session; it
 continues running and buffering output in the background.
+
+Settings **Keep terminals when switching tabs** is on by default. The browser
+retains up to six visited terminal views and their live connections, so
+switching back preserves scrollback and scroll position without replaying the
+output. Only the selected view receives user input and viewport resizes.
+Visiting a seventh terminal releases the least recently visited inactive view;
+the PTY keeps running and is replayed on the next visit. Uncheck the preference
+for the previous behavior of restoring output on every switch. Disabling it
+keeps the active view and releases hidden views immediately. The preference
+is saved in the current browser tab's `sessionStorage`; terminal content is
+kept only in memory. Reload, actual reconnection, eviction, and PTY restart
+can require a fresh replay. Retained sockets count toward each session's
+existing four-client limit.
 
 ### `@cwt` peer review
 
@@ -466,6 +484,9 @@ IME handling remain unchanged.
    reviewer is at an empty agent prompt.
 5. When the response is ready, **Return to source** asks the source agent
    to retrieve it and present the useful conclusion in its existing context.
+   **Returning to source** stays visible until the source helper has written
+   and flushed the response, then acknowledged receipt. Only then is the turn
+   **Returned** and available for a follow-up.
 6. A later **Recheck** or follow-up uses the same live reviewer PTY. **+ New
    reviewer** always creates a clean reviewer context.
 
@@ -491,6 +512,11 @@ Peer and ordinary non-primary tabs have an accessible `×`. Closing a peer tab
 terminates only its dedicated PTY and purges its in-memory thread. A reviewer
 uses one slot from the configured session capacity; the server never evicts
 another tab.
+While receipt is pending, ordinary Close is rejected. **Discard unread
+response** explicitly allows closing that exact turn and losing its response;
+use it only to abandon the return. A failed reviewer termination preserves the
+thread and response for retry. Closing or cancelling the reviewer folder
+picker restores keyboard focus to **Change folder** inside **@cwt**.
 Restart, terminate, and removal of a source are blocked while it owns an open
 peer thread because those operations would make the retained context
 ambiguous.
@@ -915,6 +941,15 @@ New-thread creation also accepts `directoryId`; it selects the dedicated
 reviewer's validated server-side working directory. Omitting it remains
 compatible and uses the source terminal's current directory.
 
+A return transitions through `returning` before `returned`. The private helper
+acknowledges only after successfully writing the received response; the public
+API cannot acknowledge on its behalf. Follow-up and ordinary DELETE requests
+are rejected while `returning`. To explicitly discard an unread response,
+`DELETE /api/peer/threads/{threadId}` accepts a JSON body containing
+`discardUnreadTurnId` equal to that thread's current turn ID. An omitted body
+keeps the normal close behavior; a stale discard ID is rejected. The generic
+session DELETE endpoint never overrides this protection.
+
 No response contains the authentication token, terminal input, terminal
 output, Codex credentials, or Codex authentication files.
 
@@ -1068,6 +1103,9 @@ xterm.js is configured with:
 - debounced PTY resize messages
 - WebLinksAddon
 - exponential reconnect delays of 1, 2, 4, 8, then 15 seconds
+- a 60-second retry delay for HTTP 429 attachment responses; HTTP 401 pauses
+  automatic attempts, with one retry allowed when switching away and back
+  after a 60-second cooldown
 
 Normal xterm keyboard handling provides Enter, Escape, Backspace, Tab, arrow
 keys, Home, End, Page Up/Down, Ctrl+C, Ctrl+L, Ctrl+R, paste, and other terminal
@@ -1094,6 +1132,8 @@ interaction.
 The Android IME guard also converts keyboard replacement/autocorrect edits to
 the corresponding terminal Backspace-plus-suffix input, avoiding duplicated
 whole-word output from overlapping Chrome/Gboard and xterm fallbacks.
+When switching tabs, a pending Android Enter or composition submit finishes
+in the terminal that accepted it. Hidden tabs do not accept new keyboard input.
 
 The header's session tabs and the **New terminal** and **Manage sessions**
 actions in the ellipsis Menu operate on independent live PTYs. On touch
@@ -1102,10 +1142,15 @@ retaining the connection dot, tabs, and **@cwt**; tap it again to expand the
 row. When expanded, **Menu** and the collapse arrow come first so the identity
 can use the remaining width, and ellipsis preserves the rightmost project
 name. **New terminal** selects a server folder before the agent. The active
-tab selects which managed session feeds the same xterm screen. The tab strip
+tab selects which managed session's xterm view is visible. The tab strip
 scrolls horizontally when it overflows; it does not send `/new` or `/resume`
 commands
 into the selected agent's TUI.
+
+On touch screens, the main buttons, terminal keys, and dialog controls keep
+targets of at least 44 px, including with the keyboard open. The token-entry
+screen scrolls within the available height so both the input and **Connect**
+remain reachable on short screens and with larger text.
 
 ## Security
 

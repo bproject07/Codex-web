@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::{
     config::AgentKind,
     peer::{
-        MAX_PEER_ARTIFACT_BYTES, PeerAction, PeerBroker, PeerError, PeerErrorKind, PeerStatus,
-        PeerThread, SessionPurpose,
+        MAX_PEER_ARTIFACT_BYTES, PeerAction, PeerArtifactKind, PeerBroker, PeerError, PeerErrorKind,
+        PeerStatus, PeerThread, SessionPurpose,
     },
     peer_cli::{INTERNAL_PEER_PATH, InternalPeerRequest, InternalPeerResponse},
     registry::RegistryError,
@@ -65,6 +65,12 @@ struct ReturnTurnRequest {
 #[derive(Debug, Serialize)]
 struct PeerApiError {
     error: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CloseThreadRequest {
+    discard_unread_turn_id: Option<Uuid>,
 }
 
 pub fn protected_router() -> Router<AppState> {
@@ -550,13 +556,37 @@ async fn return_turn(
     }
 }
 
-async fn close_thread(State(state): State<AppState>, Path(thread_id): Path<Uuid>) -> Response {
-    close_thread_by_id(&state, thread_id).await
+async fn close_thread(
+    State(state): State<AppState>,
+    Path(thread_id): Path<Uuid>,
+    body: Bytes,
+) -> Response {
+    let request: CloseThreadRequest = if body.is_empty() {
+        CloseThreadRequest::default()
+    } else {
+        match parse_body(&body, MAX_PEER_COMMAND_BODY) {
+            Ok(request) => request,
+            Err(response) => return *response,
+        }
+    };
+    close_thread_with_discard(&state, thread_id, request.discard_unread_turn_id).await
 }
 
 pub(crate) async fn close_thread_by_id(state: &AppState, thread_id: Uuid) -> Response {
+    close_thread_with_discard(state, thread_id, None).await
+}
+
+async fn close_thread_with_discard(
+    state: &AppState,
+    thread_id: Uuid,
+    discard_unread_turn_id: Option<Uuid>,
+) -> Response {
     let close_state = state.clone();
-    match tokio::spawn(async move { close_thread_owned(&close_state, thread_id).await }).await {
+    match tokio::spawn(async move {
+        close_thread_owned(&close_state, thread_id, discard_unread_turn_id).await
+    })
+    .await
+    {
         Ok(response) => response,
         Err(error) => {
             tracing::error!(%error, %thread_id, "dedicated peer close task failed");
@@ -568,8 +598,15 @@ pub(crate) async fn close_thread_by_id(state: &AppState, thread_id: Uuid) -> Res
     }
 }
 
-async fn close_thread_owned(state: &AppState, thread_id: Uuid) -> Response {
-    let closing = match state.peers.begin_close(thread_id) {
+async fn close_thread_owned(
+    state: &AppState,
+    thread_id: Uuid,
+    discard_unread_turn_id: Option<Uuid>,
+) -> Response {
+    let closing = match state
+        .peers
+        .begin_close_with_discard(thread_id, discard_unread_turn_id)
+    {
         Ok(closing) => closing,
         Err(error) => return peer_error_response(error),
     };
@@ -633,6 +670,7 @@ async fn internal_request(
             .map(|_| InternalPeerResponse {
                 content: None,
                 error: None,
+                acknowledge: false,
             }),
         InternalPeerRequest::Receive { turn_id } => {
             broker
@@ -640,8 +678,16 @@ async fn internal_request(
                 .map(|artifact| InternalPeerResponse {
                     content: Some(artifact.content),
                     error: None,
+                    acknowledge: artifact.kind == PeerArtifactKind::Response,
                 })
         }
+        InternalPeerRequest::Acknowledge { turn_id } => broker
+            .acknowledge_response(capability, turn_id)
+            .map(|_| InternalPeerResponse {
+                content: None,
+                error: None,
+                acknowledge: false,
+            }),
     };
     match result {
         Ok(response) => no_store(Json(response).into_response()),
@@ -754,6 +800,7 @@ fn internal_error_response(error: PeerError) -> Response {
         Json(InternalPeerResponse {
             content: None,
             error: Some(error.to_string()),
+            acknowledge: false,
         }),
     )
         .into_response()

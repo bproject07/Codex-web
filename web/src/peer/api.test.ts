@@ -153,4 +153,23 @@ describe("peer API", () => {
       expect.objectContaining({ method: "DELETE" }),
     );
   });
+
+  it("recognizes a return awaiting receipt and scopes explicit discard to its turn", async () => {
+    const returning = {
+      ...THREAD,
+      status: "returning",
+      currentTurn: { ...THREAD.currentTurn, status: "returning", response: "Review." },
+    };
+    expect(normalizePeerThread(returning).status).toBe("returning");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await deletePeerThread("0123456789abcdef", THREAD.id, undefined, THREAD.currentTurn.id);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/peer/threads/${THREAD.id}`,
+      expect.objectContaining({
+        method: "DELETE",
+        body: JSON.stringify({ discardUnreadTurnId: THREAD.currentTurn.id }),
+      }),
+    );
+  });
 });

@@ -51,7 +51,7 @@ export interface PeerController {
     threadId: string,
     input: ReturnPeerTurnInput,
   ) => Promise<PeerThread>;
-  closeThread: (threadId: string) => Promise<void>;
+  closeThread: (threadId: string, discardUnreadTurnId?: string) => Promise<void>;
   clearError: () => void;
 }
 
@@ -298,7 +298,7 @@ export function usePeerController(token: string): PeerController {
       mutate({ kind: "return", threadId }, () =>
         returnPeerTurn(token, threadId, input),
       ),
-    closeThread: async (threadId) => {
+    closeThread: async (threadId, discardUnreadTurnId) => {
       if (operationRef.current) {
         throw new Error("Another peer operation is already in progress.");
       }
@@ -308,7 +308,7 @@ export function usePeerController(token: string): PeerController {
       setOperation(nextOperation);
       clearError();
       try {
-        await deletePeerThread(token, threadId);
+        await deletePeerThread(token, threadId, undefined, discardUnreadTurnId);
         if (epoch === requestEpochRef.current) {
           removeThread(threadId);
         }

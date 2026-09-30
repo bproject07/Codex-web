@@ -8,6 +8,7 @@ export interface TerminalSettings {
   scrollback: number;
   theme: ThemeName;
   mobileKeys: boolean;
+  preserveTabs: boolean;
 }
 
 export const DEFAULT_SETTINGS: TerminalSettings = {
@@ -16,6 +17,7 @@ export const DEFAULT_SETTINGS: TerminalSettings = {
   scrollback: 10_000,
   theme: "windows",
   mobileKeys: true,
+  preserveTabs: true,
 };
 
 export const TERMINAL_THEMES: Record<ThemeName, ITheme> = {
@@ -117,6 +119,10 @@ export function loadSettings(): TerminalSettings {
         typeof parsed.mobileKeys === "boolean"
           ? parsed.mobileKeys
           : DEFAULT_SETTINGS.mobileKeys,
+      preserveTabs:
+        typeof parsed.preserveTabs === "boolean"
+          ? parsed.preserveTabs
+          : DEFAULT_SETTINGS.preserveTabs,
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -146,4 +152,3 @@ function clampNumber(
 function isThemeName(value: unknown): value is ThemeName {
   return value === "windows" || value === "midnight" || value === "high-contrast";
 }
-

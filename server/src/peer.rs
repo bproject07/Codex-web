@@ -64,6 +64,7 @@ pub enum PeerStatus {
     AwaitingPreview,
     Reviewing,
     ResponseReady,
+    Returning,
     Returned,
     Failed,
     Closed,
@@ -411,6 +412,7 @@ impl PeerBroker {
                                     | PeerStatus::AwaitingPreview
                                     | PeerStatus::Reviewing
                                     | PeerStatus::ResponseReady
+                                    | PeerStatus::Returning
                             )
                     });
                     if should_fail {
@@ -436,6 +438,7 @@ impl PeerBroker {
                     }
                     PeerStatus::Reviewing => turn.reviewer_session_id == Some(session_id),
                     PeerStatus::ResponseReady
+                    | PeerStatus::Returning
                     | PeerStatus::Returned
                     | PeerStatus::Failed
                     | PeerStatus::Closed => false,
@@ -896,8 +899,12 @@ impl PeerBroker {
             .ok_or_else(thread_not_found)?;
         validate_return_delivery(thread, &delivery)?;
         let turn = current_turn_mut(thread, delivery.thread.current_turn.id)?;
-        turn.status = PeerStatus::Returned;
-        thread.status = PeerStatus::Returned;
+        // A fast helper may acknowledge while the notification lease is held.
+        // Queueing the prompt alone is not evidence that it read the response.
+        if turn.status != PeerStatus::Returned {
+            turn.status = PeerStatus::Returning;
+        }
+        thread.status = turn.status;
         thread.return_delivery_token = None;
         thread.updated_at = unix_time_millis();
         Ok(thread_view(thread))
@@ -948,12 +955,28 @@ impl PeerBroker {
     }
 
     pub fn begin_close(&self, thread_id: Uuid) -> std::result::Result<PeerClose, PeerError> {
+        self.begin_close_with_discard(thread_id, None)
+    }
+
+    pub fn begin_close_with_discard(
+        &self,
+        thread_id: Uuid,
+        discard_unread_turn_id: Option<Uuid>,
+    ) -> std::result::Result<PeerClose, PeerError> {
         let mut state = lock(&self.inner.state);
         let thread = state
             .threads
             .get_mut(&thread_id)
             .ok_or_else(thread_not_found)?;
         ensure_thread_accepts_operations(thread)?;
+        if let Some(turn_id) = discard_unread_turn_id {
+            current_turn(thread, turn_id)?;
+        }
+        if thread.status == PeerStatus::Returning && discard_unread_turn_id.is_none() {
+            return Err(invalid_state(
+                "the source has not received the response; wait or explicitly discard the unread response",
+            ));
+        }
         let token = Uuid::new_v4();
         thread.close_token = Some(token);
         thread.updated_at = unix_time_millis();
@@ -1164,7 +1187,7 @@ impl PeerBroker {
             return Err(invalid_state("the peer thread is closing"));
         }
         let turn = current_turn(thread, turn_id)?;
-        let response_is_returned = turn.status == PeerStatus::Returned
+        let response_is_returned = matches!(turn.status, PeerStatus::Returning | PeerStatus::Returned)
             || (turn.status == PeerStatus::ResponseReady && thread.return_delivery_token.is_some());
         if thread.source_terminal_id != subject.terminal_id
             || turn.source_session_id != subject.session_id
@@ -1180,6 +1203,42 @@ impl PeerBroker {
                 .clone()
                 .ok_or_else(|| invalid_state("the returned peer response is not available"))?,
         })
+    }
+
+    pub fn acknowledge_response(
+        &self,
+        capability: &str,
+        turn_id: Uuid,
+    ) -> std::result::Result<PeerThread, PeerError> {
+        let mut state = lock(&self.inner.state);
+        let subject = capability_subject_in(&state, capability)?;
+        if subject.purpose != SessionPurpose::Interactive {
+            return Err(unauthorized());
+        }
+        let thread_id = thread_id_for_turn(&state, turn_id).ok_or_else(thread_not_found)?;
+        let thread = state
+            .threads
+            .get_mut(&thread_id)
+            .ok_or_else(thread_not_found)?;
+        if thread.close_token.is_some() {
+            return Err(invalid_state("the peer thread is closing"));
+        }
+        let delivery_pending = thread.return_delivery_token.is_some();
+        if thread.source_terminal_id != subject.terminal_id {
+            return Err(unauthorized());
+        }
+        let turn = current_turn_mut(thread, turn_id)?;
+        if turn.source_session_id != subject.session_id
+            || turn.response.is_none()
+            || !(matches!(turn.status, PeerStatus::Returning | PeerStatus::Returned)
+                || (turn.status == PeerStatus::ResponseReady && delivery_pending))
+        {
+            return Err(unauthorized());
+        }
+        turn.status = PeerStatus::Returned;
+        thread.status = PeerStatus::Returned;
+        thread.updated_at = unix_time_millis();
+        Ok(thread_view(thread))
     }
 }
 
@@ -1396,8 +1455,8 @@ fn validate_return_delivery(
         ));
     }
     let turn = current_turn(thread, delivery.thread.current_turn.id)?;
-    if thread.status != PeerStatus::ResponseReady
-        || turn.status != PeerStatus::ResponseReady
+    if !matches!(thread.status, PeerStatus::ResponseReady | PeerStatus::Returned)
+        || turn.status != thread.status
         || turn.response.is_none()
     {
         return Err(invalid_state("the peer response is not ready to return"));
@@ -1949,7 +2008,7 @@ mod tests {
         let returned = broker
             .return_response(created.id, created.current_turn.id)
             .expect("return stored response");
-        assert_eq!(returned.status, PeerStatus::Returned);
+        assert_eq!(returned.status, PeerStatus::Returning);
         assert_eq!(
             broker
                 .receive_for_source(&source_capability, created.current_turn.id)
@@ -2146,6 +2205,9 @@ mod tests {
             "Review findings"
         );
 
+        broker
+            .acknowledge_response(&source_capability, first_turn_id)
+            .expect("source acknowledges receipt");
         let recheck = broker
             .create_turn(
                 created.id,
@@ -2204,6 +2266,9 @@ mod tests {
             "Updated review findings"
         );
 
+        broker
+            .acknowledge_response(&source_capability, recheck.current_turn.id)
+            .expect("source acknowledges recheck receipt");
         let closed = broker.close_thread(created.id).expect("close thread");
         assert_eq!(closed.status, PeerStatus::Closed);
         assert_eq!(
@@ -2347,7 +2412,7 @@ mod tests {
         let returned = broker
             .complete_return_delivery(retry)
             .expect("complete retry");
-        assert_eq!(returned.status, PeerStatus::Returned);
+        assert_eq!(returned.status, PeerStatus::Returning);
         assert_eq!(
             broker
                 .receive_for_source(&source_capability, turn_id)
@@ -2355,6 +2420,185 @@ mod tests {
                 .content,
             "Review findings"
         );
+    }
+
+    #[test]
+    fn unread_return_blocks_close_and_follow_up_until_source_acknowledges() {
+        let (broker, source_capability, ready) = response_ready_review();
+        let turn_id = ready.current_turn.id;
+        assert!(
+            broker
+                .acknowledge_response(&source_capability, turn_id)
+                .is_err()
+        );
+        let returning = broker
+            .return_response(ready.id, turn_id)
+            .expect("queue return");
+        assert_eq!(returning.status, PeerStatus::Returning);
+        broker
+            .receive_for_source(&source_capability, turn_id)
+            .expect("read response");
+        assert!(broker.begin_close(ready.id).is_err());
+        assert!(broker.begin_return_delivery(ready.id, turn_id).is_err());
+        assert!(
+            broker
+                .create_turn(ready.id, PeerAction::Recheck, "Check again".to_owned())
+                .is_err()
+        );
+
+        let unrelated = broker
+            .activate_session(Uuid::new_v4(), Uuid::new_v4(), &SessionPurpose::Interactive)
+            .expect("unrelated source");
+        assert!(
+            broker
+                .acknowledge_response(&capability(&unrelated), turn_id)
+                .is_err()
+        );
+        let peer_capability = lock(&broker.inner.state)
+            .capabilities
+            .values()
+            .find(|record| matches!(record.purpose, SessionPurpose::Peer { .. }))
+            .expect("reviewer capability")
+            .secret
+            .clone();
+        assert!(broker.acknowledge_response(&peer_capability, turn_id).is_err());
+
+        let received = broker
+            .acknowledge_response(&source_capability, turn_id)
+            .expect("receipt");
+        assert_eq!(received.status, PeerStatus::Returned);
+        broker
+            .acknowledge_response(&source_capability, turn_id)
+            .expect("idempotent receipt");
+        broker
+            .create_turn(ready.id, PeerAction::Recheck, "Check again".to_owned())
+            .expect("follow-up");
+        assert!(
+            broker
+                .acknowledge_response(&source_capability, turn_id)
+                .is_err()
+        );
+        assert!(
+            broker
+                .begin_close_with_discard(ready.id, Some(turn_id))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn receipt_can_arrive_before_notification_completion_without_releasing_the_lease() {
+        let (broker, source_capability, ready) = response_ready_review();
+        let turn_id = ready.current_turn.id;
+        let delivery = broker
+            .begin_return_delivery(ready.id, turn_id)
+            .expect("delivery");
+        broker
+            .acknowledge_response(&source_capability, turn_id)
+            .expect("early receipt");
+        assert!(
+            broker
+                .begin_close_with_discard(ready.id, Some(turn_id))
+                .is_err()
+        );
+        let received = broker
+            .complete_return_delivery(delivery)
+            .expect("complete delivery");
+        assert_eq!(received.status, PeerStatus::Returned);
+        broker.close_thread(ready.id).expect("close after receipt");
+    }
+
+    #[test]
+    fn unread_return_requires_discard_of_the_exact_turn_and_close_rollback_preserves_it() {
+        let (broker, source_capability, ready) = response_ready_review();
+        let turn_id = ready.current_turn.id;
+        broker.return_response(ready.id, turn_id).expect("queue return");
+        assert!(
+            broker
+                .begin_close_with_discard(ready.id, Some(Uuid::new_v4()))
+                .is_err()
+        );
+        let closing = broker
+            .begin_close_with_discard(ready.id, Some(turn_id))
+            .expect("explicit discard");
+        assert!(
+            broker
+                .acknowledge_response(&source_capability, turn_id)
+                .is_err()
+        );
+        broker
+            .abort_close(closing)
+            .expect("termination failure rollback");
+        assert!(broker.begin_close(ready.id).is_err());
+        assert_eq!(
+            broker
+                .receive_for_source(&source_capability, turn_id)
+                .expect("retained response")
+                .content,
+            "Review findings"
+        );
+        let closing = broker
+            .begin_close_with_discard(ready.id, Some(turn_id))
+            .expect("retry discard");
+        broker.finalize_close(closing).expect("close");
+        assert!(
+            broker
+                .receive_for_source(&source_capability, turn_id)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ended_reviewer_keeps_the_unread_response_available_to_the_source() {
+        let (broker, source_capability, ready) = response_ready_review();
+        let turn_id = ready.current_turn.id;
+        let (reviewer_id, reviewer_session_id) = *lock(&broker.inner.state)
+            .capabilities
+            .iter()
+            .find(|(_, record)| matches!(record.purpose, SessionPurpose::Peer { .. }))
+            .expect("reviewer capability")
+            .0;
+        broker.return_response(ready.id, turn_id).expect("queue return");
+        broker.revoke_session(reviewer_id, reviewer_session_id);
+        assert_eq!(
+            broker.get_thread(ready.id).expect("unread thread").status,
+            PeerStatus::Returning
+        );
+        assert_eq!(
+            broker
+                .receive_for_source(&source_capability, turn_id)
+                .expect("retained response")
+                .content,
+            "Review findings"
+        );
+        assert_eq!(
+            broker
+                .acknowledge_response(&source_capability, turn_id)
+                .expect("source receipt")
+                .status,
+            PeerStatus::Returned
+        );
+    }
+
+    #[test]
+    fn ended_source_revokes_receipt_and_releases_the_unread_close_guard() {
+        let (broker, source_capability, ready) = response_ready_review();
+        let subject = broker
+            .authenticate_capability(&source_capability)
+            .expect("source");
+        broker
+            .return_response(ready.id, ready.current_turn.id)
+            .expect("queue return");
+        broker.revoke_session(subject.terminal_id(), subject.session_id());
+        assert!(
+            broker
+                .acknowledge_response(&source_capability, ready.current_turn.id)
+                .is_err()
+        );
+        assert_eq!(
+            broker.get_thread(ready.id).expect("failed thread").status,
+            PeerStatus::Failed
+        );
+        broker.close_thread(ready.id).expect("close after source exit");
     }
 
     #[test]

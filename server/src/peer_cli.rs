@@ -34,6 +34,7 @@ const MAX_HTTP_REQUEST_BYTES: usize = MAX_PEER_ARTIFACT_BYTES * 6 + 4 * 1024;
 pub enum InternalPeerRequest {
     Submit { turn_id: Uuid, content: String },
     Receive { turn_id: Uuid },
+    Acknowledge { turn_id: Uuid },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +43,8 @@ pub struct InternalPeerResponse {
     pub content: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub acknowledge: bool,
 }
 
 enum PeerCliCommand {
@@ -95,21 +98,39 @@ fn execute(command: PeerCliCommand) -> Result<()> {
     let response = send_request(endpoint, &capability, &request)?;
 
     if let Some(turn_id) = received_turn {
-        let content = response
-            .content
-            .context("the peer broker returned no artifact content")?;
-        validate_content(&content)?;
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(content.as_bytes())
-            .context("failed to write the peer artifact")?;
-        if !content.ends_with('\n') {
-            stdout
-                .write_all(b"\n")
-                .context("failed to finish the peer artifact output")?;
-        }
-        stdout.flush().context("failed to flush peer output")?;
-        let _ = turn_id;
+        write_received_response(response, &mut io::stdout().lock(), || {
+            send_request(
+                endpoint,
+                &capability,
+                &InternalPeerRequest::Acknowledge { turn_id },
+            )
+            .map(|_| ())
+        })?;
+    }
+    Ok(())
+}
+
+fn write_received_response(
+    response: InternalPeerResponse,
+    output: &mut dyn Write,
+    acknowledge: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let content = response
+        .content
+        .context("the peer broker returned no artifact content")?;
+    validate_content(&content)?;
+    output
+        .write_all(content.as_bytes())
+        .context("failed to write the peer artifact")?;
+    if !content.ends_with('\n') {
+        output
+            .write_all(b"\n")
+            .context("failed to finish the peer artifact output")?;
+    }
+    output.flush().context("failed to flush peer output")?;
+    if response.acknowledge {
+        acknowledge()
+            .context("response written; receipt unconfirmed; retry receive for this turn")?;
     }
     Ok(())
 }
@@ -316,6 +337,7 @@ fn parse_http_response(response: &[u8]) -> Result<InternalPeerResponse> {
         InternalPeerResponse {
             content: None,
             error: None,
+            acknowledge: false,
         }
     } else {
         serde_json::from_slice::<InternalPeerResponse>(&body)
@@ -392,6 +414,62 @@ fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acknowledges_only_responses_written_and_flushed_successfully() {
+        struct Sink {
+            fail_flush: bool,
+        }
+        impl Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                if self.fail_flush {
+                    Err(io::Error::from(io::ErrorKind::BrokenPipe))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        for (acknowledge, fail_flush) in [(true, false), (true, true), (false, false)] {
+            let mut acknowledged = false;
+            let result = write_received_response(
+                InternalPeerResponse {
+                    content: Some("Synthetic artifact".to_owned()),
+                    error: None,
+                    acknowledge,
+                },
+                &mut Sink { fail_flush },
+                || {
+                    acknowledged = true;
+                    Ok(())
+                },
+            );
+            assert_eq!(result.is_ok(), !fail_flush);
+            assert_eq!(acknowledged, acknowledge && !fail_flush);
+        }
+    }
+
+    #[test]
+    fn acknowledgement_failure_keeps_the_written_artifact_and_reports_failure() {
+        let mut output = Vec::new();
+        let result = write_received_response(
+            InternalPeerResponse {
+                content: Some("Synthetic artifact".to_owned()),
+                error: None,
+                acknowledge: true,
+            },
+            &mut output,
+            || bail!("Synthetic receipt failure"),
+        );
+        let error = result.expect_err("receipt failure must reach the caller");
+        let message = format!("{error:#}");
+        assert!(message.contains("response written; receipt unconfirmed"));
+        assert!(message.contains("retry receive for this turn"));
+        assert!(message.contains("Synthetic receipt failure"));
+        assert_eq!(output, b"Synthetic artifact\n");
+    }
 
     #[test]
     fn parses_submit_file_and_receive_commands() {

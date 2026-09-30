@@ -309,6 +309,32 @@ describe("PeerComposer", () => {
     expect(html).not.toContain("Prepare follow-up");
   });
 
+  it("waits for source receipt before offering a follow-up or another return", () => {
+    const returningThread: PeerThread = {
+      ...THREAD,
+      status: "returning",
+      currentTurn: { ...THREAD.currentTurn, status: "returning" },
+    };
+    const html = renderToStaticMarkup(
+      <PeerComposer
+        sourceSession={SOURCE}
+        initialThreadId={THREAD.id}
+        allowNew
+        catalog={CATALOG}
+        catalogLoading={false}
+        threads={[returningThread]}
+        operation={null}
+        error={null}
+        {...READY_STATE}
+        {...CALLBACKS}
+      />,
+    );
+    expect(html).toContain("Returning to source");
+    expect(html).toContain("receipt is confirmed");
+    expect(html).not.toContain("Prepare follow-up");
+    expect(html).not.toContain("Return to source");
+  });
+
   it("blocks new reviewers until the initial thread list is known", () => {
     const html = renderToStaticMarkup(
       <PeerComposer

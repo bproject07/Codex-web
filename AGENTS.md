@@ -64,6 +64,7 @@ The most important properties are:
 │   ├── validate-release-archive.py  Bounded archive/layout/binary validation
 │   ├── verify-github-release.py  Exact immutable asset/digest verification
 │   ├── session-tabs-regression.py
+│   ├── session-cache-regression.py  Synthetic tab retention and routing regression
 │   └── workspace-picker-regression.py  Auth/CWD/persistence/mobile regression
 ├── server/
 │   ├── Cargo.toml
@@ -108,7 +109,9 @@ The most important properties are:
         ├── updates/           Update UI, API model, state, and unit tests
         ├── workspaces/        Folder picker, model, DTOs, and unit tests
         ├── terminal/
+        │   ├── TerminalDeck.tsx  Bounded retained views and selected-tab routing
         │   ├── TerminalView.tsx
+        │   ├── viewCache.ts
         │   ├── androidImeGuard.ts
         │   ├── MobileToolbar.tsx
         │   ├── mobileKeys.ts
@@ -320,6 +323,16 @@ preflight, PTY startup, or process termination requires:
 - `@cwt` is a normal accessible launcher and composer. Do not intercept,
   buffer, erase, or replay literal `@cwt` keystrokes in `TerminalView` or the
   Android IME guard.
+- Queued return prompts enter `returning`; only the exact source generation's
+  private helper acknowledgement after successful output/flush marks them
+  `returned`. A receipt may arrive before the return-notification lease ends;
+  preserve it without releasing that lease early. Block follow-ups and normal
+  Close while receipt is pending. Explicit discard must identify the current
+  unread turn, and a failed close must preserve its response. Source exit
+  fails a pending return; reviewer exit must not discard its stored response.
+- Peer creation must not remain resubmittable while its session-list refresh
+  is pending. Returning from the reviewer folder picker, including Cancel,
+  restores focus inside the composer and preserves the instruction.
 - Treat an automation prompt as one ordered queue transaction, but write and
   flush its text before a provider settle interval and a separate Enter write.
   Never concatenate the submit key with fast raw prompt bytes: real TUIs can
@@ -381,10 +394,44 @@ when changing batching or reconnect behavior.
 ## Browser and mobile invariants
 
 - xterm.js owns ANSI/VT interpretation and terminal scrollback.
+- Settings **Keep terminals when switching tabs** defaults to enabled, also
+  for saved preferences missing this field. Retain at most six visited xterm
+  views and their WebSockets; evict the least recently visited inactive view
+  without stopping its PTY. Disabling retention releases hidden views while
+  preserving the selected view. Content stays in memory only. A changed PTY
+  generation or deletion invalidates that view. Only the selected view may
+  accept new user input, focus, or send viewport resizes. An IME transaction
+  accepted before switching may finish only in its original view; block fresh
+  hidden DOM input before the IME guard, and allow only guard-owned completion
+  events through that block. xterm protocol replies
+  from background output stay routed to their own session. Background session
+  metadata, errors, and connection status must not replace selected identity.
+  Re-selecting the active tab must not reset connection status. Cover retention,
+  opt-out, eviction, input/resize routing, restart, and removal with
+  `scripts/session-cache-regression.py` on Windows and Linux in CI.
+- Tab selection must not discard a pending session-list update. Apply its
+  membership while preserving a newer user selection. A PTY generation change
+  replaces the view once; do not additionally force a reconnect on the restart
+  HTTP reply. Confirmation dialogs suppress terminal autofocus and desktop
+  slash routing just like the other dialogs.
+- A retained view retries an HTTP 429 attach rejection after 60 seconds,
+  including while hidden. HTTP 401 stops automatic retries; switching away
+  and back after a 60-second cooldown permits one new attempt. Switching
+  tabs must not bypass either cooldown. Token changes retry immediately, and
+  view disposal cancels all pending retries.
 - Do not parse or rewrite Codex terminal text in the frontend.
 - Do not enable `convertEol`; the PTY owns line endings.
 - Resize messages must remain bounded to 20–500 columns and 5–300 rows.
 - Mobile viewport changes are asynchronous on Android and iOS.
+- Token entry must scroll within the available viewport height so validation
+  errors, larger text, and the software keyboard cannot hide Connect. The
+  agent picker keeps only its title and Refresh/Close controls outside the
+  shared scroller for folder details and agent cards. Initial focus stays in
+  the header so folder details remain visible. Main touch controls retain
+  at least 44 px targets even under short-viewport rules; keep the tab scroller's
+  narrow overlay arrows out of that minimum-width rule. Cover these cases
+  with the synthetic mobile layout checks in `session-cache-regression.py`;
+  Chromium viewport emulation is not real Samsung Internet/IME validation.
 - Avoid resize loops that repeatedly call FitAddon while the visual viewport
   and hidden xterm textarea are moving.
 - The mobile toolbar order starts with Enter and arrows, then history/control

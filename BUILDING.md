@@ -888,6 +888,67 @@ creating a Codex conversation.
 
 ## Optional browser and mobile regression scripts
 
+### Terminal tab retention and mobile layout
+
+CI and release validation run `scripts/session-cache-regression.py` on
+Windows and Linux. It serves the built frontend on a disposable loopback
+port and intercepts every API/WebSocket request with synthetic peers. It
+never starts a PTY or connects to an existing server. Coverage includes the
+default enabled preference, repeat selection, retained scroll position and
+view identity, background output and protocol replies, selected-only input
+and resize, six-view eviction, immediate opt-out and persistence, generation
+invalidation, replay/live ordering, dialog focus, deletion, and mobile
+focus/toolbar routing. It also covers delayed list refresh during a tab switch,
+both orders of restart HTTP/socket delivery, confirmation focus and slash
+isolation, and Android Enter/composition completion after switching. Hidden
+DOM input must remain blocked. Unit tests cover preference migration and the
+retention limit as part of `npm test`.
+
+Restart cases use the server's replay-before-session ordering. The HTTP-first
+case holds the list response while the still-open old socket announces its
+new generation. Both replay and subsequent live bytes must leave the old view
+unchanged before session metadata replaces it. The fixture waits for received
+frames and queued short write/render callbacks, and reveals hidden views before
+checking their old rows. Input isolation uses received sentinel/protocol replies
+as ordering barriers. Browser clock control covers background HTTP 429 recovery,
+HTTP 401 re-selection after cooldown, and cancellation on cache disposal.
+
+The script also checks token-entry scrolling, validation errors, 44 px touch
+targets, and the **New terminal** shared body scroller with long synthetic
+folder paths and a catalog error. Cases include 360 × 639, 360 × 345,
+800 × 345, and an enlarged 20 px root font. Each start action must remain
+reachable and pass a hit test while the title and close button stay visible.
+The wide touch case uses overflowing tabs to check the narrow overlay arrows;
+initial agent-picker focus must leave the folder context at the top.
+These are Chromium touch/viewport simulations; they do not establish
+validation on a physical Android keyboard or Samsung Internet.
+
+The same synthetic browser script checks **@cwt** on desktop and mobile:
+folder selection/cancellation focus, duplicate submission while the session
+list is delayed, switching tabs during that delay, the transition from pending
+receipt to an enabled follow-up, and explicit discard of its exact turn.
+The disposable asset server sets module/CSS MIME types explicitly so Windows
+registry settings cannot change browser module loading.
+
+The workflow commands are (`$chrome` is the system Chrome path resolved by
+the Windows workflow):
+
+```powershell
+python -B .\scripts\session-cache-regression.py --web-dir .\dist\web --chrome $chrome
+```
+
+```bash
+python3 -B ./scripts/session-cache-regression.py \
+  --web-dir ./dist-linux/web --chrome /usr/bin/google-chrome
+```
+
+Both workflows also run the existing native PTY
+`scripts/mobile-resize-regression.py` on each platform. These checks require
+Playwright and system Chrome. Validation for this change remains pending
+until those GitHub Actions jobs complete; do not run it locally as an agent.
+
+### Other browser regressions
+
 The Python utilities in `scripts/` are specialized diagnostics rather than the
 normal unit-test path. They require Python 3. Browser-driving scripts also
 require Python Playwright and a matching browser installation. Check each
@@ -953,7 +1014,21 @@ directory, project, and three synthetic agent profiles. It drives the real
 native PTYs and private helper over HTTP, revises the preview, returns the
 review, confirms that `Recheck` retains the same reviewer terminal and PTY
 generation, then closes and purges the peer without stopping the source. It
-also verifies that WebSocket restart controls cannot rotate either protected
+holds source receipt until ordinary peer/session deletion and an early
+follow-up have been rejected, then runs the real helper and requires the
+acknowledged `returned` state. Broker and helper unit tests also cover early,
+duplicate, wrong-role and stale acknowledgements, output/receipt failures,
+reviewer exit with an unread response, exact-turn discard, and close rollback.
+Another native review is explicitly discarded while its response is unread:
+the exact-turn HTTP DELETE must return 204, remove the thread/session, stop
+the reviewer process tree, and leave the other sessions unchanged. The source
+helper must reject retrieval with broker HTTP 404, and the source must still
+answer a health input. The regression checks the requested AGY reviewer identity
+and rejects discard with an actual previous turn ID. The helper unit test also
+checks the recovery hint when output succeeded but its receipt could not be
+confirmed.
+The regression also verifies that WebSocket
+restart controls cannot rotate either protected
 PTY generation and that the reviewer process tree actually exits. It does not
 require Playwright, provider credentials, a repository, or a real agent CLI,
 and refuses the reserved live ports `8788`, `8789`, and `8790`.
@@ -985,8 +1060,8 @@ For a disposable manual peer smoke:
    prompt;
 5. verify a new linked reviewer tab was created in the selected reviewer
    directory and the source directory did not change;
-6. use **Return to source**, then issue **Recheck** and confirm the same
-   reviewer `terminalId` and `sessionId` remain;
+6. use **Return to source**, wait for **Returned**, then issue **Recheck** and
+   confirm the same reviewer `terminalId` and `sessionId` remain;
 7. close the reviewer and confirm the source is still running;
 8. stop the disposable server.
 

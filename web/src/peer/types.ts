@@ -12,6 +12,7 @@ export type PeerStatus =
   | "awaiting_preview"
   | "reviewing"
   | "response_ready"
+  | "returning"
   | "returned"
   | "failed"
   | "closed";

@@ -26,6 +26,7 @@ const PEER_STATUSES = new Set<PeerStatus>([
   "awaiting_preview",
   "reviewing",
   "response_ready",
+  "returning",
   "returned",
   "failed",
   "closed",
@@ -100,11 +101,23 @@ export async function deletePeerThread(
   token: string,
   threadId: string,
   signal?: AbortSignal,
+  discardUnreadTurnId?: string,
 ): Promise<void> {
   await apiRequest<void>(
     `/api/peer/threads/${encodeURIComponent(requireCleanId(threadId))}`,
     token,
-    { method: "DELETE", signal },
+    {
+      method: "DELETE",
+      signal,
+      ...(discardUnreadTurnId
+        ? {
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              discardUnreadTurnId: requireCleanId(discardUnreadTurnId),
+            }),
+          }
+        : {}),
+    },
   );
 }
 

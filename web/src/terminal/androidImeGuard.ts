@@ -51,6 +51,7 @@ interface AndroidImeGuardOptions {
 export interface AndroidImeGuardDisposable {
   dispose: () => void;
   observeTerminalData: (data: string) => void;
+  isPendingInputEvent: (event: Event) => boolean;
 }
 
 export function shouldEnableAndroidImeGuard(userAgent: string): boolean {
@@ -125,6 +126,7 @@ export function installAndroidImeGuard(
     return {
       dispose: () => undefined,
       observeTerminalData: () => undefined,
+      isPendingInputEvent: () => false,
     };
   }
 
@@ -140,9 +142,21 @@ export function installAndroidImeGuard(
   let replacementBeforeInputValue: string | null = null;
   const deferredEnterTimers = new Set<number>();
   const replacementRestoreTimers = new Set<number>();
+  const pendingInputEvents = new WeakSet<Event>();
+
+  // These events finish input already accepted by this guard. Their identity
+  // lets a hidden view finish that transaction without accepting fresh input.
+  const dispatchPendingInput = (event: Event) => {
+    pendingInputEvents.add(event);
+    try {
+      textarea.dispatchEvent(event);
+    } finally {
+      pendingInputEvents.delete(event);
+    }
+  };
 
   const dispatchSyntheticCompositionEnd = () => {
-    textarea.dispatchEvent(
+    dispatchPendingInput(
       new CompositionEvent("compositionend", {
         bubbles: true,
         composed: true,
@@ -319,7 +333,7 @@ export function installAndroidImeGuard(
         which: { get: () => keydown.which },
         charCode: { get: () => keydown.charCode },
       });
-      textarea.dispatchEvent(event);
+      dispatchPendingInput(event);
     }
   };
 
@@ -692,6 +706,7 @@ export function installAndroidImeGuard(
 
   return {
     observeTerminalData,
+    isPendingInputEvent: (event) => pendingInputEvents.has(event),
     dispose: () => {
       container.removeEventListener("keydown", onKeyDown, true);
       container.removeEventListener("keypress", onKeyPress, true);

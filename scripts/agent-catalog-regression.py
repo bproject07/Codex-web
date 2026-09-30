@@ -341,7 +341,7 @@ def assert_start_actions_reachable(page: Page, picker: Any) -> None:
     )
     assert all(item["contained"] for item in containment), containment
 
-    options_box = picker.locator(".agent-options").bounding_box()
+    options_box = picker.locator(".agent-picker-body").bounding_box()
     assert options_box is not None
     for index in range(starts.count()):
         button = starts.nth(index)
@@ -367,11 +367,11 @@ def assert_start_actions_reachable(page: Page, picker: Any) -> None:
             }"""
         ), (containment, box)
 
-    picker.locator(".agent-options").evaluate("options => { options.scrollTop = 0; }")
+    picker.locator(".agent-picker-body").evaluate("body => { body.scrollTop = 0; }")
 
     viewport = page.viewport_size
     if viewport and viewport["width"] <= 520 and starts.count() >= 2:
-        options = picker.locator(".agent-options")
+        options = picker.locator(".agent-picker-body")
         box = options.bounding_box()
         assert box is not None
         cdp = page.context.new_cdp_session(page)
@@ -400,6 +400,7 @@ def assert_start_actions_reachable(page: Page, picker: Any) -> None:
         )
         page.wait_for_timeout(350)
         assert options.evaluate("element => element.scrollTop") > 0
+        starts.last.scroll_into_view_if_needed()
         last_box = starts.last.bounding_box()
         assert last_box is not None
         assert last_box["y"] >= -1

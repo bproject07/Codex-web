@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -21,6 +22,7 @@ import {
   parseServerControl,
 } from "./protocol";
 import {
+  AUTH_RETRY_DELAY_MS,
   reconnectDelay,
   type ConnectionStatus,
 } from "./reconnect";
@@ -41,6 +43,7 @@ import {
 import {
   installAndroidImeGuard,
   shouldEnableAndroidImeGuard,
+  type AndroidImeGuardDisposable,
 } from "./androidImeGuard";
 
 export interface TerminalViewHandle {
@@ -74,11 +77,13 @@ export interface TerminalDiagnostics {
 interface TerminalViewProps {
   token: string;
   terminalId: string;
+  sessionId: string | null;
+  active: boolean;
   settings: TerminalSettings;
-  reconnectNonce: number;
   ctrlMode: boolean;
   onCtrlConsumed: () => void;
   onConnectionStatus: (status: ConnectionStatus) => void;
+  onConnected: () => void;
   onSession: (session: SessionSnapshot) => void;
   onSessionUnavailable: (terminalId: string) => void;
   onError: (message: string | null) => void;
@@ -185,11 +190,13 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     {
       token,
       terminalId,
+      sessionId,
+      active,
       settings,
-      reconnectNonce,
       ctrlMode,
       onCtrlConsumed,
       onConnectionStatus,
+      onConnected,
       onSession,
       onSessionUnavailable,
       onError,
@@ -200,6 +207,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     const terminalRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
     const socketRef = useRef<WebSocket | null>(null);
+    const retryAuthenticationOnActivationRef = useRef<(() => void) | null>(null);
     const fitFrameRef = useRef<number | null>(null);
     const fitTimerRef = useRef<number | null>(null);
     const fitBurstActiveRef = useRef(false);
@@ -221,6 +229,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     const replayCountRef = useRef(0);
     const replayRef = useRef<BufferedReplay | null>(null);
     const ctrlModeRef = useRef(ctrlMode);
+    const activeRef = useRef(active);
     const [isRestoring, setIsRestoring] = useState(false);
     const [mobileScrollbarEnabled] = useState(
       () =>
@@ -233,15 +242,18 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     const callbackRef = useRef({
       onCtrlConsumed,
       onConnectionStatus,
+      onConnected,
       onSession,
       onSessionUnavailable,
       onError,
     });
 
     ctrlModeRef.current = ctrlMode;
+    activeRef.current = active;
     callbackRef.current = {
       onCtrlConsumed,
       onConnectionStatus,
+      onConnected,
       onSession,
       onSessionUnavailable,
       onError,
@@ -255,6 +267,9 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     };
 
     const send = (data: string) => {
+      if (!activeRef.current) {
+        return;
+      }
       sendToSocket(data);
       terminalRef.current?.focus();
     };
@@ -302,7 +317,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       }
 
       removeFreezeFrame();
-      const frame = createTerminalFreezeFrame(container);
+      const frame = activeRef.current ? createTerminalFreezeFrame(container) : null;
       freezeFrameRef.current = frame;
       if (frame) {
         freezeFrameTimerRef.current = window.setTimeout(() => {
@@ -313,7 +328,9 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       }
       atomicMobileResizeCommitsRef.current += 1;
       terminal.write(bytes, () => {
-        syncTextareaToCursor(terminal);
+        if (activeRef.current) {
+          syncTextareaToCursor(terminal);
+        }
         window.requestAnimationFrame(() => {
           window.requestAnimationFrame(() => {
             if (freezeFrameRef.current === frame) {
@@ -377,6 +394,9 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     };
 
     const performFit = () => {
+      if (!activeRef.current) {
+        return;
+      }
       const terminal = terminalRef.current;
       const fitAddon = fitAddonRef.current;
       const container = containerRef.current;
@@ -440,6 +460,9 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     };
 
     const fit = () => {
+      if (!activeRef.current) {
+        return;
+      }
       if (!fitBurstActiveRef.current) {
         fitBurstActiveRef.current = true;
         const containerHeight = containerRef.current?.clientHeight ?? 0;
@@ -469,10 +492,16 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       forwardedRef,
       () => ({
         send,
-        focus: () => terminalRef.current?.focus(),
+        focus: () => {
+          if (activeRef.current) terminalRef.current?.focus();
+        },
         fit,
-        scrollToTop: () => terminalRef.current?.scrollToTop(),
-        scrollToBottom: () => terminalRef.current?.scrollToBottom(),
+        scrollToTop: () => {
+          if (activeRef.current) terminalRef.current?.scrollToTop();
+        },
+        scrollToBottom: () => {
+          if (activeRef.current) terminalRef.current?.scrollToBottom();
+        },
         inspect: () => {
           const terminal = terminalRef.current;
           if (!terminal) {
@@ -593,12 +622,34 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         }
       }
 
+      // Gate new DOM input before either the IME guard or xterm sees it.
+      // Previously accepted IME transactions may finish in their original
+      // view, including Enter queued just before switching tabs.
+      let androidImeGuard: AndroidImeGuardDisposable | null = null;
+      const acceptsInputEvent = (event: Event) =>
+        activeRef.current || androidImeGuard?.isPendingInputEvent(event) === true;
+      const blockInactiveInput = (event: Event) => {
+        if (!acceptsInputEvent(event)) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      };
+      const inputEvents = [
+        "keydown", "keypress", "keyup", "beforeinput", "input", "paste",
+        "compositionstart", "compositionupdate", "compositionend",
+        "pointerdown", "mousedown", "touchstart",
+      ];
+      for (const name of inputEvents) {
+        container.addEventListener(name, blockInactiveInput, true);
+      }
+      terminal.attachCustomKeyEventHandler(acceptsInputEvent);
+
       const textarea = terminal.textarea;
       const androidImeGuardEnabled = shouldEnableAndroidImeGuard(
         navigator.userAgent,
       );
       androidImeGuardEnabledRef.current = androidImeGuardEnabled;
-      const androidImeGuard = textarea
+      androidImeGuard = textarea
         ? installAndroidImeGuard(container, textarea, {
             enabled: androidImeGuardEnabled,
             onTerminalInput: (data) => {
@@ -621,7 +672,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
 
       const inputDisposable = terminal.onData((data) => {
         androidImeGuard?.observeTerminalData(data);
-        if (ctrlModeRef.current) {
+        if (activeRef.current && ctrlModeRef.current) {
           const converted = applyCtrlToInput(data);
           if (converted.consumed) {
             callbackRef.current.onCtrlConsumed();
@@ -632,15 +683,20 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         sendToSocket(data);
       });
 
+      // Hidden panes cannot receive user events. Keep xterm's own protocol
+      // replies enabled: disableStdin also suppresses cursor/device reports
+      // needed by a TUI that is still running in a background tab.
       const resizeObserver = new ResizeObserver(fit);
       resizeObserver.observe(container);
       void document.fonts?.ready.then(fit);
       fit();
-      if (!mobileScrollbarEnabled) {
-        terminal.focus();
-      }
+      // App owns focus after connection so a generation change cannot steal
+      // it from an open settings or peer dialog.
 
       return () => {
+        for (const name of inputEvents) {
+          container.removeEventListener(name, blockInactiveInput, true);
+        }
         removeMobileScrollbarListeners?.();
         mobileScrollbarController?.dispose();
         androidImeGuard?.dispose();
@@ -667,6 +723,28 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       };
     }, []);
 
+    useLayoutEffect(() => {
+      if (active) {
+        retryAuthenticationOnActivationRef.current?.();
+        fit();
+        return;
+      }
+      terminalRef.current?.blur();
+      if (fitFrameRef.current !== null) {
+        window.cancelAnimationFrame(fitFrameRef.current);
+        fitFrameRef.current = null;
+      }
+      if (fitTimerRef.current !== null) {
+        window.clearTimeout(fitTimerRef.current);
+        fitTimerRef.current = null;
+      }
+      fitBurstActiveRef.current = false;
+      // A switch must not discard bytes held during a mobile resize.
+      const capture = mobileResizeCaptureRef.current;
+      if (capture) commitMobileResizeCapture(capture);
+      removeFreezeFrame();
+    }, [active]);
+
     useEffect(() => {
       const terminal = terminalRef.current;
       if (!terminal) {
@@ -691,44 +769,42 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       let activeSocket: WebSocket | null = null;
       let attempt = 0;
       let abortController: AbortController | null = null;
+      let replayRevision = 0;
+      let replayMatchesGeneration = true;
+      let authenticationRetryAt: number | null = null;
 
-      const revealRestoredTerminal = () => {
-        if (disposed) {
+      const revealRestoredTerminal = (revision = replayRevision) => {
+        if (disposed || revision !== replayRevision) {
           return;
         }
         terminalRef.current?.scrollToBottom();
         fit();
         window.requestAnimationFrame(() => {
-          if (!disposed) {
+          if (!disposed && revision === replayRevision) {
             setIsRestoring(false);
           }
         });
       };
 
-      const drainReplay = (replay: BufferedReplay) => {
+      const queueReplay = (replay: BufferedReplay) => {
         if (disposed || replayRef.current !== replay) {
           return;
         }
-
-        const bytes = takeReplayBatch(replay);
-        if (bytes.byteLength === 0) {
-          replayRef.current = null;
-          revealRestoredTerminal();
-          return;
-        }
-
+        // Queue the finite snapshot before handling any later live frame.
+        // xterm yields while parsing its FIFO; new live output must not keep
+        // extending a replay queue drained at one 16 KiB batch per frame.
+        replayRef.current = null;
+        const revision = replayRevision;
         const terminal = terminalRef.current;
-        if (!terminal) {
-          replayRef.current = null;
-          revealRestoredTerminal();
-          return;
+        if (!terminal) return;
+        while (replay.byteLength > 0) {
+          terminal.write(takeReplayBatch(replay));
         }
-        terminal.write(bytes, () => {
-          window.requestAnimationFrame(() => drainReplay(replay));
-        });
+        terminal.write(new Uint8Array(), () => revealRestoredTerminal(revision));
       };
 
       const cancelReplay = () => {
+        replayRevision += 1;
         replayRef.current = null;
         if (!disposed) {
           setIsRestoring(false);
@@ -742,12 +818,11 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         }
       };
 
-      const scheduleReconnect = () => {
+      const scheduleReconnect = (delay = reconnectDelay(attempt)) => {
         if (disposed || retryTimer !== null) {
           return;
         }
         callbackRef.current.onConnectionStatus("reconnecting");
-        const delay = reconnectDelay(attempt);
         attempt += 1;
         retryTimer = window.setTimeout(() => {
           retryTimer = null;
@@ -760,6 +835,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
           return;
         }
 
+        authenticationRetryAt = null;
         callbackRef.current.onConnectionStatus(
           retry ? "reconnecting" : "connecting",
         );
@@ -789,12 +865,18 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
             callbackRef.current.onSessionUnavailable(terminalId);
             return;
           }
-          if (error instanceof ApiError && (error.status === 401 || error.status === 429)) {
+          if (error instanceof ApiError && error.status === 429) {
+            callbackRef.current.onError(
+              "Connection temporarily limited. Retrying in one minute.",
+            );
+            scheduleReconnect(AUTH_RETRY_DELAY_MS);
+            return;
+          }
+          if (error instanceof ApiError && error.status === 401) {
+            authenticationRetryAt = Date.now() + AUTH_RETRY_DELAY_MS;
             callbackRef.current.onConnectionStatus("authentication_failed");
             callbackRef.current.onError(
-              error.status === 429
-                ? "Too many failed authentication attempts. Wait one minute."
-                : "Authentication failed. Open the URL printed by the server.",
+              "Authentication failed. Open the URL printed by the server.",
             );
             return;
           }
@@ -817,6 +899,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
           cancelMobileResizeCapture();
           removeFreezeFrame();
           callbackRef.current.onConnectionStatus("connected");
+          callbackRef.current.onConnected();
           callbackRef.current.onError(null);
           fit();
           heartbeatTimer = window.setInterval(() => {
@@ -834,6 +917,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
             return;
           }
           if (typeof event.data !== "string") {
+            if (!replayMatchesGeneration) return;
             const bytes = new Uint8Array(event.data);
             const replay = replayRef.current;
             if (replay) {
@@ -867,9 +951,19 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
               break;
             }
             case "replay_start": {
+              replayRevision += 1;
               replayCountRef.current += 1;
               cancelMobileResizeCapture();
               removeFreezeFrame();
+              replayMatchesGeneration = message.sessionId === sessionId;
+              if (!replayMatchesGeneration) {
+                // The server follows a generation replay with its session
+                // snapshot. TerminalDeck then mounts a fresh xterm/socket.
+                // Never mix the new PTY's bytes with old queued writes.
+                replayRef.current = null;
+                setIsRestoring(true);
+                break;
+              }
               const replay: BufferedReplay = {
                 chunks: [],
                 byteLength: 0,
@@ -877,14 +971,24 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
               replayRef.current = replay;
               containerRef.current?.classList.add("terminal-view--covered");
               setIsRestoring(true);
-              terminalRef.current?.reset();
-              terminalRef.current?.clear();
+              const terminal = terminalRef.current;
+              const revision = replayRevision;
+              // Reset at a parser boundary, after old queued bytes and before
+              // this snapshot. A synchronous reset can leave pending writes
+              // from the previous attachment in the reconstructed screen.
+              terminal?.write(new Uint8Array(), () => {
+                if (!disposed && revision === replayRevision) {
+                  terminal.reset();
+                  terminal.clear();
+                }
+              });
               break;
             }
             case "replay_end": {
+              if (!replayMatchesGeneration) break;
               const replay = replayRef.current;
               if (replay) {
-                drainReplay(replay);
+                queueReplay(replay);
               } else {
                 revealRestoredTerminal();
               }
@@ -917,10 +1021,27 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         };
       };
 
+      // A cached authentication failure must not make a tab permanently dead.
+      // Permit one attempt on re-selection after the cooldown, without an
+      // automatic retry loop for a rejected token. A changed token already
+      // recreates this effect and cancels the old generation's work.
+      const retryAuthenticationOnActivation = () => {
+        if (
+          !disposed &&
+          authenticationRetryAt !== null &&
+          Date.now() >= authenticationRetryAt
+        ) {
+          void connect(true);
+        }
+      };
+      retryAuthenticationOnActivationRef.current = retryAuthenticationOnActivation;
       void connect(false);
 
       return () => {
         disposed = true;
+        if (retryAuthenticationOnActivationRef.current === retryAuthenticationOnActivation) {
+          retryAuthenticationOnActivationRef.current = null;
+        }
         replayRef.current = null;
         setIsRestoring(false);
         cancelMobileResizeCapture();
@@ -940,7 +1061,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
           lastSentSizeRef.current = null;
         }
       };
-    }, [token, terminalId, reconnectNonce]);
+    }, [token, terminalId, sessionId]);
 
     return (
       <>
