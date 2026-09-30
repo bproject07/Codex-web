@@ -1384,7 +1384,11 @@ mod tests {
             );
             manager.process_exited(session_id, Some(1));
             assert!(manager.output_snapshot().chunks.is_empty());
-            assert!(!output_receiver.has_changed().expect("no stale notification"));
+            assert!(
+                !output_receiver
+                    .has_changed()
+                    .expect("no stale notification")
+            );
             assert_eq!(manager.snapshot().session_id, Some(replacement_id));
             assert_eq!(manager.snapshot().status, Lifecycle::Starting);
         }
