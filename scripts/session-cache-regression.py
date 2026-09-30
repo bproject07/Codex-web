@@ -525,6 +525,23 @@ def run_desktop(browser: Browser, url: str) -> None:
         page.locator(f'.terminal-pane[data-terminal-id="{session(0)["terminalId"]}"]').wait_for(state="detached")
         assert page.locator(".app-context-project").inner_text() == session(1)["project"]
         assert not failures, failures
+    except Exception:
+        # This fixture owns every endpoint and byte; report only its synthetic
+        # screen/viewport state, never browser storage or authenticated URLs.
+        print(json.dumps({"desktopFailure": page.evaluate("""() => ({
+          pendingRender: window.syntheticRenderPending(),
+          panes: [...document.querySelectorAll('.terminal-pane')].map(pane => ({
+            id: pane.dataset.terminalId,
+            hidden: pane.hidden,
+            text: pane.querySelector('.xterm-rows')?.textContent,
+            viewport: (() => {
+              const viewport = pane.querySelector('.xterm-viewport');
+              return viewport && {top: viewport.scrollTop, height: viewport.clientHeight,
+                scrollHeight: viewport.scrollHeight};
+            })(),
+          })),
+        })""")}))
+        raise
     finally:
         context.close()
 

@@ -130,6 +130,13 @@ jobs:
         working-directory: web
         run: npm run build
 
+      - name: Validate synthetic terminal tab retention
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check playwright==1.62.0
+          python -B ./scripts/session-cache-regression.py --web-dir ./web/dist
+
       - name: Check deterministic demo fixture
         run: node --check scripts/fixtures/demo-terminal.js
 
@@ -280,26 +287,22 @@ jobs:
             --server ./dist-linux/codex-web \
             --port 8815
 
-      - name: Validate Windows terminal tab retention and mobile resize
+      - name: Validate Windows mobile resize
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check playwright==1.62.0
           if ($LASTEXITCODE -ne 0) { throw "Playwright install failed" }
           $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-          python -B .\scripts\session-cache-regression.py --web-dir .\dist\web --chrome $chrome
-          if ($LASTEXITCODE -ne 0) { throw "Terminal tab retention regression failed" }
           python -B .\scripts\mobile-resize-regression.py --server .\dist\codex-web.exe --chrome $chrome --port 8816
           if ($LASTEXITCODE -ne 0) { throw "Mobile resize regression failed" }
 
-      - name: Validate Linux terminal tab retention and mobile resize
+      - name: Validate Linux mobile resize
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           python3 -m pip install --disable-pip-version-check playwright==1.62.0
-          python3 -B ./scripts/session-cache-regression.py \
-            --web-dir ./dist-linux/web --chrome /usr/bin/google-chrome
           python3 -B ./scripts/mobile-resize-regression.py \
             --server ./dist-linux/codex-web --chrome /usr/bin/google-chrome --port 8817
 
