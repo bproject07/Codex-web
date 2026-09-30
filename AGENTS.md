@@ -406,8 +406,6 @@ when changing batching or reconnect behavior.
   events through that block. xterm protocol replies
   from background output stay routed to their own session. Background session
   metadata, errors, and connection status must not replace selected identity.
-  Hidden panes remain measurable with `visibility: hidden`, `aria-hidden`, and
-  `inert`; `display: none` corrupts xterm's scroll range after background output.
   Re-selecting the active tab must not reset connection status. Cover retention,
   opt-out, eviction, input/resize routing, restart, and removal with
   `scripts/session-cache-regression.py` on Windows and Linux in CI.
@@ -473,6 +471,8 @@ when changing batching or reconnect behavior.
 - Mobile `PgUp` and `PgDn` send the standard terminal Page Up/Page Down
   sequences to the selected PTY, just like the other terminal-input buttons.
   `Top` and `Live` manipulate only xterm's client scrollback.
+  Scroll to these boundaries by the full buffer length so a stale relative
+  viewport position after hidden output cannot leave the view short of an edge.
 - A desktop session-tab tooltip contains only that session's full project path.
   Keep the lifecycle status in visually hidden accessible text rather than
   repeating the tab's visible agent/name information in the tooltip.

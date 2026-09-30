@@ -274,6 +274,16 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       terminalRef.current?.focus();
     };
 
+    const scrollToBoundary = (direction: -1 | 1) => {
+      const terminal = terminalRef.current;
+      if (terminal) {
+        // xterm 6's relative scrollToBottom delta can use a stale viewport
+        // position after background output. Clamp to the requested edge using
+        // the full buffer length through its public scrolling API.
+        terminal.scrollLines(direction * terminal.buffer.active.length);
+      }
+    };
+
     const removeFreezeFrame = () => {
       if (freezeFrameTimerRef.current !== null) {
         window.clearTimeout(freezeFrameTimerRef.current);
@@ -497,10 +507,10 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         },
         fit,
         scrollToTop: () => {
-          if (activeRef.current) terminalRef.current?.scrollToTop();
+          if (activeRef.current) scrollToBoundary(-1);
         },
         scrollToBottom: () => {
-          if (activeRef.current) terminalRef.current?.scrollToBottom();
+          if (activeRef.current) scrollToBoundary(1);
         },
         inspect: () => {
           const terminal = terminalRef.current;
@@ -777,7 +787,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         if (disposed || revision !== replayRevision) {
           return;
         }
-        terminalRef.current?.scrollToBottom();
+        scrollToBoundary(1);
         fit();
         window.requestAnimationFrame(() => {
           if (!disposed && revision === replayRevision) {
