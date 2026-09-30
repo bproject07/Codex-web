@@ -69,42 +69,6 @@ class SyntheticPeers:
         self.held_sessions: list[Route] = []
         self.session_error: int | None = None
         page.add_init_script("""(() => {
-          // Track xterm's short write tasks and render callbacks, including
-          // callbacks they enqueue, so assertions wait for the queue to drain.
-          const shortTimers = new Set();
-          const frames = new Set();
-          const setTimer = window.setTimeout.bind(window);
-          const clearTimer = window.clearTimeout.bind(window);
-          window.setTimeout = function(callback, delay, ...args) {
-            if (typeof callback !== 'function' || Number(delay ?? 0) > 16) {
-              return setTimer(callback, delay, ...args);
-            }
-            const handle = setTimer(function(...values) {
-              shortTimers.delete(handle);
-              return callback.apply(this, values);
-            }, delay, ...args);
-            shortTimers.add(handle);
-            return handle;
-          };
-          window.clearTimeout = function(handle) {
-            shortTimers.delete(handle);
-            return clearTimer(handle);
-          };
-          const requestFrame = window.requestAnimationFrame.bind(window);
-          const cancelFrame = window.cancelAnimationFrame.bind(window);
-          window.requestAnimationFrame = function(callback) {
-            const handle = requestFrame(time => {
-              frames.delete(handle);
-              callback(time);
-            });
-            frames.add(handle);
-            return handle;
-          };
-          window.cancelAnimationFrame = function(handle) {
-            frames.delete(handle);
-            return cancelFrame(handle);
-          };
-          window.syntheticRenderPending = () => shortTimers.size + frames.size;
           window.syntheticSessionFetches = 0;
           const nativeFetch = window.fetch;
           window.fetch = function(...args) {
@@ -118,25 +82,28 @@ class SyntheticPeers:
           window.syntheticReplayEnds = {};
           window.syntheticBinaryFrames = {};
           window.syntheticSocketCloses = {};
-          const NativeWebSocket = window.WebSocket;
-          window.WebSocket = class extends NativeWebSocket {
-            constructor(url, protocols) {
-              super(url, protocols);
-              const id = new URL(url, location.href).searchParams.get('terminalId');
-              this.addEventListener('close', () => {
+          // Playwright installs its own WebSocket constructor after init
+          // scripts. Observe its EventTarget dispatch without replacing it.
+          const dispatch = EventTarget.prototype.dispatchEvent;
+          EventTarget.prototype.dispatchEvent = function(event) {
+            const result = dispatch.call(this, event);
+            if (this instanceof WebSocket) {
+              const id = new URL(this.url, location.href).searchParams.get('terminalId');
+              if (event.type === 'close') {
                 window.syntheticSocketCloses[id] = (window.syntheticSocketCloses[id] ?? 0) + 1;
-              });
-              this.addEventListener('message', event => {
+              }
+              if (event.type === 'message') {
                 if (typeof event.data !== 'string') {
                   window.syntheticBinaryFrames[id] = (window.syntheticBinaryFrames[id] ?? 0) + 1;
-                  return;
+                } else {
+                  const message = JSON.parse(event.data);
+                  if (message.type === 'replay_end') {
+                    window.syntheticReplayEnds[id] = (window.syntheticReplayEnds[id] ?? 0) + 1;
+                  }
                 }
-                const message = JSON.parse(event.data);
-                if (message.type === 'replay_end') {
-                  window.syntheticReplayEnds[id] = (window.syntheticReplayEnds[id] ?? 0) + 1;
-                }
-              });
+              }
             }
+            return result;
           };
         })();""")
         page.route("**/api/**", self.http)
@@ -240,9 +207,10 @@ def is_cursor_report(frame: str | bytes) -> bool:
 
 
 def wait_for_terminal_render(page: Page) -> None:
-    # Poll outside the tracked <=16 ms timers and rAF callbacks. Incoming
-    # frames must be observed before using this barrier for a negative check.
-    page.wait_for_function("() => window.syntheticRenderPending() === 0", polling=20)
+    # Frame receipt is the transport barrier. Allow the small synthetic write
+    # and DOM-render queues to settle before comparing the still-mounted rows.
+    page.evaluate("""() => new Promise(resolve => setTimeout(() =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)), 100))""")
 
 
 def select(page: Page, index: int) -> None:
@@ -530,7 +498,6 @@ def run_desktop(browser: Browser, url: str) -> None:
         # This fixture owns every endpoint and byte; report only its synthetic
         # screen/viewport state, never browser storage or authenticated URLs.
         print(json.dumps({"desktopFailure": page.evaluate("""() => ({
-          pendingRender: window.syntheticRenderPending(),
           replays: window.syntheticReplayEnds,
           binaryFrames: window.syntheticBinaryFrames,
           panes: [...document.querySelectorAll('.terminal-pane')].map(pane => ({

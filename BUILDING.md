@@ -908,8 +908,8 @@ Restart cases use the server's replay-before-session ordering. The HTTP-first
 case holds the list response while the still-open old socket announces its
 new generation. Both replay and subsequent live bytes must leave the old view
 unchanged before session metadata replaces it. The fixture waits for received
-frames and queued short write/render callbacks, and reveals hidden views before
-checking their old rows. Input isolation uses received sentinel/protocol replies
+frames, allows the short synthetic writes to render, and reveals hidden views
+before checking their old rows. Input isolation uses received sentinel/protocol replies
 as ordering barriers. Browser clock control covers background HTTP 429 recovery,
 HTTP 401 re-selection after cooldown, and cancellation on cache disposal.
 

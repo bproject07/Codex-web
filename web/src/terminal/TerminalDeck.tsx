@@ -70,6 +70,7 @@ const TerminalPane = forwardRef<TerminalViewHandle, TerminalPaneProps>(
         className="terminal-pane"
         data-terminal-id={props.terminalId}
         hidden={!active}
+        aria-hidden={!active}
         inert={!active}
       >
         <TerminalView

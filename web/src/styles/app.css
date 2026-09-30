@@ -754,7 +754,11 @@ button:disabled {
 }
 
 .terminal-pane[hidden] {
-  display: none;
+  /* Keep xterm's cell/viewport measurements valid as background bytes arrive.
+     display:none leaves its scrollbar clamped to the old scrollback extent. */
+  display: block;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .settings-help {
