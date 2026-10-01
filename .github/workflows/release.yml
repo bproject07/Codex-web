@@ -9,7 +9,7 @@ on:
       version:
         description: Package version to build and validate without publishing
         required: true
-        default: "0.3.9"
+        default: "0.3.10"
         type: string
 
 permissions:
@@ -226,6 +226,10 @@ jobs:
             --server .\dist\codex-web.exe `
             --port 8814
 
+      - name: Exercise bounded terminal output
+        shell: pwsh
+        run: python -B ./scripts/terminal-flow-regression.py --server ./dist/codex-web.exe --port 8824
+
       - name: Exercise Chrome terminal scrolling and mobile resize
         shell: pwsh
         run: |
@@ -386,6 +390,10 @@ jobs:
           python3 -B ./scripts/peer-review-regression.py \
             --server ./dist-linux/codex-web \
             --port 8815
+
+      - name: Exercise bounded terminal output
+        shell: bash
+        run: python3 -B ./scripts/terminal-flow-regression.py --server ./dist-linux/codex-web --port 8824
 
       - name: Exercise Chrome terminal scrolling and mobile resize
         shell: bash

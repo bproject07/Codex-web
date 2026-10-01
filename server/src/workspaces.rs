@@ -8,7 +8,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 #[cfg(unix)]
@@ -196,7 +196,7 @@ impl WorkspaceStore {
         preferred_agent: Option<AgentKind>,
     ) -> Result<FavoriteWorkspace, WorkspaceError> {
         let label = normalize_label(label)?;
-        let mut guard = self.state.lock().await;
+        let guard = self.state.clone().lock_owned().await;
         let mut next = guard.clone();
 
         let favorite = if let Some(existing) = next
@@ -225,13 +225,12 @@ impl WorkspaceStore {
             favorite
         };
 
-        self.persist(&next).await?;
-        *guard = next;
+        self.persist(next, guard).await?;
         Ok(favorite)
     }
 
     pub async fn delete_favorite(&self, favorite_id: Uuid) -> Result<(), WorkspaceError> {
-        let mut guard = self.state.lock().await;
+        let guard = self.state.clone().lock_owned().await;
         let mut next = guard.clone();
         let original_len = next.favorites.len();
         next.favorites.retain(|favorite| favorite.id != favorite_id);
@@ -239,8 +238,7 @@ impl WorkspaceStore {
             return Err(WorkspaceError::FavoriteNotFound);
         }
 
-        self.persist(&next).await?;
-        *guard = next;
+        self.persist(next, guard).await?;
         Ok(())
     }
 
@@ -249,7 +247,7 @@ impl WorkspaceStore {
         directory: DirectoryEntry,
         agent: AgentKind,
     ) -> Result<(), WorkspaceError> {
-        let mut guard = self.state.lock().await;
+        let guard = self.state.clone().lock_owned().await;
         let mut next = guard.clone();
 
         for favorite in &mut next.favorites {
@@ -274,22 +272,31 @@ impl WorkspaceStore {
         );
         next.recent.truncate(MAX_RECENT_WORKSPACES);
 
-        self.persist(&next).await?;
-        *guard = next;
+        self.persist(next, guard).await?;
         Ok(())
     }
 
-    async fn persist(&self, state: &WorkspaceLibrary) -> Result<(), WorkspaceError> {
-        validate_state(state)?;
-        let mut bytes = serde_json::to_vec_pretty(state)?;
+    async fn persist(
+        &self,
+        state: WorkspaceLibrary,
+        mut guard: OwnedMutexGuard<WorkspaceLibrary>,
+    ) -> Result<(), WorkspaceError> {
+        validate_state(&state)?;
+        let mut bytes = serde_json::to_vec_pretty(&state)?;
         bytes.push(b'\n');
         if bytes.len() as u64 > MAX_STATE_FILE_BYTES {
             return Err(WorkspaceError::StateTooLarge);
         }
         let state_file = self.state_file.clone();
-        tokio::task::spawn_blocking(move || atomic_write(&state_file, &bytes))
-            .await
-            .map_err(WorkspaceError::Join)??;
+        // The disk write owns the lock and the in-memory commit. Dropping the
+        // HTTP future cannot release the lock while a detached write continues.
+        tokio::task::spawn_blocking(move || {
+            atomic_write(&state_file, &bytes)?;
+            *guard = state;
+            Ok::<_, WorkspaceError>(())
+        })
+        .await
+        .map_err(WorkspaceError::Join)??;
         Ok(())
     }
 
@@ -674,7 +681,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
         file.sync_all()?;
         drop(file);
         replace_file(&temporary, path)?;
-        sync_parent_directory(parent)?;
+        if sync_parent_directory(parent).is_err() {
+            // Replacement already committed. Keep memory in sync with the new
+            // file even when its crash durability could not be confirmed.
+            tracing::warn!("workspace state committed but directory sync failed");
+        }
         Ok(())
     })();
 
@@ -719,6 +730,44 @@ mod tests {
     use super::*;
     use crate::filesystem::encode_directory_id;
     use serde_json::json;
+
+    #[test]
+    fn cancelled_caller_cannot_separate_disk_and_memory_commit() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fixture = tempfile::tempdir().unwrap();
+            let project = dunce::canonicalize(fixture.path()).unwrap();
+            let state_dir = fixture.path().join("state");
+            let store = WorkspaceStore::open(state_dir.clone()).await.unwrap();
+            let (release, held) = std::sync::mpsc::channel();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                held.recv().unwrap();
+            });
+            ready.await.unwrap();
+            let mut request =
+                Box::pin(store.upsert_favorite(directory(&project), Some("kept".into()), None));
+            assert!(futures_util::poll!(request.as_mut()).is_pending());
+            drop(request);
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            let saved = store.snapshot().await;
+            assert_eq!(saved.favorites.len(), 1);
+            let reopened = WorkspaceStore::open(state_dir)
+                .await
+                .unwrap()
+                .snapshot()
+                .await;
+            assert_eq!(reopened, saved);
+            store.delete_favorite(saved.favorites[0].id).await.unwrap();
+            assert!(store.snapshot().await.favorites.is_empty());
+        });
+    }
 
     fn directory(path: &Path) -> DirectoryEntry {
         DirectoryEntry {
@@ -1036,7 +1085,9 @@ mod tests {
         });
 
         assert!(matches!(
-            store.persist(&state).await,
+            store
+                .persist(state, store.state.clone().lock_owned().await)
+                .await,
             Err(WorkspaceError::StateTooLarge)
         ));
         assert!(!store.state_file().exists());

@@ -78,6 +78,7 @@ struct ErrorResponse {
 struct CreateSessionRequest {
     agent: Option<AgentKind>,
     directory_id: Option<String>,
+    restore_request_id: Option<Uuid>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -444,11 +445,21 @@ async fn create_session(State(state): State<AppState>, body: Bytes) -> Response 
     let recent_project = selected_project
         .clone()
         .unwrap_or_else(|| state.config.project_dir.clone());
-    match state
-        .sessions
-        .create_in(requested_agent, selected_project)
-        .await
-    {
+    let created = match request.restore_request_id {
+        Some(request_id) => {
+            state
+                .sessions
+                .restore_in(request_id, requested_agent, selected_project)
+                .await
+        }
+        None => {
+            state
+                .sessions
+                .create_in(requested_agent, selected_project)
+                .await
+        }
+    };
+    match created {
         Ok(session) => {
             let recent_directory = state.directories.describe(&recent_project);
             if let Err(error) = state
@@ -464,9 +475,26 @@ async fn create_session(State(state): State<AppState>, body: Bytes) -> Response 
         }
         Err(RegistryError::LimitReached) => (
             StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: "Managed terminal session capacity has been reached.",
-            }),
+            Json(serde_json::json!({
+                "error": "Managed terminal session capacity has been reached.",
+                "code": "session_capacity",
+            })),
+        )
+            .into_response(),
+        Err(
+            error @ (RegistryError::RestoreConflict
+            | RegistryError::RestoreDeleted
+            | RegistryError::RestoreLimitReached),
+        ) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": error.to_string(),
+                "code": match error {
+                    RegistryError::RestoreDeleted => "restore_deleted",
+                    RegistryError::RestoreConflict => "restore_conflict",
+                    _ => "restore_history_full",
+                },
+            })),
         )
             .into_response(),
         Err(RegistryError::ShuttingDown) => (

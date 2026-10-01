@@ -27,6 +27,8 @@ import {
   type ConnectionStatus,
 } from "./reconnect";
 import { applyCtrlToInput } from "./mobileKeys";
+import { terminalDimensions } from "./dimensions";
+import { createHeartbeat } from "./heartbeat";
 import {
   isMobileRowOnlyResize,
   terminalScrollbarOptions,
@@ -205,12 +207,21 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
     const terminalRef = useRef<Terminal | null>(null);
+    const flowControlledSocketsRef = useRef(new WeakSet<WebSocket>());
+    const acknowledgeOutput = (socket: WebSocket | null, bytes: number) => {
+      if (bytes > 0 && socket && socket === socketRef.current &&
+          socket.readyState === WebSocket.OPEN && flowControlledSocketsRef.current.has(socket)) {
+        socket.send(encodeControlMessage({ type: "output_ack", bytes }));
+      }
+    };
     const fitAddonRef = useRef<FitAddon | null>(null);
     const socketRef = useRef<WebSocket | null>(null);
     const retryAuthenticationOnActivationRef = useRef<(() => void) | null>(null);
     const fitFrameRef = useRef<number | null>(null);
     const fitTimerRef = useRef<number | null>(null);
     const fitBurstActiveRef = useRef(false);
+    const scrollBoundaryRef = useRef<-1 | 1 | null>(null);
+    const scrollBoundaryFrameRef = useRef<number | null>(null);
     const lastFitHeightRef = useRef<number | null>(null);
     const lastSentSizeRef = useRef<{
       socket: WebSocket;
@@ -274,6 +285,36 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       terminalRef.current?.focus();
     };
 
+    const cancelScrollBoundary = () => {
+      scrollBoundaryRef.current = null;
+      if (scrollBoundaryFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollBoundaryFrameRef.current);
+        scrollBoundaryFrameRef.current = null;
+      }
+    };
+
+    const settleScrollBoundary = () => {
+      if (scrollBoundaryRef.current === null || !activeRef.current) return;
+      if (scrollBoundaryFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollBoundaryFrameRef.current);
+      }
+      // xterm updates viewport scroll dimensions in its render callback.
+      // Wait through that render, then apply the edge using the new dimensions.
+      scrollBoundaryFrameRef.current = window.requestAnimationFrame(() => {
+        scrollBoundaryFrameRef.current = window.requestAnimationFrame(() => {
+          scrollBoundaryFrameRef.current = null;
+          const terminal = terminalRef.current;
+          const direction = scrollBoundaryRef.current;
+          if (terminal && direction !== null && activeRef.current) {
+            terminal.scrollLines(direction * terminal.buffer.active.length);
+          }
+          if (!fitBurstActiveRef.current && fitFrameRef.current === null) {
+            scrollBoundaryRef.current = null;
+          }
+        });
+      });
+    };
+
     const scrollToBoundary = (direction: -1 | 1) => {
       const terminal = terminalRef.current;
       if (terminal) {
@@ -281,6 +322,10 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         // position after background output. Clamp to the requested edge using
         // the full buffer length through its public scrolling API.
         terminal.scrollLines(direction * terminal.buffer.active.length);
+        if (activeRef.current) {
+          scrollBoundaryRef.current = direction;
+          settleScrollBoundary();
+        }
       }
     };
 
@@ -307,6 +352,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
     const cancelMobileResizeCapture = () => {
       const capture = mobileResizeCaptureRef.current;
       if (capture) {
+        acknowledgeOutput(capture.socket, capture.byteLength);
         clearMobileResizeTimers(capture);
         mobileResizeCaptureRef.current = null;
       }
@@ -338,6 +384,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       }
       atomicMobileResizeCommitsRef.current += 1;
       terminal.write(bytes, () => {
+        acknowledgeOutput(capture.socket, bytes.byteLength);
         if (activeRef.current) {
           syncTextareaToCursor(terminal);
         }
@@ -399,6 +446,10 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       }
       capture.chunks.push(bytes);
       capture.byteLength += bytes.byteLength;
+      if (capture.byteLength >= 256 * 1024) {
+        commitMobileResizeCapture(capture);
+        return true;
+      }
       scheduleMobileResizeCommit(capture);
       return true;
     };
@@ -407,15 +458,27 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       if (!activeRef.current) {
         return;
       }
-      const terminal = terminalRef.current;
-      const fitAddon = fitAddonRef.current;
-      const container = containerRef.current;
-      if (!terminal || !fitAddon || !container || container.clientHeight < 1) {
-        return;
-      }
-
       try {
-        fitAddon.fit();
+        const terminal = terminalRef.current;
+        const fitAddon = fitAddonRef.current;
+        const container = containerRef.current;
+        if (!terminal || !fitAddon || !container || container.clientHeight < 1) {
+          return;
+        }
+        const proposed = fitAddon.proposeDimensions();
+        if (!proposed || !Number.isFinite(proposed.cols) || !Number.isFinite(proposed.rows)) return;
+        const size = terminalDimensions(proposed.cols, proposed.rows);
+        if (size.cols === proposed.cols && size.rows === proposed.rows) {
+          // Keep FitAddon's renderer invalidation when revealing a cached view.
+          fitAddon.fit();
+        } else {
+          if (terminal.cols !== size.cols || terminal.rows !== size.rows) {
+            terminal.resize(size.cols, size.rows);
+          }
+          // Revealing a retained clamped view still needs a renderer refresh,
+          // even when its bounded dimensions have not changed.
+          terminal.refresh(0, terminal.rows - 1);
+        }
         lastFitHeightRef.current = container.clientHeight;
         syncTextareaToCursor(terminal);
         const socket = socketRef.current;
@@ -456,6 +519,10 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       } catch {
         // A zero-sized element during mobile viewport animation is harmless;
         // the trailing fit retries after the resize burst settles.
+      } finally {
+        // A skipped or failed trailing fit must finish the edge request too,
+        // so an unrelated later resize cannot revive a stale Top/Live intent.
+        settleScrollBoundary();
       }
     };
 
@@ -572,6 +639,13 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
 
       terminalRef.current = terminal;
       fitAddonRef.current = fitAddon;
+
+      // A newer manual interaction cancels an edge request still waiting on
+      // layout. Never pull a user back to Live after they start scrolling up.
+      const scrollIntentEvents = ["wheel", "pointerdown", "touchstart", "keydown"];
+      for (const name of scrollIntentEvents) {
+        container.addEventListener(name, cancelScrollBoundary, { capture: true, passive: true });
+      }
 
       let mobileScrollbarController:
         | MobileScrollbarVisibilityController
@@ -704,6 +778,10 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
       // it from an open settings or peer dialog.
 
       return () => {
+        cancelScrollBoundary();
+        for (const name of scrollIntentEvents) {
+          container.removeEventListener(name, cancelScrollBoundary, true);
+        }
         for (const name of inputEvents) {
           container.removeEventListener(name, blockInactiveInput, true);
         }
@@ -740,6 +818,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         return;
       }
       terminalRef.current?.blur();
+      cancelScrollBoundary();
       if (fitFrameRef.current !== null) {
         window.cancelAnimationFrame(fitFrameRef.current);
         fitFrameRef.current = null;
@@ -808,13 +887,16 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
         const terminal = terminalRef.current;
         if (!terminal) return;
         while (replay.byteLength > 0) {
-          terminal.write(takeReplayBatch(replay));
+          const bytes = takeReplayBatch(replay);
+          const socket = activeSocket;
+          terminal.write(bytes, () => acknowledgeOutput(socket, bytes.byteLength));
         }
         terminal.write(new Uint8Array(), () => revealRestoredTerminal(revision));
       };
 
       const cancelReplay = () => {
         replayRevision += 1;
+        acknowledgeOutput(activeSocket, replayRef.current?.byteLength ?? 0);
         replayRef.current = null;
         if (!disposed) {
           setIsRestoring(false);
@@ -895,16 +977,36 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
           return;
         }
 
-        const nextSocket = new WebSocket(websocketUrl(token, terminalId));
+        const url = new URL(websocketUrl(token, terminalId));
+        url.searchParams.set("flowControl", "1");
+        const nextSocket = new WebSocket(url);
         activeSocket = nextSocket;
         nextSocket.binaryType = "arraybuffer";
         socketRef.current = nextSocket;
+        const heartbeat = createHeartbeat(Date.now());
+        const disconnected = () => {
+          if (disposed || nextSocket !== socketRef.current) return;
+          clearSocketTimers();
+          cancelReplay();
+          cancelMobileResizeCapture();
+          removeFreezeFrame();
+          socketRef.current = null;
+          lastSentSizeRef.current = null;
+          callbackRef.current.onConnectionStatus("disconnected");
+          scheduleReconnect();
+        };
+        heartbeatTimer = window.setTimeout(() => {
+          nextSocket.close(1000, "connection timeout");
+          disconnected();
+        }, 15_000);
 
         nextSocket.onopen = () => {
           if (disposed || nextSocket !== socketRef.current) {
             return;
           }
           attempt = 0;
+          clearSocketTimers();
+          heartbeat.received(Date.now());
           lastSentSizeRef.current = null;
           cancelMobileResizeCapture();
           removeFreezeFrame();
@@ -917,6 +1019,11 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
               nextSocket === socketRef.current &&
               nextSocket.readyState === WebSocket.OPEN
             ) {
+              if (heartbeat.expired(Date.now(), document.visibilityState === "visible")) {
+                nextSocket.close(1000, "heartbeat timeout");
+                disconnected();
+                return;
+              }
               nextSocket.send(encodeControlMessage({ type: "ping" }));
             }
           }, 20_000);
@@ -926,15 +1033,19 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
           if (disposed || nextSocket !== socketRef.current) {
             return;
           }
+          heartbeat.received(Date.now());
           if (typeof event.data !== "string") {
-            if (!replayMatchesGeneration) return;
             const bytes = new Uint8Array(event.data);
+            if (!replayMatchesGeneration) {
+              acknowledgeOutput(nextSocket, bytes.byteLength);
+              return;
+            }
             const replay = replayRef.current;
             if (replay) {
               replay.chunks.push(bytes);
               replay.byteLength += bytes.byteLength;
             } else if (!captureMobileResizeOutput(nextSocket, bytes)) {
-              terminalRef.current?.write(bytes);
+              terminalRef.current?.write(bytes, () => acknowledgeOutput(nextSocket, bytes.byteLength));
             }
             return;
           }
@@ -946,6 +1057,9 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
           }
 
           switch (message.type) {
+            case "flow_control":
+              flowControlledSocketsRef.current.add(nextSocket);
+              break;
             case "session": {
               const nextSession = normalizeSessionSnapshot(
                 message.session,
@@ -961,6 +1075,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
               break;
             }
             case "replay_start": {
+              acknowledgeOutput(nextSocket, replayRef.current?.byteLength ?? 0);
               replayRevision += 1;
               replayCountRef.current += 1;
               cancelMobileResizeCapture();
@@ -1016,19 +1131,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(
           // onclose performs the state transition and retry scheduling.
         };
 
-        nextSocket.onclose = () => {
-          if (disposed || nextSocket !== socketRef.current) {
-            return;
-          }
-          clearSocketTimers();
-          cancelReplay();
-          cancelMobileResizeCapture();
-          removeFreezeFrame();
-          socketRef.current = null;
-          lastSentSizeRef.current = null;
-          callbackRef.current.onConnectionStatus("disconnected");
-          scheduleReconnect();
-        };
+        nextSocket.onclose = disconnected;
       };
 
       // A cached authentication failure must not make a tab permanently dead.

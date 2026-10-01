@@ -109,6 +109,14 @@ class SyntheticPeers:
         page.route("**/api/**", self.http)
         page.route_web_socket(lambda url: urlsplit(url).path == "/ws", self.connect)
 
+    def detach_close_handlers(self) -> None:
+        # Playwright 1.62 emits a close without code/reason when a document goes
+        # away, but its Python callback dispatcher requires both fields. Stop
+        # observing fixture sockets before intentional reload/teardown only;
+        # application-driven closes remain covered by the assertions above it.
+        for connection in self.connections:
+            connection["socket"].on_close(None)
+
     def http(self, route: Route) -> None:
         path = urlsplit(route.request.url).path
         if path == "/api/sessions":
@@ -140,13 +148,19 @@ class SyntheticPeers:
             "id": terminal_id, "socket": socket, "closed": False, "sent": [],
         }
         self.connections.append(connection)
-        socket.on_message(lambda data: connection["sent"].append(data))
+        def receive(data: str | bytes) -> None:
+            connection["sent"].append(data)
+            if isinstance(data, str) and json.loads(data).get("type") == "ping":
+                socket.send(json.dumps({"type": "pong"}))
+
+        socket.on_message(receive)
         def close_connection(code: int | None, reason: str | None) -> None:
             connection["closed"] = True
             socket.close(code=code or 1000, reason=reason or "")
 
         socket.on_close(close_connection)
         # No connect_to_server call: all bytes and all endpoints are synthetic.
+        socket.send(json.dumps({"type": "flow_control", "windowBytes": 4 * 1024 * 1024}))
         socket.send(json.dumps({"type": "session", "session": snapshot}))
         socket.send(json.dumps({"type": "replay_start", "sessionId": snapshot["sessionId"]}))
         history = "".join(f"history {line:04d}\r\n" for line in range(350))
@@ -217,14 +231,14 @@ def wait_for_terminal_render(page: Page) -> None:
       requestAnimationFrame(() => requestAnimationFrame(resolve)), 100))""")
 
 
-def select(page: Page, index: int) -> None:
+def select(page: Page, index: int, expected_text: str = "history") -> None:
     page.locator(".session-tab").nth(index).click()
     page.locator(f'{ACTIVE_PANE}[data-terminal-id="{session(index)["terminalId"]}"]').wait_for()
     page.locator(".status--connected:visible").wait_for()
     page.locator(f"{ACTIVE_PANE} .terminal-restore-status").wait_for(state="detached")
     page.wait_for_function(
-        """() => document.querySelector('.terminal-pane:not([hidden]) .xterm-rows')
-          ?.textContent?.includes('history')"""
+        """expected => document.querySelector('.terminal-pane:not([hidden]) .xterm-rows')
+          ?.textContent?.includes(expected)""", arg=expected_text,
     )
 
 
@@ -254,6 +268,7 @@ def visible_history(page: Page) -> str:
 
 def run_desktop(browser: Browser, url: str) -> None:
     context = browser.new_context(viewport={"width": 1280, "height": 720})
+    peers: SyntheticPeers | None = None
     try:
         page = context.new_page()
         failures: list[str] = []
@@ -379,6 +394,7 @@ def run_desktop(browser: Browser, url: str) -> None:
         assert not view_is_preserved(page)
 
         # The opt-out survives a page reload; enabling again retains views.
+        peers.detach_close_handlers()
         page.reload()
         select(page, 1)
         open_settings(page)
@@ -524,12 +540,15 @@ def run_desktop(browser: Browser, url: str) -> None:
             print(json.dumps({"syntheticTerminalSamples": [sample["terminal"] for sample in samples]}))
         raise
     finally:
+        if peers is not None:
+            peers.detach_close_handlers()
         context.close()
 
 
 def run_attach_recovery(browser: Browser, url: str) -> None:
     for status, evict in [(401, False), (429, False), (429, True)]:
         context = browser.new_context(viewport={"width": 1280, "height": 720})
+        peers: SyntheticPeers | None = None
         try:
             page = context.new_page()
             page.clock.install()
@@ -598,6 +617,8 @@ def run_attach_recovery(browser: Browser, url: str) -> None:
                 assert view_is_preserved(page)
             assert not failures, failures
         finally:
+            if peers is not None:
+                peers.detach_close_handlers()
             context.close()
 
 
@@ -606,6 +627,7 @@ def run_mobile(browser: Browser, url: str) -> None:
         viewport={"width": 390, "height": 740}, is_mobile=True, has_touch=True,
         user_agent="Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/150.0.0.0 Mobile Safari/537.36",
     )
+    peers: SyntheticPeers | None = None
     try:
         page = context.new_page()
         peers = SyntheticPeers(page)
@@ -683,6 +705,8 @@ def run_mobile(browser: Browser, url: str) -> None:
         assert b"".join(frame for frame in peers.frames(0) if isinstance(frame, bytes)) == b"go\r"
         assert not any(isinstance(frame, bytes) for frame in peers.frames(1))
     finally:
+        if peers is not None:
+            peers.detach_close_handlers()
         context.close()
 
 
@@ -771,6 +795,7 @@ def run_peer_ui(browser: Browser, url: str, mobile: bool) -> None:
         viewport={"width": 390 if mobile else 1280, "height": 740},
         is_mobile=mobile, has_touch=mobile,
     )
+    peers: SyntheticPeers | None = None
     try:
         page = context.new_page()
         failures: list[str] = []
@@ -839,6 +864,8 @@ def run_peer_ui(browser: Browser, url: str, mobile: bool) -> None:
         assert peers.discarded_turn == thread["currentTurn"]["id"]
         assert not failures, failures
     finally:
+        if peers is not None:
+            peers.detach_close_handlers()
         context.close()
 
 
@@ -910,6 +937,7 @@ def run_mobile_layout(browser: Browser, url: str) -> None:
             viewport={"width": 360, "height": 639},
             is_mobile=True, has_touch=True,
         )
+        peers: SyntheticPeers | None = None
         try:
             page = context.new_page()
             failures: list[str] = []
@@ -1015,7 +1043,216 @@ def run_mobile_layout(browser: Browser, url: str) -> None:
             assert peers.created == ["agy"]
             assert not failures, failures
         finally:
+            if peers is not None:
+                peers.detach_close_handlers()
             context.close()
+
+
+def run_scroll_boundary_during_fit(browser: Browser, url: str) -> None:
+    context = browser.new_context(viewport={"width": 1280, "height": 720})
+    peers: SyntheticPeers | None = None
+    try:
+        page = context.new_page()
+        peers = SyntheticPeers(page)
+        failures: list[str] = []
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        page.goto(url)
+        select(page, 0)
+        wait_for_terminal_render(page)
+        page.get_by_title("Go to the oldest available terminal history").click()
+        wait_for_terminal_render(page)
+        select(page, 1)
+        peers.frames(0).clear()
+        payload = ("\r\n" + ("X" * 110 + "\r\n") * 80 + "FIT-LIVE-END").encode()
+        peers.connection(0)["socket"].send(payload)
+        wait_until(page, lambda: sum(
+            json.loads(frame).get("bytes", 0) for frame in peers.frames(0)
+            if isinstance(frame, str) and json.loads(frame).get("type") == "output_ack"
+        ) >= len(payload))
+        page.clock.install()
+        page.clock.pause_at(page.evaluate("Date.now()") + 100)
+        peers.frames(0).clear()
+        page.set_viewport_size({"width": 800, "height": 1000})
+        # Reveal and click Live before any queued animation frame or trailing
+        # fit can run. Native DOM clicks avoid Playwright's frame-based waits.
+        page.evaluate("""async () => {
+          document.querySelectorAll('.session-tab')[0].click();
+          await Promise.resolve();
+          document.querySelector('[title="Return to the live terminal output"]').click();
+        }""")
+        assert page.locator(ACTIVE_PANE).get_attribute("data-terminal-id") == session(0)["terminalId"]
+        assert not any(isinstance(frame, str) and '"resize"' in frame for frame in peers.frames(0))
+        page.clock.run_for(600)
+        assert "FIT-LIVE-END" in visible_history(page), "Live was lost during deferred fit/reflow"
+        assert any(isinstance(frame, str) and '"resize"' in frame for frame in peers.frames(0))
+
+        # Also click Live in the resize notification itself: the terminal has
+        # reflowed, but xterm's viewport render callback has not run yet.
+        page.evaluate("""() => {
+          window.syntheticLiveOnResize = true;
+          const send = WebSocket.prototype.send;
+          WebSocket.prototype.send = function(data) {
+            send.call(this, data);
+            if (window.syntheticLiveOnResize && typeof data === 'string'
+                && JSON.parse(data).type === 'resize') {
+              window.syntheticLiveOnResize = false;
+              document.querySelector('[title="Return to the live terminal output"]').click();
+            }
+          };
+        }""")
+        page.set_viewport_size({"width": 380, "height": 1050})
+        for _ in range(10):
+            page.clock.run_for(200)
+            page.wait_for_timeout(20)
+            if page.evaluate("window.syntheticLiveOnResize === false"):
+                break
+        page.clock.run_for(600)
+        assert page.evaluate("window.syntheticLiveOnResize === false"), "Resize barrier did not run"
+        assert "FIT-LIVE-END" in visible_history(page), "Live used stale viewport dimensions after reflow"
+
+        # A newer manual scroll must cancel the pending Live intent.
+        page.set_viewport_size({"width": 380, "height": 1100})
+        page.get_by_title("Return to the live terminal output").evaluate("e => e.click()")
+        page.locator(ACTIVE_PANE).evaluate("""e => {
+          window.syntheticManualScroll = false;
+          e.addEventListener('wheel', () => { window.syntheticManualScroll = true; }, {once: true, capture: true});
+        }""")
+        box = page.locator(f"{ACTIVE_PANE} .terminal-view").bounding_box()
+        assert box is not None
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.wheel(0, -1200)
+        wait_until(page, lambda: page.evaluate("window.syntheticManualScroll"))
+        page.clock.run_for(600)
+        assert "FIT-LIVE-END" not in visible_history(page), "Pending Live overrode manual scrolling"
+        page.get_by_title("Go to the oldest available terminal history").evaluate("e => e.click()")
+        page.clock.run_for(200)
+        assert "history 0000" in visible_history(page)
+        assert not failures, failures
+    finally:
+        if peers is not None:
+            peers.detach_close_handlers()
+        context.close()
+
+
+def run_scroll_boundary_after_skipped_fit(browser: Browser, url: str) -> None:
+    context = browser.new_context(viewport={"width": 1280, "height": 720})
+    peers: SyntheticPeers | None = None
+    try:
+        page = context.new_page()
+        page.add_init_script("""(() => {
+          const Observer = window.ResizeObserver;
+          window.ResizeObserver = class extends Observer {
+            constructor(callback) { super(callback); this.callback = callback; }
+            observe(target, options) {
+              super.observe(target, options);
+              if (target.classList.contains('terminal-view')) {
+                window.syntheticRequestFit = () => this.callback([], this);
+              }
+            }
+          };
+        })()""")
+        peers = SyntheticPeers(page)
+        failures: list[str] = []
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        page.goto(url)
+        select(page, 0)
+        wait_for_terminal_render(page)
+        page.clock.install()
+        page.clock.pause_at(page.evaluate("Date.now()") + 200)
+        page.evaluate("""() => {
+          const view = document.querySelector('.terminal-pane:not([hidden]) .terminal-view');
+          window.syntheticZeroHeightReads = 0;
+          Object.defineProperty(view, 'clientHeight', {configurable: true, get() {
+            window.syntheticZeroHeightReads++;
+            return 0;
+          }});
+          window.syntheticRequestFit();
+          document.querySelector('[title="Go to the oldest available terminal history"]').click();
+        }""")
+        page.clock.run_for(300)
+        assert page.evaluate("window.syntheticZeroHeightReads >= 3"), "Trailing zero-height fit was not exercised"
+        assert "history 0000" in visible_history(page)
+        page.evaluate("""() => {
+          delete document.querySelector('.terminal-pane:not([hidden]) .terminal-view').clientHeight;
+        }""")
+
+        # A terminal reset followed by fresh output moves the viewport
+        # without user input that would cancel a stale Top intent itself.
+        peers.frames(0).clear()
+        payload = ("\x1bc" + "fresh output\r\n" * 100 + "NEW-OUTPUT-END").encode()
+        peers.connection(0)["socket"].send(payload)
+        for _ in range(20):
+            page.clock.run_for(50)
+            page.wait_for_timeout(20)
+            if any(isinstance(frame, str) and json.loads(frame).get("type") == "output_ack"
+                   for frame in peers.frames(0)):
+                break
+        page.clock.run_for(200)
+        assert "NEW-OUTPUT-END" in visible_history(page), "Synthetic output did not move the viewport"
+        page.evaluate("window.syntheticRequestFit()")
+        page.clock.run_for(400)
+        assert "NEW-OUTPUT-END" in visible_history(page), "A later fit revived the stale scroll intent"
+        assert not failures, failures
+    finally:
+        if peers is not None:
+            peers.detach_close_handlers()
+        context.close()
+
+
+def run_output_receipts(browser: Browser, url: str) -> None:
+    context = browser.new_context(viewport={"width": 1100, "height": 700})
+    peers: SyntheticPeers | None = None
+    try:
+        page = context.new_page()
+        peers = SyntheticPeers(page)
+        failures: list[str] = []
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        page.goto(url)
+        select(page, 0)
+
+        def acknowledged() -> int:
+            return sum(json.loads(frame).get("bytes", 0) for frame in peers.frames(0)
+                       if isinstance(frame, str) and json.loads(frame).get("type") == "output_ack")
+
+        wait_until(page, lambda: acknowledged() > 0)
+        for hidden in [False, True]:
+            if hidden:
+                select(page, 1)
+            before = acknowledged()
+            payload = b"SYNTHETIC-FLOW\r\n" * 20_000
+            peers.connection(0)["socket"].send(payload)
+            wait_until(page, lambda: acknowledged() == before + len(payload))
+        # A hidden view can already have its maximum width when it is revealed.
+        # No resize occurs on that switch, but the renderer must still refresh.
+        page.set_viewport_size({"width": 6000, "height": 700})
+        select(page, 0, "SYNTHETIC-FLOW")
+        wait_until(page, lambda: any(
+            isinstance(frame, str) and json.loads(frame).get("type") == "resize"
+            and json.loads(frame).get("cols") == 500 for frame in peers.frames(0)
+        ))
+        select(page, 1)
+        before = acknowledged()
+        payload = b"\x1b[2J\x1b[HCLAMPED-VIEW-UPDATE"
+        peers.connection(0)["socket"].send(payload)
+        wait_until(page, lambda: acknowledged() == before + len(payload))
+        select(page, 0, "CLAMPED-VIEW-UPDATE")
+        page.wait_for_function("""() => document.querySelector(
+            '.terminal-pane:not([hidden]) .xterm-rows'
+        )?.textContent.includes('CLAMPED-VIEW-UPDATE')""")
+        page.set_viewport_size({"width": 180, "height": 210})
+        page.wait_for_timeout(600)
+        for connection in peers.connections:
+            for frame in connection["sent"]:
+                if isinstance(frame, str):
+                    control = json.loads(frame)
+                    if control.get("type") == "resize":
+                        assert 20 <= control["cols"] <= 500
+                        assert 5 <= control["rows"] <= 300
+        assert not failures, failures
+    finally:
+        if peers is not None:
+            peers.detach_close_handlers()
+        context.close()
 
 
 def main() -> int:
@@ -1038,6 +1275,9 @@ def main() -> int:
             browser = playwright.chromium.launch(executable_path=str(args.chrome), headless=True)
             try:
                 run_desktop(browser, url)
+                run_scroll_boundary_during_fit(browser, url)
+                run_scroll_boundary_after_skipped_fit(browser, url)
+                run_output_receipts(browser, url)
                 run_attach_recovery(browser, url)
                 run_mobile(browser, url)
                 run_peer_ui(browser, url, mobile=False)

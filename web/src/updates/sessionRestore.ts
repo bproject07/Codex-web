@@ -1,4 +1,5 @@
 import {
+  ApiError,
   createSession,
   type AgentKind,
   type SessionSnapshot,
@@ -57,10 +58,13 @@ export interface RestoreSessionTabsOptions {
   serverVersion: string | null;
   sessions: SessionSnapshot[];
   storage?: SessionRestoreStorage | null;
+  signal?: AbortSignal;
   create?: (
     token: string,
     agent: AgentKind,
     directoryId?: string | null,
+    restoreRequestId?: string,
+    signal?: AbortSignal,
   ) => Promise<SessionSnapshot>;
 }
 
@@ -149,6 +153,7 @@ export async function restoreSessionTabs({
   sessions,
   storage,
   create = createSession,
+  signal,
 }: RestoreSessionTabsOptions): Promise<RestoreSessionTabsResult> {
   const resolvedStorage = resolveStorage(storage);
   const plan = readPlan(resolvedStorage);
@@ -181,6 +186,7 @@ export async function restoreSessionTabs({
       : undefined;
 
   for (const entry of plan.sessions) {
+    if (signal?.aborted) return { sessions: nextSessions, preferredTerminalId };
     const mappedTerminalId = restored.get(entry.sourceTerminalId);
     let candidate = mappedTerminalId
       ? nextSessions.find(
@@ -192,9 +198,30 @@ export async function restoreSessionTabs({
 
     if (!candidate) {
       try {
-        candidate = await create(token, entry.agent, entry.directoryId);
-        nextSessions.push(candidate);
-      } catch {
+        candidate = await create(token, entry.agent, entry.directoryId, entry.sourceTerminalId, signal);
+        if (!nextSessions.some((session) => session.terminalId === candidate?.terminalId)) {
+          nextSessions.push(candidate);
+        }
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 409 && error.code === "restore_deleted") {
+          restored.delete(entry.sourceTerminalId);
+          // Respect deletion of an already-created tab. Other conflicts (such
+          // as capacity) must retain their entries for a later retry.
+          plan.sessions = plan.sessions.filter((item) => item.sourceTerminalId !== entry.sourceTerminalId);
+          plan.restored = plan.restored.filter((item) => item.sourceTerminalId !== entry.sourceTerminalId);
+          if (plan.selectedTerminalId === entry.sourceTerminalId) {
+            plan.selectedTerminalId = plan.primaryTerminalId;
+            preferredTerminalId = primary.terminalId;
+          }
+          if (plan.sessions.length > 0 && !writePlan(resolvedStorage, plan)) {
+            return {
+              sessions: nextSessions,
+              preferredTerminalId,
+              error: "The browser could not save progress while restoring terminal tabs.",
+            };
+          }
+          continue;
+        }
         return {
           sessions: nextSessions,
           preferredTerminalId,

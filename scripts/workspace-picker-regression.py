@@ -481,7 +481,10 @@ def wait_for_application(page: Page, port: int, token: str) -> None:
         f"http://127.0.0.1:{port}/?token={token}",
         wait_until="domcontentloaded",
     )
-    page.locator(".status--connected").wait_for(state="visible", timeout=20_000)
+    page.locator(".status--connected:visible").wait_for(state="visible", timeout=20_000)
+    disclosure = page.locator(".mobile-header-toggle")
+    if disclosure.is_visible() and disclosure.get_attribute("aria-expanded") == "false":
+        disclosure.click()
     page.locator(".header-menu-trigger").wait_for(state="visible")
 
 
@@ -654,7 +657,7 @@ def wait_for_selected_project(page: Page, expected: Path) -> None:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         if paths_equal(selected_project_path(page).strip(), expected):
-            page.locator(".status--connected").wait_for(state="visible", timeout=20_000)
+            page.locator(".status--connected:visible").wait_for(state="visible", timeout=20_000)
             return
         page.wait_for_timeout(50)
     raise AssertionError(
@@ -1079,6 +1082,21 @@ def stop_owned_server(process: subprocess.Popen[bytes]) -> None:
             pass
 
 
+class WorkspaceFixtureDirectory(tempfile.TemporaryDirectory):
+    def cleanup(self) -> None:
+        # Windows can release ConPTY descendant directory handles shortly after
+        # the owned server exits. Retry cleanup, and still fail if handles remain.
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                super().cleanup()
+                return
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+
+
 def main() -> int:
     args = parse_args()
     args.server = args.server.resolve()
@@ -1093,7 +1111,7 @@ def main() -> int:
     assert_isolated_port(args.port)
 
     token = secrets.token_urlsafe(32)
-    with tempfile.TemporaryDirectory(prefix="codex-web-workspaces-") as temp:
+    with WorkspaceFixtureDirectory(prefix="codex-web-workspaces-") as temp:
         temporary_root = Path(temp)
         project = temporary_root / "default-project"
         selected = temporary_root / "projects" / "selected project"

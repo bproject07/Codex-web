@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     ffi::OsString,
     fmt,
+    hash::{Hash, Hasher},
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
@@ -110,6 +111,12 @@ pub struct PeerThread {
     pub current_turn: PeerTurn,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+#[derive(Serialize)]
+pub struct PeerThreadPoll {
+    revision: String,
+    threads: Option<Vec<PeerThread>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,6 +501,44 @@ impl PeerBroker {
                 .then_with(|| left.id.as_bytes().cmp(right.id.as_bytes()))
         });
         threads
+    }
+
+    pub fn poll_threads(&self, known_revision: &str) -> PeerThreadPoll {
+        let state = lock(&self.inner.state);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        // Hash only the visible metadata. Artifacts are immutable within their
+        // revision, so polling unchanged state neither clones nor hashes them.
+        for thread in state.threads.values() {
+            thread.id.hash(&mut hash);
+            thread.source_terminal_id.hash(&mut hash);
+            thread.reviewer_terminal_id.hash(&mut hash);
+            std::mem::discriminant(&thread.target_agent).hash(&mut hash);
+            std::mem::discriminant(&thread.status).hash(&mut hash);
+            thread.created_at.hash(&mut hash);
+            thread.updated_at.hash(&mut hash);
+            let turn = thread.turns.last().expect("thread has a turn");
+            turn.id.hash(&mut hash);
+            turn.sequence.hash(&mut hash);
+            std::mem::discriminant(&turn.action).hash(&mut hash);
+            std::mem::discriminant(&turn.status).hash(&mut hash);
+            turn.instruction.hash(&mut hash);
+            turn.handoff_revision.hash(&mut hash);
+            turn.handoff.is_some().hash(&mut hash);
+            turn.response.is_some().hash(&mut hash);
+            turn.error.hash(&mut hash);
+        }
+        let revision = format!("{:016x}", hash.finish());
+        let threads = (revision != known_revision).then(|| {
+            let mut threads: Vec<_> = state.threads.values().map(thread_view).collect();
+            threads.sort_by(|left, right| {
+                right
+                    .updated_at
+                    .cmp(&left.updated_at)
+                    .then_with(|| left.id.as_bytes().cmp(right.id.as_bytes()))
+            });
+            threads
+        });
+        PeerThreadPoll { revision, threads }
     }
 
     pub fn get_thread(&self, thread_id: Uuid) -> std::result::Result<PeerThread, PeerError> {
@@ -1651,6 +1696,36 @@ mod tests {
             .expect("submit response");
 
         (broker, source_capability, ready)
+    }
+
+    #[test]
+    fn polling_omits_unchanged_artifacts_and_notices_same_millisecond_changes() {
+        let (broker, _, thread) = response_ready_review();
+        let first = broker.poll_threads("");
+        assert_eq!(first.threads.as_ref().unwrap().len(), 1);
+        assert!(broker.poll_threads(&first.revision).threads.is_none());
+        {
+            let mut state = lock(&broker.inner.state);
+            let record = state.threads.get_mut(&thread.id).unwrap();
+            let turn = record.turns.last_mut().unwrap();
+            turn.handoff = Some("Revised handoff".into());
+            turn.handoff_revision += 1;
+            // Deliberately leave updated_at unchanged.
+        }
+        let revised = broker.poll_threads(&first.revision);
+        assert_ne!(revised.revision, first.revision);
+        assert_eq!(
+            revised.threads.unwrap()[0].current_turn.handoff.as_deref(),
+            Some("Revised handoff")
+        );
+        broker.close_thread(thread.id).unwrap();
+        assert!(
+            broker
+                .poll_threads(&revised.revision)
+                .threads
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

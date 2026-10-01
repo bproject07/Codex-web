@@ -29,6 +29,9 @@ pub enum RegistryError {
     PeerSessionManaged,
     PeerSessionsActive,
     ShuttingDown,
+    RestoreConflict,
+    RestoreDeleted,
+    RestoreLimitReached,
     OperationFailed(anyhow::Error),
 }
 
@@ -64,6 +67,15 @@ impl fmt::Display for RegistryError {
                 )
             }
             Self::ShuttingDown => write!(formatter, "the server is shutting down"),
+            Self::RestoreConflict => write!(
+                formatter,
+                "the restore request was already used with different parameters"
+            ),
+            Self::RestoreDeleted => write!(formatter, "the restored terminal was deleted"),
+            Self::RestoreLimitReached => write!(
+                formatter,
+                "the restore request history is full for this server generation"
+            ),
             Self::OperationFailed(error) => write!(formatter, "{error}"),
         }
     }
@@ -90,6 +102,17 @@ struct RegistryInner {
     peer_broker: Option<PeerBroker>,
     state: Mutex<RegistryState>,
     shutting_down: AtomicBool,
+    restores: tokio::sync::Mutex<HashMap<Uuid, RestoredSession>>,
+}
+
+const MAX_RESTORE_REQUESTS: usize = 4096;
+
+struct RestoredSession {
+    agent: Option<AgentKind>,
+    project_dir: Option<PathBuf>,
+    terminal_id: Uuid,
+    completed: tokio::sync::watch::Receiver<bool>,
+    deletion_requested: bool,
 }
 
 struct RegistryState {
@@ -221,6 +244,7 @@ impl SessionRegistry {
                     lifecycle_mutations: HashMap::new(),
                 }),
                 shutting_down: AtomicBool::new(false),
+                restores: tokio::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -274,6 +298,81 @@ impl SessionRegistry {
     ) -> Result<SessionSnapshot, RegistryError> {
         let session = self.reserve_session_in(requested_agent, project_dir)?;
         self.start_reserved_session(session).await
+    }
+
+    pub async fn restore_in(
+        &self,
+        request_id: Uuid,
+        requested_agent: Option<AgentKind>,
+        project_dir: Option<PathBuf>,
+    ) -> Result<SessionSnapshot, RegistryError> {
+        let registry = self.clone();
+        // Own the entire lookup/start/commit transaction beyond an HTTP disconnect.
+        tokio::spawn(async move {
+            let mut restores = registry.inner.restores.lock().await;
+            if let Some(restored) = restores.get(&request_id) {
+                if restored.agent != requested_agent || restored.project_dir != project_dir {
+                    return Err(RegistryError::RestoreConflict);
+                }
+                let terminal_id = restored.terminal_id;
+                let mut completed = restored.completed.clone();
+                drop(restores);
+                // Retries wait only for their own reservation. An unrelated
+                // slow PTY start must not hold the restore table locked.
+                completed
+                    .wait_for(|done| *done)
+                    .await
+                    .map_err(|error| RegistryError::OperationFailed(anyhow::Error::new(error)))?;
+                let restores = registry.inner.restores.lock().await;
+                if restores
+                    .get(&request_id)
+                    .is_none_or(|entry| entry.terminal_id != terminal_id)
+                {
+                    return Err(RegistryError::OperationFailed(anyhow::anyhow!(
+                        "the restore attempt was rolled back; the request may be retried"
+                    )));
+                }
+                return registry
+                    .get(terminal_id)
+                    .map(|session| session.snapshot())
+                    .ok_or(RegistryError::RestoreDeleted);
+            }
+            // Retain tombstones after deletion: eviction would permit duplicate starts.
+            if restores.len() >= MAX_RESTORE_REQUESTS {
+                return Err(RegistryError::RestoreLimitReached);
+            }
+            let session = registry.reserve_session_in(requested_agent, project_dir.clone())?;
+            let terminal_id = session.snapshot().terminal_id;
+            let (completed, completion) = tokio::sync::watch::channel(false);
+            restores.insert(
+                request_id,
+                RestoredSession {
+                    agent: requested_agent,
+                    project_dir,
+                    terminal_id,
+                    completed: completion,
+                    deletion_requested: false,
+                },
+            );
+            drop(restores);
+            let result = registry.start_reserved_session(session).await;
+            if result.is_err() {
+                let mut restores = registry.inner.restores.lock().await;
+                // A user deletion owns a tombstone even if startup also rolls
+                // back. Only a failed start without deletion permits a retry.
+                if restores
+                    .get(&request_id)
+                    .is_some_and(|entry| !entry.deletion_requested)
+                    && registry.get(terminal_id).is_none()
+                {
+                    restores.remove(&request_id);
+                }
+            }
+            completed.send_replace(true);
+            result
+        })
+        .await
+        .map_err(|error| RegistryError::OperationFailed(anyhow::Error::new(error)))?
     }
 
     pub async fn create_peer_in(
@@ -347,9 +446,25 @@ impl SessionRegistry {
                 return Err(RegistryError::PrimaryCannotBeDeleted);
             }
         }
-        let (session, mutation) = self.begin_interactive_lifecycle_mutation(terminal_id)?;
-        self.delete_with_mutation(terminal_id, session, mutation)
-            .await
+        let registry = self.clone();
+        tokio::spawn(async move {
+            let mut restores = registry.inner.restores.lock().await;
+            let (session, mutation) = registry.begin_interactive_lifecycle_mutation(terminal_id)?;
+            // Serialize acceptance of deletion with restore rollback. Do not
+            // hold this table locked while waiting for process termination.
+            if let Some(entry) = restores
+                .values_mut()
+                .find(|entry| entry.terminal_id == terminal_id)
+            {
+                entry.deletion_requested = true;
+            }
+            drop(restores);
+            registry
+                .delete_with_mutation(terminal_id, session, mutation)
+                .await
+        })
+        .await
+        .map_err(|error| RegistryError::OperationFailed(anyhow::Error::new(error)))?
     }
 
     pub(crate) async fn delete_peer(
@@ -384,9 +499,9 @@ impl SessionRegistry {
                 .map_err(RegistryError::OperationFailed)?;
 
             let mut state = lock(&inner.state);
-            if state.sessions.remove(&terminal_id).is_none() {
-                return Err(RegistryError::NotFound);
-            }
+            // Startup rollback may already have removed this exact reservation.
+            // We owned its deletion and have now confirmed process shutdown.
+            state.sessions.remove(&terminal_id);
             Ok(())
         })
         .await
@@ -1280,6 +1395,233 @@ mod tests {
             "PTY output did not contain selected cwd; output={output:?}"
         );
         registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_restore_retries_share_one_pty_and_deleted_ids_stay_reserved() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut config = terminal_config();
+        config.project_dir = dunce::canonicalize(fixture.path()).unwrap();
+        config.command = write_long_running_fixture(fixture.path())
+            .to_string_lossy()
+            .into_owned();
+        let registry = SessionRegistry::new(config);
+        let request = Uuid::new_v4();
+        let (left, right) = tokio::join!(
+            registry.restore_in(request, None, None),
+            registry.restore_in(request, None, None)
+        );
+        let left = left.unwrap();
+        assert_eq!(left.terminal_id, right.unwrap().terminal_id);
+        assert_eq!(registry.session_count(), 2);
+        assert!(matches!(
+            registry
+                .restore_in(request, Some(AgentKind::Claude), None)
+                .await,
+            Err(RegistryError::RestoreConflict)
+        ));
+        registry.delete(left.terminal_id).await.unwrap();
+        assert!(matches!(
+            registry.restore_in(request, None, None).await,
+            Err(RegistryError::RestoreDeleted)
+        ));
+        assert_eq!(registry.session_count(), 1);
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_restore_waiter_keeps_the_reserved_identity() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut config = terminal_config();
+        config.project_dir = dunce::canonicalize(fixture.path()).unwrap();
+        config.command = write_long_running_fixture(fixture.path())
+            .to_string_lossy()
+            .into_owned();
+        let registry = SessionRegistry::new(config);
+        let request = Uuid::new_v4();
+        let owner = registry.clone();
+        let waiter = tokio::spawn(async move { owner.restore_in(request, None, None).await });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while registry.session_count() != 2 {
+            assert!(Instant::now() < deadline, "restore was not reserved");
+            tokio::task::yield_now().await;
+        }
+        let reserved = registry
+            .list()
+            .into_iter()
+            .find(|entry| !entry.is_primary)
+            .unwrap();
+        waiter.abort();
+        let restored = registry.restore_in(request, None, None).await.unwrap();
+        assert_eq!(restored.terminal_id, reserved.terminal_id);
+        assert_eq!(registry.session_count(), 2);
+        registry.shutdown().await;
+    }
+
+    #[test]
+    fn deleting_a_pending_restore_preserves_its_tombstone_even_after_cancellation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for cancel in [false, true] {
+                let registry = SessionRegistry::new(terminal_config());
+                let request = Uuid::new_v4();
+                let (release, gate) = std::sync::mpsc::channel();
+                let (started, ready) = tokio::sync::oneshot::channel();
+                let blocker = tokio::task::spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    let _ = gate.recv_timeout(Duration::from_secs(10));
+                });
+                ready.await.unwrap();
+                let owner = registry.clone();
+                let restore =
+                    tokio::spawn(async move { owner.restore_in(request, None, None).await });
+                let reserved = tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if let Some(entry) =
+                            registry.list().into_iter().find(|entry| !entry.is_primary)
+                        {
+                            break entry.terminal_id;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                let session = registry.get(reserved).unwrap();
+                let owner = registry.clone();
+                let deletion = tokio::spawn(async move { owner.delete(reserved).await });
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !session.is_shutting_down_for_test() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                if cancel {
+                    deletion.abort();
+                }
+                release.send(()).unwrap();
+                blocker.await.unwrap();
+                assert!(restore.await.unwrap().is_err());
+                if !cancel {
+                    deletion.await.unwrap().unwrap();
+                }
+                assert!(matches!(
+                    registry.restore_in(request, None, None).await,
+                    Err(RegistryError::RestoreDeleted)
+                ));
+                assert_eq!(registry.session_count(), 1);
+                registry.shutdown().await;
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn failed_restore_deletion_keeps_the_same_session_retryable() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut config = terminal_config();
+        config.project_dir = dunce::canonicalize(fixture.path()).unwrap();
+        config.command = write_long_running_fixture(fixture.path())
+            .to_string_lossy()
+            .into_owned();
+        let registry = SessionRegistry::new(config);
+        let request = Uuid::new_v4();
+        let restored = registry.restore_in(request, None, None).await.unwrap();
+        registry
+            .get(restored.terminal_id)
+            .unwrap()
+            .fail_next_termination_for_test();
+        assert!(registry.delete(restored.terminal_id).await.is_err());
+        assert_eq!(
+            registry
+                .restore_in(request, None, None)
+                .await
+                .unwrap()
+                .terminal_id,
+            restored.terminal_id
+        );
+        assert_eq!(registry.session_count(), 2);
+        registry.delete(restored.terminal_id).await.unwrap();
+        assert!(matches!(
+            registry.restore_in(request, None, None).await,
+            Err(RegistryError::RestoreDeleted)
+        ));
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_restore_start_without_deletion_releases_the_request() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut config = terminal_config();
+        config.project_dir = dunce::canonicalize(fixture.path()).unwrap();
+        config.command = fixture
+            .path()
+            .join("missing-agent")
+            .to_string_lossy()
+            .into_owned();
+        let registry = SessionRegistry::new(config);
+        let request = Uuid::new_v4();
+        for _ in 0..2 {
+            assert!(matches!(
+                registry.restore_in(request, None, None).await,
+                Err(RegistryError::OperationFailed(_))
+            ));
+            assert_eq!(registry.session_count(), 1);
+            assert!(registry.inner.restores.lock().await.is_empty());
+        }
+        registry.shutdown().await;
+    }
+
+    #[test]
+    fn independent_restore_reserves_while_another_start_is_pending() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fixture = tempfile::tempdir().unwrap();
+            let mut config = terminal_config();
+            config.project_dir = dunce::canonicalize(fixture.path()).unwrap();
+            config.command = write_long_running_fixture(fixture.path())
+                .to_string_lossy()
+                .into_owned();
+            let registry = SessionRegistry::new(config);
+            let (release, gate) = std::sync::mpsc::channel();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = gate.recv_timeout(Duration::from_secs(10));
+            });
+            ready.await.unwrap();
+            let first = registry.clone();
+            let first =
+                tokio::spawn(async move { first.restore_in(Uuid::new_v4(), None, None).await });
+            let second = registry.clone();
+            let second =
+                tokio::spawn(async move { second.restore_in(Uuid::new_v4(), None, None).await });
+            let independently_reserved = tokio::time::timeout(Duration::from_secs(2), async {
+                while registry.session_count() != 3 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_ok();
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            let first = first.await.unwrap();
+            let second = second.await.unwrap();
+            registry.shutdown().await;
+            assert!(
+                independently_reserved,
+                "one pending start blocked an unrelated reservation"
+            );
+            assert_ne!(first.unwrap().terminal_id, second.unwrap().terminal_id);
+        });
     }
 
     #[tokio::test]

@@ -800,6 +800,7 @@ export function App() {
           token,
           serverVersion: health.serverVersion,
           sessions: nextSessions,
+          signal: abortController.signal,
         });
         restoredSessions = restoration.sessions;
         preferredTerminalId = restoration.preferredTerminalId;

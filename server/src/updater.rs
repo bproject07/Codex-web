@@ -654,7 +654,11 @@ impl UpdateManager {
 
     async fn fail_status(&self, error: &anyhow::Error) {
         let mut message = format!("{error:#}");
-        message.truncate(400);
+        let mut end = message.len().min(400);
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
         self.replace_status(UpdateState::Failed, None, Some(message))
             .await;
     }
@@ -1226,6 +1230,23 @@ mod tests {
     use super::*;
     use flate2::{Compression, write::GzEncoder};
     use zip::{ZipWriter, write::SimpleFileOptions};
+
+    #[tokio::test]
+    async fn long_unicode_errors_reach_failed_state_without_panicking() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        let manager =
+            UpdateManager::new(fixture.path().to_path_buf(), UpdatePolicy::Off, tx).unwrap();
+        for suffix in ["я", "🙂", "a"] {
+            let message = format!("x{}", suffix.repeat(500));
+            manager.fail_status(&anyhow::anyhow!(message.clone())).await;
+            let status = manager.inner.status.read().await;
+            assert_eq!(status.state, UpdateState::Failed);
+            let error = status.error.as_deref().unwrap();
+            assert!(error.len() <= 400);
+            assert!(message.starts_with(error));
+        }
+    }
 
     #[test]
     fn staged_version_probe_removes_agent_context_and_peer_secrets() {

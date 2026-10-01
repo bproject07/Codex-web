@@ -117,7 +117,7 @@ session's bounded terminal output buffer before it resumes live output.
   `Recheck` between Codex, Claude, and AGY sessions
 - A fresh dedicated reviewer PTY for every new peer thread; ordinary sessions
   are never selected or reused as reviewers
-- One 16 MiB bounded raw terminal output buffer per session
+- One raw terminal output buffer per session, bounded to 16 MiB and 16,384 chunks
 - Final PTY output remains readable when process exit precedes the last read;
   restarted sessions reject output from the previous generation
 - Up to the newest 2 MiB replayed to each newly attached client
@@ -1026,6 +1026,21 @@ or NUL; an empty label becomes `null`. A new-session body can be
 `{"agent":"claude","directoryId":"..."}`. Empty bodies and bodies with only
 `agent` remain compatible and use the configured default directory. Unknown
 fields, including browser-supplied commands or arguments, are rejected.
+Session creation also accepts an optional UUID `restoreRequestId`. The browser
+uses the original terminal ID when recreating a saved tab after a server restart.
+Repeated requests with that ID and the same agent/directory return the existing
+entry, even after a lost response. A changed request or deletion of that entry
+returns a conflict. Up to 4,096 restore identities, including deletion
+tombstones, are retained per server generation; reaching that limit rejects new
+restore requests rather than evicting identities and risking duplicate processes.
+Restore conflicts have machine-readable codes: `restore_deleted`,
+`restore_conflict`, and `restore_history_full`; session capacity uses
+`session_capacity`. Only `restore_deleted` removes a saved tab from the browser's
+restore plan so the remaining tabs can continue. Other failures retain the plan.
+Deletion accepted during an in-progress restore also retains its tombstone;
+a concurrent startup rollback cannot make that request create another terminal.
+Concurrent retries wait for their own reservation; unrelated PTY starts do not
+hold the restore table locked.
 JSON bodies for session creation, directory list/resolve, and Favorite upsert
 are capped at 256 KiB; larger requests return HTTP 413. New `@cwt` peer
 requests use the same cap so a valid opaque Windows directory ID still fits;
@@ -1085,13 +1100,28 @@ Restart:
 ### Server to browser
 
 - **Binary frame:** unmodified raw bytes read from the PTY
-- **Text frame:** JSON session, replay, pong, or sanitized error event
+- **Text frame:** JSON session, replay, flow-control negotiation, pong, or sanitized error event
 
 On connection the server sends the selected session's snapshot, `replay_start`,
 bounded binary output chunks, and `replay_end`. Output chunks have internal
 monotonic sequence numbers and PTY-generation session IDs; those values are
 used by the backend to prevent replay/live gaps and are not inserted into the
 terminal byte stream.
+
+Clients may request `/ws?...&flowControl=1`. Before the session snapshot, the
+server then sends `{"type":"flow_control","windowBytes":4194304}`. The browser
+acknowledges binary bytes only after xterm processes them, using
+`{"type":"output_ack","bytes":32768}`. The per-connection window bounds queued
+output, including replay. Invalid or excess acknowledgements close that connection.
+Slow clients do not stop the PTY or other clients. If a client falls behind the
+bounded server history, it receives a fresh bounded replay. Older clients that
+omit this query retain the original protocol.
+
+`GET /api/peer/threads?since=` returns `{revision, threads}`. Reusing the revision
+returns `threads: null` when visible state is unchanged, avoiding retransmission
+of handoffs and responses. Revisions are cache validators, not authorization.
+The response is not stored in browser persistent storage or HTTP caches. Omitting
+`since` preserves the existing array response.
 
 ## Terminal behavior
 
@@ -1103,8 +1133,12 @@ xterm.js is configured with:
 - 10,000 lines of client scrollback by default
 - FitAddon resize using `ResizeObserver`
 - debounced PTY resize messages
+- the same bounded dimensions applied to both xterm and the PTY
 - WebLinksAddon
 - exponential reconnect delays of 1, 2, 4, 8, then 15 seconds
+- a 60-second heartbeat deadline while the page is active, with a fresh grace
+  period after browser suspension; HTTP reads time out after 30 seconds and
+  mutations after 90 seconds, without automatically repeating mutations
 - a 60-second retry delay for HTTP 429 attachment responses; HTTP 401 pauses
   automatic attempts, with one retry allowed when switching away and back
   after a 60-second cooldown

@@ -1,6 +1,7 @@
 export type ClientControl =
   | { type: "resize"; cols: number; rows: number }
   | { type: "ping" }
+  | { type: "output_ack"; bytes: number }
   | { type: "restart" };
 
 export type ServerControl =
@@ -11,6 +12,7 @@ export type ServerControl =
   | { type: "replay_start"; sessionId: string | null }
   | { type: "replay_end"; lastSequence: number }
   | { type: "pong" }
+  | { type: "flow_control"; windowBytes: number }
   | { type: "error"; code: string; message: string };
 
 const textEncoder = new TextEncoder();
@@ -35,6 +37,7 @@ export function parseServerControl(value: string): ServerControl | null {
       parsed.type === "replay_start" ||
       parsed.type === "replay_end" ||
       parsed.type === "pong" ||
+      parsed.type === "flow_control" ||
       parsed.type === "error"
     ) {
       return parsed as ServerControl;

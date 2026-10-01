@@ -1,3 +1,4 @@
+import { requestTimeout } from "./requestTimeout";
 import type {
   WorkspaceDirectory,
   WorkspaceDirectoryListing,
@@ -105,12 +106,14 @@ export interface FilesystemRoots {
 export class ApiError extends Error {
   readonly status: number;
   readonly contentType: string;
+  readonly code?: string;
 
-  constructor(status: number, message: string, contentType = "") {
+  constructor(status: number, message: string, contentType = "", code?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.contentType = contentType.toLowerCase();
+    this.code = code;
   }
 }
 
@@ -442,14 +445,18 @@ export async function createSession(
   token: string,
   agent: AgentKind,
   directoryId?: string | null,
+  restoreRequestId?: string,
+  signal?: AbortSignal,
 ): Promise<SessionSnapshot> {
   try {
     const session = await apiRequest<SessionSnapshot>("/api/sessions", token, {
       method: "POST",
+      signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         agent,
         ...(directoryId ? { directoryId } : {}),
+        ...(restoreRequestId ? { restoreRequestId } : {}),
       }),
     });
     return normalizeSessionSnapshot(session, session.terminalId);
@@ -870,6 +877,23 @@ export async function apiRequest<T>(
   token: string,
   init: RequestInit = {},
 ): Promise<T> {
+  const deadline = requestTimeout(init.signal ?? undefined,
+    !init.method || init.method === "GET" ? 30_000 : 90_000);
+  try {
+    return await apiRequestWithoutTimeout<T>(path, token, { ...init, signal: deadline.signal });
+  } catch (error) {
+    if (deadline.signal.aborted) throw deadline.signal.reason;
+    throw error;
+  } finally {
+    deadline.dispose();
+  }
+}
+
+async function apiRequestWithoutTimeout<T>(
+  path: string,
+  token: string,
+  init: RequestInit = {},
+): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
   headers.set("Accept", "application/json");
@@ -883,16 +907,20 @@ export async function apiRequest<T>(
 
   if (!response.ok) {
     let message = `Request failed with HTTP ${response.status}`;
+    let code: string | undefined;
     const contentType = response.headers.get("Content-Type") ?? "";
     try {
-      const body = (await response.json()) as { error?: string };
+      const body = (await response.json()) as { error?: string; code?: unknown };
       if (body.error) {
         message = body.error;
+      }
+      if (typeof body.code === "string" && /^[a-z_]{1,64}$/.test(body.code)) {
+        code = body.code;
       }
     } catch {
       // Keep the status-based message for empty and non-JSON error responses.
     }
-    throw new ApiError(response.status, message, contentType);
+    throw new ApiError(response.status, message, contentType, code);
   }
 
   if (response.status === 204) {

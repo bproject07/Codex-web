@@ -6,6 +6,7 @@ import {
   type SessionSnapshot,
 } from "../api";
 import type { UpdateState } from "./api";
+import { requestTimeout } from "../requestTimeout";
 
 const UPDATE_POLL_STATES: ReadonlySet<UpdateState> = new Set([
   "checking",
@@ -77,37 +78,43 @@ export async function waitForServerVersion({
   readSessions = listSessions,
   wait = waitForDelay,
 }: WaitForServerVersionOptions): Promise<boolean> {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (signal?.aborted) {
-      return false;
-    }
-
-    if (attempt > 0) {
-      try {
-        await wait(intervalMs, signal);
-      } catch {
+  const deadline = requestTimeout(signal, Math.max(1, attempts * intervalMs));
+  signal = deadline.signal;
+  try {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (signal.aborted) {
         return false;
       }
-    }
 
-    try {
-      const health = await readHealth(token, signal);
-      if (health.serverVersion === expectedVersion) {
-        if (!previousPrimaryTerminalId) {
-          return true;
-        }
-        const sessions = await readSessions(token, signal);
-        const primary = sessions.find((session) => session.isPrimary);
-        if (primary && primary.terminalId !== previousPrimaryTerminalId) {
-          return true;
+      if (attempt > 0) {
+        try {
+          await wait(intervalMs, signal);
+        } catch {
+          return false;
         }
       }
-    } catch {
-      // A short connection failure is expected while the server is replaced.
-    }
-  }
 
-  return false;
+      try {
+        const health = await readHealth(token, signal);
+        if (health.serverVersion === expectedVersion) {
+          if (!previousPrimaryTerminalId) {
+            return true;
+          }
+          const sessions = await readSessions(token, signal);
+          const primary = sessions.find((session) => session.isPrimary);
+          if (primary && primary.terminalId !== previousPrimaryTerminalId) {
+            return true;
+          }
+        }
+      } catch {
+        // A short connection failure is expected while the server is replaced.
+      }
+    }
+
+    return false;
+  } finally {
+    deadline.dispose();
+  }
 }
 
 function waitForDelay(

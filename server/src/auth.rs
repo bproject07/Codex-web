@@ -180,10 +180,12 @@ pub fn origin_is_allowed(
     };
 
     if bind_host.is_loopback() {
-        return origin_host.eq_ignore_ascii_case("localhost")
-            || origin_host
-                .parse::<IpAddr>()
-                .is_ok_and(|address| address.is_loopback());
+        return match origin.host() {
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        };
     }
 
     let Some(host_header) = host_header else {
@@ -334,5 +336,27 @@ mod tests {
             Some("terminal.example"),
             bind_host
         ));
+    }
+
+    #[test]
+    fn ipv6_loopback_origin_is_accepted_without_allowing_remote_ipv6() {
+        for bind in ["127.0.0.1", "::1"] {
+            let bind = bind.parse().unwrap();
+            assert!(origin_is_allowed(
+                Some("http://[::1]:8787"),
+                Some("[::1]:8787"),
+                bind
+            ));
+            assert!(!origin_is_allowed(
+                Some("http://[2001:db8::1]:8787"),
+                Some("[::1]:8787"),
+                bind
+            ));
+            assert!(!origin_is_allowed(
+                Some("http://[::1]:8787/other"),
+                Some("[::1]:8787"),
+                bind
+            ));
+        }
     }
 }

@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -11,6 +12,7 @@ import {
   dispatchPeerTurn,
   listPeerThreads,
   returnPeerTurn,
+  type PeerListCache,
 } from "./api";
 import { isPeerWorkPending } from "./actions";
 import type {
@@ -56,6 +58,7 @@ export interface PeerController {
 }
 
 export function usePeerController(token: string): PeerController {
+  const pollCache = useMemo<PeerListCache>(() => ({}), [token]);
   const [threads, setThreads] = useState<PeerThread[]>([]);
   const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(Boolean(token));
@@ -106,7 +109,7 @@ export function usePeerController(token: string): PeerController {
     const epoch = ++requestEpochRef.current;
     setLoading(true);
     try {
-      const next = await listPeerThreads(token);
+      const next = await listPeerThreads(token, undefined, pollCache);
       if (epoch === requestEpochRef.current) {
         replaceThreads(next);
         setReady(true);
@@ -127,7 +130,7 @@ export function usePeerController(token: string): PeerController {
         setLoading(false);
       }
     }
-  }, [clearError, replaceThreads, token]);
+  }, [clearError, replaceThreads, token, pollCache]);
 
   useEffect(() => {
     if (!token) {
@@ -172,7 +175,7 @@ export function usePeerController(token: string): PeerController {
       controller = requestController;
       const epoch = ++requestEpochRef.current;
       try {
-        const next = await listPeerThreads(token, requestController.signal);
+        const next = await listPeerThreads(token, requestController.signal, pollCache);
         if (
           !disposed &&
           !requestController.signal.aborted &&
@@ -240,7 +243,7 @@ export function usePeerController(token: string): PeerController {
       }
       document.removeEventListener("visibilitychange", refreshOnVisibility);
     };
-  }, [clearError, replaceThreads, token]);
+  }, [clearError, replaceThreads, token, pollCache]);
 
   const mutate = useCallback(
     async (

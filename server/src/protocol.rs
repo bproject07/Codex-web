@@ -17,6 +17,7 @@ pub const MAX_WEBSOCKET_MESSAGE_SIZE: usize = 64 * 1024;
 pub enum ClientControl {
     Resize { cols: u16, rows: u16 },
     Ping,
+    OutputAck { bytes: u32 },
     Restart,
 }
 
@@ -35,6 +36,10 @@ pub enum ServerControl {
         last_sequence: u64,
     },
     Pong,
+    FlowControl {
+        #[serde(rename = "windowBytes")]
+        window_bytes: usize,
+    },
     Error {
         code: &'static str,
         message: String,

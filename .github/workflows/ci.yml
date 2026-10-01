@@ -287,6 +287,16 @@ jobs:
             --server ./dist-linux/codex-web \
             --port 8815
 
+      - name: Validate bounded terminal output on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python -B ./scripts/terminal-flow-regression.py --server ./dist/codex-web.exe --port 8824
+
+      - name: Validate bounded terminal output on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: python3 -B ./scripts/terminal-flow-regression.py --server ./dist-linux/codex-web --port 8824
+
       - name: Validate Windows mobile resize
         if: runner.os == 'Windows'
         shell: pwsh

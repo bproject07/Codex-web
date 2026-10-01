@@ -154,8 +154,7 @@ impl DirectoryBrowser {
         while let Some(entry) = reader.next_entry().await.map_err(classify_io_error)? {
             let is_directory = match entry.file_type().await {
                 Ok(file_type) if file_type.is_dir() => true,
-                Ok(file_type) if file_type.is_symlink() => entry
-                    .metadata()
+                Ok(file_type) if file_type.is_symlink() => tokio::fs::metadata(entry.path())
                     .await
                     .map(|metadata| metadata.is_dir())
                     .unwrap_or(false),
@@ -434,6 +433,44 @@ mod tests {
             browser.resolve_display_path(&file.to_string_lossy()).await,
             Err(DirectoryError::NotDirectory)
         ));
+    }
+
+    #[tokio::test]
+    async fn listing_follows_directory_links_but_excludes_file_and_broken_links() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(fixture.path()).unwrap();
+        std::fs::create_dir(root.join("target")).unwrap();
+        std::fs::write(root.join("file.txt"), b"synthetic").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(root.join("target"), root.join("directory-link")).unwrap();
+            symlink(root.join("file.txt"), root.join("file-link")).unwrap();
+            symlink(root.join("missing"), root.join("broken-link")).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::{symlink_dir, symlink_file};
+            // Windows symlinks require Developer Mode or an elevated test account.
+            match symlink_dir(root.join("target"), root.join("directory-link")) {
+                Err(error) if error.raw_os_error() == Some(1314) => return,
+                result => result.unwrap(),
+            }
+            symlink_file(root.join("file.txt"), root.join("file-link")).unwrap();
+            symlink_dir(root.join("missing"), root.join("broken-link")).unwrap();
+        }
+        let browser = DirectoryBrowser::new(root);
+        let listing = browser.list_default().await.unwrap();
+        let names: Vec<_> = listing
+            .directories
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["directory-link", "target"]);
+        browser
+            .resolve_id(&listing.directories[0].id)
+            .await
+            .unwrap();
     }
 
     #[test]

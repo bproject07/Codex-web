@@ -20,6 +20,22 @@ const health = (serverVersion: string | null): HealthSnapshot => ({
 });
 
 describe("waitForServerVersion", () => {
+  it("bounds the whole restart wait when a health request never responds", async () => {
+    vi.useFakeTimers();
+    try {
+      const readHealth = vi.fn((_token: string, signal?: AbortSignal) => new Promise<HealthSnapshot>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }));
+      const result = waitForServerVersion({ token: "synthetic", expectedVersion: "0.4.0", readHealth,
+        attempts: 3, intervalMs: 1000 });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(await result).toBe(false);
+      expect(readHealth).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it("keeps polling through staging and starts handoff verification there", () => {
     expect(isUpdatePollState("downloading")).toBe(true);
     expect(isUpdatePollState("verifying")).toBe(true);

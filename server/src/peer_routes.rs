@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{ConnectInfo, DefaultBodyLimit, Path, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -92,8 +92,22 @@ pub fn internal_router(broker: PeerBroker) -> Router {
         .with_state(broker)
 }
 
-async fn list_threads(State(state): State<AppState>) -> Json<Vec<PeerThread>> {
-    Json(state.peers.list_threads())
+#[derive(Default, Deserialize)]
+struct PeerPollQuery {
+    since: Option<String>,
+}
+
+async fn list_threads(
+    State(state): State<AppState>,
+    Query(query): Query<PeerPollQuery>,
+) -> Response {
+    match query.since {
+        Some(revision) if revision.len() <= 16 => {
+            no_store(Json(state.peers.poll_threads(&revision)).into_response())
+        }
+        Some(_) => api_error(StatusCode::BAD_REQUEST, "Invalid peer revision."),
+        None => no_store(Json(state.peers.list_threads()).into_response()),
+    }
 }
 
 async fn get_thread(State(state): State<AppState>, Path(thread_id): Path<Uuid>) -> Response {

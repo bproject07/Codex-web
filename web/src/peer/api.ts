@@ -32,15 +32,49 @@ const PEER_STATUSES = new Set<PeerStatus>([
   "closed",
 ]);
 
+export interface PeerListCache {
+  revision?: string;
+  threads?: PeerThread[];
+  request?: number;
+}
+
 export async function listPeerThreads(
   token: string,
   signal?: AbortSignal,
+  cache?: PeerListCache,
 ): Promise<PeerThread[]> {
-  const value = await apiRequest<unknown>("/api/peer/threads", token, {
+  const revisionSent = cache?.revision;
+  const snapshotSent = cache?.threads;
+  const request = (cache?.request ?? 0) + 1;
+  if (cache) cache.request = request;
+  const path = `/api/peer/threads${cache ? `?since=${encodeURIComponent(revisionSent ?? "")}` : ""}`;
+  const value = await apiRequest<unknown>(path, token, {
     signal,
   });
+  if (cache && !Array.isArray(value)) {
+    const poll = requireRecord(value, "peer update");
+    const revision = requireString(poll.revision, "peer revision");
+    if (!/^[a-f0-9]{16}$/.test(revision)) throw new Error("Invalid peer revision.");
+    if (poll.threads === null) {
+      // A conditional response validates the snapshot sent by this request,
+      // not whichever snapshot a concurrent refresh may have cached since.
+      if (revision !== revisionSent || !snapshotSent) throw new Error("Missing peer snapshot.");
+      return snapshotSent;
+    }
+    if (!Array.isArray(poll.threads)) throw new Error("Invalid peer snapshot.");
+    const threads = poll.threads.map(normalizePeerThread);
+    if (cache.request === request) {
+      cache.revision = revision;
+      cache.threads = threads;
+    }
+    return threads;
+  }
   if (!Array.isArray(value)) {
     throw new Error("The server returned an invalid peer thread list.");
+  }
+  if (cache?.request === request) {
+    delete cache.revision;
+    delete cache.threads;
   }
   return value.map(normalizePeerThread);
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SessionSnapshot } from "../api";
+import { ApiError, type SessionSnapshot } from "../api";
 import {
   discardSessionRestorePlanForOriginalGeneration,
   restoreSessionTabs,
@@ -156,6 +156,8 @@ describe("update session restoration", () => {
       "token",
       "claude",
       "1-d29ya3NwYWNl",
+      "ordinary-old",
+      undefined,
     );
     expect(result.preferredTerminalId).toBe("ordinary-new");
     expect(result.sessions.map((item) => item.terminalId)).toEqual([
@@ -193,6 +195,138 @@ describe("update session restoration", () => {
 
     expect(result.error).toContain("could not be recreated");
     expect(result.preferredTerminalId).toBe("first-new");
+    expect(storage.values.size).toBe(1);
+  });
+
+  it.each(["response lost", "storage failed"])("reuses the request after %s without duplicating the server entry", async (failure) => {
+    const storage = new MemoryStorage();
+    stageSessionRestorePlan({ sourceVersion: "0.3.0", targetVersion: "0.4.0",
+      sessions: [session("old-primary", { isPrimary: true }), session("old-tab")],
+      selectedTerminalId: "old-tab", storage });
+    const server = new Map<string, SessionSnapshot>();
+    let first = true;
+    const create = vi.fn(async (_token: string, _agent: SessionSnapshot["agent"], _directory?: string | null, requestId?: string) => {
+      if (!requestId) throw new Error("missing request identity");
+      if (!server.has(requestId)) server.set(requestId, session("new-tab"));
+      if (failure === "response lost" && first) { first = false; throw new Error("lost response"); }
+      return server.get(requestId)!;
+    });
+    const write = vi.spyOn(storage, "setItem");
+    if (failure === "storage failed") write.mockImplementationOnce(() => { throw new Error("quota"); });
+    const primary = session("new-primary", { isPrimary: true });
+    const options = { token: "token", serverVersion: "0.4.0", storage, create };
+    expect((await restoreSessionTabs({ ...options, sessions: [primary] })).error).toBeDefined();
+    const restored = await restoreSessionTabs({ ...options, sessions: [primary, ...server.values()] });
+    expect(server.size).toBe(1);
+    expect(restored.sessions.map((entry) => entry.terminalId)).toEqual(["new-primary", "new-tab"]);
+    expect(restored.preferredTerminalId).toBe("new-tab");
+    expect(storage.values.size).toBe(0);
+  });
+
+  it("stops creating remaining tabs when the owner cancels", async () => {
+    const storage = new MemoryStorage();
+    stageSessionRestorePlan({ sourceVersion: "0.3.0", targetVersion: "0.4.0",
+      sessions: [session("old-primary", { isPrimary: true }), session("one"), session("two")],
+      selectedTerminalId: "one", storage });
+    const controller = new AbortController();
+    const create = vi.fn(async () => { controller.abort(); return session("new-one"); });
+    await restoreSessionTabs({ token: "token", serverVersion: "0.4.0",
+      sessions: [session("new-primary", { isPrimary: true })], storage, create, signal: controller.signal });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(storage.values.size).toBe(1);
+  });
+
+  it("persists a deleted-tab skip before a later capacity failure and restores the rest on reload", async () => {
+    const storage = new MemoryStorage();
+    stageSessionRestorePlan({
+      sourceVersion: "0.3.0", targetVersion: "0.4.0",
+      sessions: [session("old-primary", { isPrimary: true }), session("deleted"), session("remaining")],
+      selectedTerminalId: "deleted", storage,
+    });
+    const primary = session("new-primary", { isPrimary: true });
+    const create = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "Deleted", "application/json", "restore_deleted"))
+      .mockRejectedValueOnce(new ApiError(409, "Full", "application/json", "session_capacity"))
+      .mockResolvedValueOnce(session("new-remaining"));
+    const options = { token: "token", serverVersion: "0.4.0", storage, create, sessions: [primary] };
+    const first = await restoreSessionTabs(options);
+    expect(first.error).toBeDefined();
+    expect(first.preferredTerminalId).toBe(primary.terminalId);
+    const saved = JSON.parse([...storage.values.values()][0]);
+    expect(saved.sessions.map((entry: { sourceTerminalId: string }) => entry.sourceTerminalId)).toEqual(["remaining"]);
+    const next = await restoreSessionTabs(options);
+    expect(next.error).toBeUndefined();
+    expect(next.sessions.map((entry) => entry.terminalId)).toEqual(["new-primary", "new-remaining"]);
+    expect(create.mock.calls.map((call) => call[3])).toEqual(["deleted", "remaining", "remaining"]);
+    expect(storage.values.size).toBe(0);
+  });
+
+  it("does not revive a deleted mapping after another restore succeeds and the next one fails", async () => {
+    const storage = new MemoryStorage();
+    stageSessionRestorePlan({
+      sourceVersion: "0.3.0", targetVersion: "0.4.0",
+      sessions: [session("old-primary", { isPrimary: true }), session("deleted"), session("one"), session("two")],
+      selectedTerminalId: "deleted", storage,
+    });
+    const primary = session("new-primary", { isPrimary: true });
+    const create = vi.fn()
+      .mockResolvedValueOnce(session("new-deleted"))
+      .mockRejectedValueOnce(new Error("unavailable"))
+      .mockRejectedValueOnce(new ApiError(409, "Deleted", "application/json", "restore_deleted"))
+      .mockResolvedValueOnce(session("new-one"))
+      .mockRejectedValueOnce(new ApiError(409, "Full", "application/json", "session_capacity"))
+      .mockResolvedValueOnce(session("new-two"));
+    const options = { token: "token", serverVersion: "0.4.0", storage, create };
+    expect((await restoreSessionTabs({ ...options, sessions: [primary] })).error).toBeDefined();
+    // The user deleted new-deleted before reloading the partially completed plan.
+    const second = await restoreSessionTabs({ ...options, sessions: [primary] });
+    expect(second.error).toBeDefined();
+    expect(second.preferredTerminalId).toBe(primary.terminalId);
+    const saved = JSON.parse([...storage.values.values()][0]);
+    expect(saved.restored).toEqual([{ sourceTerminalId: "one", terminalId: "new-one" }]);
+    const last = await restoreSessionTabs({ ...options, sessions: [primary, session("new-one")] });
+    expect(last.error).toBeUndefined();
+    expect(last.sessions.map((entry) => entry.terminalId)).toEqual(["new-primary", "new-one", "new-two"]);
+    expect(create.mock.calls.map((call) => call[3])).toEqual(["deleted", "one", "deleted", "one", "two", "two"]);
+    expect(storage.values.size).toBe(0);
+  });
+
+  it.each([undefined, "session_capacity", "restore_history_full", "restore_conflict"])(
+    "keeps a restore entry for conflict code %s",
+    async (code) => {
+      const storage = new MemoryStorage();
+      stageSessionRestorePlan({
+        sourceVersion: "0.3.0", targetVersion: "0.4.0",
+        sessions: [session("old-primary", { isPrimary: true }), session("one"), session("two")],
+        selectedTerminalId: "one", storage,
+      });
+      const before = [...storage.values.values()][0];
+      const create = vi.fn().mockRejectedValue(new ApiError(409, "Conflict", "application/json", code));
+      const result = await restoreSessionTabs({
+        token: "token", serverVersion: "0.4.0", storage, create,
+        sessions: [session("new-primary", { isPrimary: true })],
+      });
+      expect(result.error).toBeDefined();
+      expect(create).toHaveBeenCalledTimes(1);
+      expect([...storage.values.values()][0]).toBe(before);
+    },
+  );
+
+  it("keeps the plan when recording a deleted-tab skip fails", async () => {
+    const storage = new MemoryStorage();
+    stageSessionRestorePlan({
+      sourceVersion: "0.3.0", targetVersion: "0.4.0",
+      sessions: [session("old-primary", { isPrimary: true }), session("one"), session("two")],
+      selectedTerminalId: "one", storage,
+    });
+    vi.spyOn(storage, "setItem").mockImplementation(() => { throw new Error("quota"); });
+    const create = vi.fn().mockRejectedValue(new ApiError(409, "Deleted", "application/json", "restore_deleted"));
+    const result = await restoreSessionTabs({
+      token: "token", serverVersion: "0.4.0", storage, create,
+      sessions: [session("new-primary", { isPrimary: true })],
+    });
+    expect(result.error).toContain("could not save progress");
+    expect(create).toHaveBeenCalledTimes(1);
     expect(storage.values.size).toBe(1);
   });
 });

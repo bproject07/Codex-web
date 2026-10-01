@@ -65,6 +65,7 @@ The most important properties are:
 │   ├── verify-github-release.py  Exact immutable asset/digest verification
 │   ├── session-tabs-regression.py
 │   ├── session-cache-regression.py  Synthetic tab retention and routing regression
+│   ├── terminal-flow-regression.py  Output flow control, restore retry, and IPv6
 │   └── workspace-picker-regression.py  Auth/CWD/persistence/mobile regression
 ├── server/
 │   ├── Cargo.toml
@@ -389,10 +390,28 @@ Linux in addition to the normal frontend, Rust, and package checks.
 - Persistence has an in-process mutex but no cross-process lock or merge.
   Concurrent server instances must use distinct state directories.
 
-The server retains up to 16 MiB of raw output per session. A newly attached
-browser receives at most the newest 2 MiB. WebSocket replay ordering and
+The server retains up to 16 MiB and 16,384 chunks of raw output per session.
+A newly attached browser receives at most the newest 2 MiB. WebSocket replay ordering and
 sequence checks exist to prevent replay/live gaps. Preserve those properties
 when changing batching or reconnect behavior.
+
+Browser connections negotiate `flowControl=1` and acknowledge processed binary
+bytes. The outstanding window is 4 MiB, including replay; acknowledgements must
+never exceed bytes sent. Flow control is per attachment and never stops a PTY.
+Run `scripts/terminal-flow-regression.py` on Windows and Linux for output changes.
+Restore requests use the original terminal UUID as `restoreRequestId`; the
+registry owns lookup/start/commit beyond cancellation. Its 4,096-entry history
+keeps deletion tombstones and refuses new identities when full. Workspace writes
+likewise own the lock through both disk replacement and memory commit.
+An accepted deletion during restore startup must retain that tombstone even if
+startup rolls back or the delete request disconnects. Failed termination keeps
+the same session retryable. Removing a deleted tab from a browser restore plan
+must also remove its mapping from the in-flight progress map.
+The restore table lock must be released before PTY startup; same-identity retries
+wait only for that reservation. Only an explicit `restore_deleted` response may
+skip a saved tab. Capacity, parameter conflicts, and full restore history must
+retain pending tabs. Concurrent peer polls validate conditional responses against
+their own requested snapshot and must not overwrite a newer request's cache.
 
 ## Browser and mobile invariants
 
@@ -476,6 +495,10 @@ when changing batching or reconnect behavior.
   `Top` and `Live` manipulate only xterm's client scrollback.
   Scroll to these boundaries by the full buffer length so a stale relative
   viewport position after hidden output cannot leave the view short of an edge.
+  Preserve an explicit boundary request through pending fit and viewport render
+  callbacks. Cancel it on newer manual scrolling/input, tab hiding, or disposal.
+  A skipped or failed trailing fit must also settle the request, so a later
+  unrelated resize cannot revive it.
 - A desktop session-tab tooltip contains only that session's full project path.
   Keep the lifecycle status in visually hidden accessible text rather than
   repeating the tab's visible agent/name information in the tooltip.

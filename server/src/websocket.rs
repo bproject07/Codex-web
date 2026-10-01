@@ -22,16 +22,46 @@ use crate::{
     },
     registry::SessionRegistry,
     routes::AppState,
-    session::{OutputChunk, SessionManager},
+    session::{OUTPUT_REPLAY_LIMIT, OutputChunk, SessionManager},
 };
 
 const OUTPUT_WEBSOCKET_BATCH_SIZE: usize = 32 * 1024;
+const OUTPUT_WINDOW: usize = 2 * OUTPUT_REPLAY_LIMIT;
+
+struct OutputFlow {
+    enabled: bool,
+    outstanding: usize,
+}
+
+impl OutputFlow {
+    fn can_send(&self) -> bool {
+        !self.enabled || self.outstanding <= OUTPUT_WINDOW - OUTPUT_REPLAY_LIMIT
+    }
+
+    fn sent(&mut self, bytes: usize) {
+        if self.enabled {
+            self.outstanding += bytes;
+            debug_assert!(self.outstanding <= OUTPUT_WINDOW);
+        }
+    }
+
+    fn acknowledge(&mut self, bytes: u32) -> bool {
+        let bytes = bytes as usize;
+        if !self.enabled || bytes == 0 || bytes > self.outstanding {
+            return false;
+        }
+        self.outstanding -= bytes;
+        true
+    }
+}
 
 #[derive(Deserialize)]
 pub struct WebSocketQuery {
     token: Option<String>,
     #[serde(rename = "terminalId")]
     terminal_id: Option<String>,
+    #[serde(rename = "flowControl")]
+    flow_control: Option<u8>,
 }
 
 pub async fn upgrade(
@@ -75,7 +105,15 @@ pub async fn upgrade(
         .max_message_size(MAX_WEBSOCKET_MESSAGE_SIZE)
         .max_frame_size(MAX_WEBSOCKET_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
-            handle_socket(socket, state, session, peer, terminal_id, client_permit)
+            handle_socket(
+                socket,
+                state,
+                session,
+                peer,
+                terminal_id,
+                client_permit,
+                query.flow_control == Some(1),
+            )
         })
         .into_response()
 }
@@ -106,6 +144,7 @@ async fn handle_socket(
     peer: SocketAddr,
     terminal_id: Uuid,
     _client_permit: OwnedSemaphorePermit,
+    flow_control: bool,
 ) {
     tracing::info!(client = %peer.ip(), %terminal_id, "terminal client connected");
     session.notify_client_count_changed();
@@ -116,6 +155,26 @@ async fn handle_socket(
     let session_shutdown = session.shutdown_signal();
     let mut current_session_id = None;
     let mut last_sequence = 0;
+    let mut flow = OutputFlow {
+        enabled: flow_control,
+        outstanding: 0,
+    };
+    let mut output_pending = true;
+
+    if flow.enabled
+        && send_control(
+            &mut sender,
+            ServerControl::FlowControl {
+                window_bytes: OUTPUT_WINDOW,
+            },
+        )
+        .await
+        .is_err()
+    {
+        drop(_client_permit);
+        session.notify_client_count_changed();
+        return;
+    }
 
     if send_control(
         &mut sender,
@@ -130,6 +189,7 @@ async fn handle_socket(
             &mut sender,
             &mut current_session_id,
             &mut last_sequence,
+            &mut flow,
         )
         .await
         .is_err()
@@ -143,11 +203,11 @@ async fn handle_socket(
     loop {
         tokio::select! {
             _ = state.shutdown.cancelled() => {
-                let _ = sender.send(Message::Close(None)).await;
+                let _ = send_message(&mut sender, Message::Close(None)).await;
                 break;
             }
             _ = session_shutdown.cancelled() => {
-                let _ = sender.send(Message::Close(None)).await;
+                let _ = send_message(&mut sender, Message::Close(None)).await;
                 break;
             }
             incoming = receiver.next() => {
@@ -159,6 +219,7 @@ async fn handle_socket(
                             terminal_id,
                             &session,
                             &mut sender,
+                            &mut flow,
                         ).await {
                             break;
                         }
@@ -174,28 +235,26 @@ async fn handle_socket(
                 if output.is_err() {
                     break;
                 }
-                if send_pending_output(
+                output_pending = true;
+            }
+            _ = std::future::ready(()), if output_pending && flow.can_send() => {
+                match send_pending_output(
                     &session,
                     &mut sender,
                     &mut current_session_id,
                     &mut last_sequence,
-                ).await.is_err() {
-                    break;
+                    &mut flow,
+                ).await {
+                    Ok(pending) => output_pending = pending,
+                    Err(_) => break,
                 }
             }
             event = event_receiver.recv() => {
                 match event {
                     Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
                         let snapshot = session.snapshot();
-                        if snapshot.session_id != current_session_id
-                            && send_replay(
-                                &session,
-                                &mut sender,
-                                &mut current_session_id,
-                                &mut last_sequence,
-                            ).await.is_err()
-                        {
-                            break;
+                        if snapshot.session_id != current_session_id {
+                            output_pending = true;
                         }
                         if send_control(
                             &mut sender,
@@ -238,6 +297,7 @@ async fn handle_client_message(
     terminal_id: Uuid,
     session: &SessionManager,
     sender: &mut SplitSink<WebSocket, Message>,
+    flow: &mut OutputFlow,
 ) -> bool {
     match message {
         Message::Binary(data) => {
@@ -270,6 +330,11 @@ async fn handle_client_message(
                         return false;
                     }
                 }
+                Ok(ClientControl::OutputAck { bytes }) => {
+                    if !flow.acknowledge(bytes) {
+                        return false;
+                    }
+                }
                 Ok(ClientControl::Restart) => {
                     if let Err(error) = registry.restart(terminal_id).await {
                         tracing::warn!(%error, %terminal_id, "WebSocket restart rejected or failed");
@@ -289,7 +354,7 @@ async fn handle_client_message(
             }
             true
         }
-        Message::Ping(data) => sender.send(Message::Pong(data)).await.is_ok(),
+        Message::Ping(data) => send_message(sender, Message::Pong(data)).await.is_ok(),
         Message::Pong(_) => true,
         Message::Close(_) => false,
     }
@@ -300,16 +365,21 @@ async fn send_pending_output(
     sender: &mut SplitSink<WebSocket, Message>,
     current_session_id: &mut Option<Uuid>,
     last_sequence: &mut u64,
-) -> Result<(), axum::Error> {
-    let Some(delta) = session.output_since(*current_session_id, *last_sequence) else {
-        send_replay(session, sender, current_session_id, last_sequence).await?;
-        return Ok(());
+    flow: &mut OutputFlow,
+) -> Result<bool, axum::Error> {
+    let Some(delta) =
+        session.output_since_limited(*current_session_id, *last_sequence, OUTPUT_REPLAY_LIMIT)
+    else {
+        send_replay(session, sender, current_session_id, last_sequence, flow).await?;
+        return Ok(true);
     };
 
+    let bytes = delta.chunks.iter().map(|chunk| chunk.data.len()).sum();
     send_output_batches(sender, delta.chunks).await?;
+    flow.sent(bytes);
     *current_session_id = delta.session_id;
     *last_sequence = delta.last_sequence;
-    Ok(())
+    Ok(bytes > 0)
 }
 
 async fn send_replay(
@@ -317,6 +387,7 @@ async fn send_replay(
     sender: &mut SplitSink<WebSocket, Message>,
     current_session_id: &mut Option<Uuid>,
     last_sequence: &mut u64,
+    flow: &mut OutputFlow,
 ) -> Result<(), axum::Error> {
     let snapshot = session.output_snapshot();
     send_control(
@@ -327,7 +398,9 @@ async fn send_replay(
     )
     .await?;
 
+    let bytes = snapshot.chunks.iter().map(|chunk| chunk.data.len()).sum();
     send_output_batches(sender, snapshot.chunks).await?;
+    flow.sent(bytes);
 
     send_control(
         sender,
@@ -345,10 +418,14 @@ async fn send_output_batches(
     sender: &mut SplitSink<WebSocket, Message>,
     chunks: Vec<OutputChunk>,
 ) -> Result<(), axum::Error> {
-    for batch in coalesce_output_chunks(chunks) {
-        sender.send(Message::Binary(batch)).await?;
-    }
-    Ok(())
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        for batch in coalesce_output_chunks(chunks) {
+            send_message(sender, Message::Binary(batch)).await?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| websocket_timeout_error())?
 }
 
 fn coalesce_output_chunks(chunks: Vec<OutputChunk>) -> Vec<Bytes> {
@@ -396,7 +473,23 @@ async fn send_control(
     control: ServerControl,
 ) -> Result<(), axum::Error> {
     let text = serde_json::to_string(&control).expect("server control messages are serializable");
-    sender.send(Message::Text(text.into())).await
+    send_message(sender, Message::Text(text.into())).await
+}
+
+async fn send_message(
+    sender: &mut SplitSink<WebSocket, Message>,
+    message: Message,
+) -> Result<(), axum::Error> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), sender.send(message))
+        .await
+        .map_err(|_| websocket_timeout_error())?
+}
+
+fn websocket_timeout_error() -> axum::Error {
+    axum::Error::new(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "WebSocket send timed out",
+    ))
 }
 
 #[cfg(test)]
@@ -404,6 +497,24 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn output_window_requires_real_bounded_acknowledgements() {
+        let mut flow = OutputFlow {
+            enabled: true,
+            outstanding: 0,
+        };
+        flow.sent(OUTPUT_REPLAY_LIMIT);
+        assert!(flow.can_send());
+        flow.sent(OUTPUT_REPLAY_LIMIT);
+        assert!(!flow.can_send());
+        assert!(!flow.acknowledge(0));
+        assert!(!flow.acknowledge((OUTPUT_WINDOW + 1) as u32));
+        assert!(flow.acknowledge(OUTPUT_REPLAY_LIMIT as u32));
+        assert!(flow.can_send());
+        assert!(flow.acknowledge(OUTPUT_REPLAY_LIMIT as u32));
+        assert!(!flow.acknowledge(1));
+    }
     use crate::{
         config::{AgentKind, ShellKind},
         terminal::TerminalConfig,

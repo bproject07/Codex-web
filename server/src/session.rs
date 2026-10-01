@@ -29,9 +29,10 @@ use crate::{
 };
 
 pub const OUTPUT_BUFFER_LIMIT: usize = 16 * 1024 * 1024;
+const MAX_OUTPUT_CHUNKS: usize = 16_384;
 pub const MAX_CONNECTED_CLIENTS: usize = 4;
 pub const MAX_AUTOMATION_PROMPT_SIZE: usize = 16 * 1024;
-const OUTPUT_REPLAY_LIMIT: usize = 2 * 1024 * 1024;
+pub const OUTPUT_REPLAY_LIMIT: usize = 2 * 1024 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 256;
 const EVENT_BROADCAST_CAPACITY: usize = 64;
 const MAX_PUBLIC_ERROR_LENGTH: usize = 512;
@@ -189,7 +190,7 @@ impl BoundedOutputBuffer {
         self.current_bytes = self.current_bytes.saturating_add(chunk.data.len());
         self.chunks.push_back(chunk.clone());
 
-        while self.current_bytes > self.maximum_bytes {
+        while self.current_bytes > self.maximum_bytes || self.chunks.len() > MAX_OUTPUT_CHUNKS {
             if let Some(discarded) = self.chunks.pop_front() {
                 self.current_bytes = self.current_bytes.saturating_sub(discarded.data.len());
             } else {
@@ -241,6 +242,15 @@ impl BoundedOutputBuffer {
         session_id: Option<Uuid>,
         last_sequence: u64,
     ) -> Option<OutputSnapshot> {
+        self.snapshot_since_limited(session_id, last_sequence, usize::MAX)
+    }
+
+    pub fn snapshot_since_limited(
+        &self,
+        session_id: Option<Uuid>,
+        last_sequence: u64,
+        maximum_bytes: usize,
+    ) -> Option<OutputSnapshot> {
         if self.session_id != session_id {
             return None;
         }
@@ -257,15 +267,28 @@ impl BoundedOutputBuffer {
             return None;
         }
 
+        // Sequence numbers are contiguous within the retained deque. Jump to
+        // the first new chunk without scanning the full scrollback on each read.
+        let start = last_sequence
+            .saturating_add(1)
+            .saturating_sub(first_available_sequence) as usize;
+        let mut remaining = maximum_bytes;
+        let chunks: Vec<_> = self
+            .chunks
+            .range(start.min(self.chunks.len())..)
+            .take_while(|chunk| {
+                if chunk.data.len() > remaining {
+                    return false;
+                }
+                remaining -= chunk.data.len();
+                true
+            })
+            .cloned()
+            .collect();
         Some(OutputSnapshot {
             session_id: self.session_id,
-            chunks: self
-                .chunks
-                .iter()
-                .filter(|chunk| chunk.sequence > last_sequence)
-                .cloned()
-                .collect(),
-            last_sequence: current_last_sequence,
+            last_sequence: chunks.last().map_or(last_sequence, |chunk| chunk.sequence),
+            chunks,
         })
     }
 
@@ -456,6 +479,11 @@ impl SessionManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn is_shutting_down_for_test(&self) -> bool {
+        self.inner.shutting_down.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
     pub(crate) fn fail_next_termination_for_test(&self) {
         self.inner
             .termination_failures_remaining
@@ -562,6 +590,15 @@ impl SessionManager {
         last_sequence: u64,
     ) -> Option<OutputSnapshot> {
         lock(&self.inner.output).snapshot_since(session_id, last_sequence)
+    }
+
+    pub fn output_since_limited(
+        &self,
+        session_id: Option<Uuid>,
+        last_sequence: u64,
+        maximum_bytes: usize,
+    ) -> Option<OutputSnapshot> {
+        lock(&self.inner.output).snapshot_since_limited(session_id, last_sequence, maximum_bytes)
     }
 
     pub fn subscribe_output(&self) -> watch::Receiver<u64> {
@@ -1515,6 +1552,30 @@ mod tests {
         assert!(buffer.byte_len() <= 8);
         assert_eq!(snapshot.chunks.len(), 1);
         assert_eq!(&snapshot.chunks[0].data[..], b"67890");
+    }
+
+    #[test]
+    fn tiny_output_chunks_have_a_bounded_metadata_cost() {
+        let session_id = Uuid::new_v4();
+        let mut buffer = BoundedOutputBuffer::new(OUTPUT_BUFFER_LIMIT);
+        buffer.reset(session_id);
+        for _ in 0..MAX_OUTPUT_CHUNKS + 10 {
+            buffer.append(session_id, b"x");
+        }
+        assert_eq!(buffer.chunks.len(), MAX_OUTPUT_CHUNKS);
+        assert_eq!(buffer.byte_len(), MAX_OUTPUT_CHUNKS);
+        assert!(buffer.snapshot_since(Some(session_id), 0).is_none());
+        let last = buffer.next_sequence - 1;
+        let delta = buffer
+            .snapshot_since_limited(Some(session_id), last - 10, 3)
+            .unwrap();
+        assert_eq!(delta.chunks.len(), 3);
+        assert_eq!(delta.last_sequence, last - 7);
+        let remaining = buffer
+            .snapshot_since(Some(session_id), delta.last_sequence)
+            .unwrap();
+        assert_eq!(remaining.chunks.len(), 7);
+        assert_eq!(remaining.last_sequence, last);
     }
 
     #[test]

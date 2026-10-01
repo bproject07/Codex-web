@@ -910,7 +910,8 @@ the first screenful on a narrow phone.
 - **PgUp/PgDn** sends the standard terminal Page Up/Page Down input sequences
   to the selected PTY, including full-screen alternate-buffer TUIs.
 - **Top** moves to the oldest retained client-side line.
-- **Live** returns to current terminal output.
+- **Live** returns to current terminal output, including when a tab is still
+  resizing after being shown. A subsequent manual scroll cancels that request.
 - **Ctrl** applies Ctrl to the next typed ASCII letter and then turns off.
 - **Hide** hides the toolbar; it can be shown again from Settings.
 
@@ -968,7 +969,8 @@ entry. **Forget token** removes the token from the current browser tab.
 ## Reconnect and replay behavior
 
 Closing the browser or losing connectivity does not terminate managed PTYs.
-The server retains up to 16 MiB of raw PTY output per session. A newly attached
+The server retains up to 16 MiB and 16,384 chunks of raw PTY output per session.
+Many small PTY reads can reach the chunk limit before the byte limit. A newly attached
 browser receives at most the newest 2 MiB and then:
 
 1. receives the current sanitized session snapshot;
@@ -980,6 +982,23 @@ xterm also keeps client-side scrollback, 10,000 lines by default. The server
 buffer contains raw ANSI bytes rather than a rendered screen model. If the
 oldest ANSI state has been discarded, a very old replay can look imperfect;
 causing the selected agent to redraw or restarting that session repairs it.
+
+The browser acknowledges processed output, limiting each connection to 4 MiB
+of outstanding binary data. A slow browser does not pause the managed process.
+If it falls behind the retained history, a fresh replay replaces its view.
+Active pages reconnect after 60 seconds without incoming traffic; suspended
+pages receive a fresh grace period. HTTP reads have a 30-second deadline, and
+mutating requests have a 90-second deadline. A timed-out mutation may already
+have completed; inspect current state before repeating it.
+
+Saved-tab restoration uses an identity for each original tab. Retrying after a
+lost response reuses the newly created terminal. Favorites/Recent writes own
+both their disk replacement and memory update even if the HTTP caller leaves.
+If a recreated tab was deliberately deleted, restoration skips that tab and
+continues with the others. Capacity failures preserve the remaining plan for a
+later reload after space is available. When manually rolling back, reload the
+browser with the executable and web assets from the same release; restoration
+never retries without its identity to bypass an incompatible older server.
 
 ## Health and diagnostics
 
@@ -996,7 +1015,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.3.9",
+  "serverVersion": "0.3.10",
   "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,

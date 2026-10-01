@@ -340,11 +340,16 @@ def attach_terminal(
     port: int,
     token: str,
     terminal_id: str,
+    *,
+    flow_control: bool = False,
 ) -> WebSocketAttachment:
     connection = socket.create_connection(("127.0.0.1", port), timeout=10)
     try:
         key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
-        query = urlencode({"token": token, "terminalId": terminal_id})
+        parameters = {"token": token, "terminalId": terminal_id}
+        if flow_control:
+            parameters["flowControl"] = "1"
+        query = urlencode(parameters)
         request = (
             f"GET /ws?{query} HTTP/1.1\r\n"
             f"Host: 127.0.0.1:{port}\r\n"

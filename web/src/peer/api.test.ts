@@ -7,6 +7,7 @@ import {
   listPeerThreads,
   normalizePeerThread,
   returnPeerTurn,
+  type PeerListCache,
 } from "./api";
 import type { PeerThread } from "./types";
 
@@ -43,6 +44,62 @@ afterEach(() => {
 });
 
 describe("peer API", () => {
+  it.each([true, false])("handles overlapping conditional polls when the older response arrives first: %s", async (olderFirst) => {
+    const originalRevision = "0123456789abcdef";
+    const changedRevision = "fedcba9876543210";
+    const cache: PeerListCache = { revision: originalRevision, threads: [THREAD] };
+    const original = cache.threads;
+    let resolveOlder!: (response: Response) => void;
+    let resolveNewer!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn()
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveOlder = resolve; }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveNewer = resolve; })));
+    const older = listPeerThreads("synthetic", undefined, cache);
+    const newer = listPeerThreads("synthetic", undefined, cache);
+    const changed = { ...THREAD, updatedAt: 3000 };
+    if (olderFirst) {
+      resolveOlder(jsonResponse({ revision: changedRevision, threads: [changed] }));
+      await older;
+      resolveNewer(jsonResponse({ revision: originalRevision, threads: null }));
+      expect(await newer).toBe(original);
+      expect(cache.revision).toBe(originalRevision);
+      expect(cache.threads).toBe(original);
+    } else {
+      resolveNewer(jsonResponse({ revision: changedRevision, threads: [changed] }));
+      const latest = await newer;
+      resolveOlder(jsonResponse({ revision: originalRevision, threads: null }));
+      expect(await older).toBe(original);
+      expect(cache.revision).toBe(changedRevision);
+      expect(cache.threads).toBe(latest);
+    }
+  });
+
+  it("does not let an older full response overwrite a newer snapshot", async () => {
+    const cache: PeerListCache = {};
+    let resolveOlder!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn()
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveOlder = resolve; }))
+      .mockResolvedValueOnce(jsonResponse({ revision: "fedcba9876543210", threads: [] })));
+    const older = listPeerThreads("synthetic", undefined, cache);
+    const latest = await listPeerThreads("synthetic", undefined, cache);
+    resolveOlder(jsonResponse({ revision: "0123456789abcdef", threads: [THREAD] }));
+    await older;
+    expect(cache.revision).toBe("fedcba9876543210");
+    expect(cache.threads).toBe(latest);
+  });
+
+  it("reuses unchanged artifacts only with the matching revision", async () => {
+    const cache = {};
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ revision: "0123456789abcdef", threads: [THREAD] }))
+      .mockResolvedValueOnce(jsonResponse({ revision: "0123456789abcdef", threads: null }))
+      .mockResolvedValueOnce(jsonResponse({ revision: "fedcba9876543210", threads: null }));
+    vi.stubGlobal("fetch", fetchMock);
+    const first = await listPeerThreads("synthetic", undefined, cache);
+    expect(await listPeerThreads("synthetic", undefined, cache)).toBe(first);
+    expect(fetchMock.mock.calls[1][0]).toContain("since=0123456789abcdef");
+    await expect(listPeerThreads("synthetic", undefined, cache)).rejects.toThrow("Missing peer snapshot");
+  });
   it("lists and validates peer thread payloads", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse([THREAD])));
 
