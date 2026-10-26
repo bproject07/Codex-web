@@ -882,6 +882,28 @@ managed Claude Code and Codex tabs in the same directory and import one of
 them. Record any deviation as a limitation in `README.md` and `OPERATIONS.md`
 rather than working around it in the launcher.
 
+Linux results recorded for Kilo Code CLI 7.8.18 with Claude Code 2.1.310 in a
+Debian container (Node.js 22, non-root account, packaged release binary):
+
+- `kilo --version` prints the bare version and cold-starts in about 0.6 s;
+  the catalog reports `ready` with that version.
+- The TUI renders inside the managed PTY and the typed prompt reaches the
+  configured provider. Kilo runs as a `node` launcher plus one `.kilo` child
+  in the same process group; both exit on **Terminate**, and nothing remains
+  after server shutdown. No detached daemon was observed.
+- A `@cwt` thread with Kilo as both source and reviewer completed the
+  automation prompt, helper `submit`, reviewer `receive`/`submit`, and return
+  acknowledgement; closing the thread left no reviewer process behind.
+- `/resume-claude` listed the session that a managed Claude Code tab recorded
+  in the same directory and imported it; the imported turn appeared together
+  with Kilo's notice that the conversation was imported from an external
+  session. The slash command needs one Enter to accept the autocomplete and a
+  second Enter to run; the picker then takes Enter to select.
+- Kilo's `@cwt` helper calls and `/resume-claude` needed no fixed launch
+  arguments; the permission policy came from `~/.config/kilo/kilo.jsonc`.
+
+Windows validation of the same matrix remains pending.
+
 Run this matrix on both Windows and Linux. Validate real native PTY startup for
 each installed agent, not only catalog JSON or mocked commands. If an upstream
 install location, verification command, update command, or CLI flag changes,
