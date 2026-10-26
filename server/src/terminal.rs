@@ -406,7 +406,7 @@ fn well_known_command_directories(agent: AgentKind) -> Vec<PathBuf> {
                             .join("bin"),
                     );
                 }
-                AgentKind::Claude => {}
+                AgentKind::Claude | AgentKind::Kilo => {}
                 AgentKind::Agy => directories.push(local_app_data.join("agy").join("bin")),
             }
             directories.push(
@@ -423,8 +423,10 @@ fn well_known_command_directories(agent: AgentKind) -> Vec<PathBuf> {
             directories.push(user_profile.join(".local").join("bin"));
         }
 
-        if matches!(agent, AgentKind::Codex | AgentKind::Claude)
-            && let Some(app_data) = env::var_os("APPDATA").map(PathBuf::from)
+        if matches!(
+            agent,
+            AgentKind::Codex | AgentKind::Claude | AgentKind::Kilo
+        ) && let Some(app_data) = env::var_os("APPDATA").map(PathBuf::from)
         {
             directories.push(app_data.join("npm"));
         }
@@ -627,7 +629,9 @@ fn configure_version_probe_environment(command: &mut Command, agent: AgentKind) 
         AgentKind::Agy => {
             command.env(AGY_DISABLE_AUTO_UPDATE_ENV, "true");
         }
-        AgentKind::Codex => {}
+        // Kilo documents no probe-time environment switch; the shared secret
+        // and parent-marker stripping above still applies.
+        AgentKind::Codex | AgentKind::Kilo => {}
     }
 }
 
@@ -1001,6 +1005,92 @@ mod command_tests {
         );
         assert!(!codex_environment.contains_key(OsStr::new(CLAUDE_DISABLE_AUTOUPDATER_ENV)));
         assert!(!codex_environment.contains_key(OsStr::new(AGY_DISABLE_AUTO_UPDATE_ENV)));
+
+        let mut kilo = Command::new("kilo");
+        kilo.env(CLAUDE_NESTING_ENV, "parent-claude")
+            .env(CODEX_WEB_TOKEN_ENV, "server-bearer-token")
+            .env("CWT_PEER_CAPABILITY", "stale-peer-secret");
+        configure_version_probe_environment(&mut kilo, AgentKind::Kilo);
+        let kilo_environment = environment(&kilo);
+        assert_eq!(
+            kilo_environment.get(OsStr::new(CLAUDE_NESTING_ENV)),
+            Some(&None)
+        );
+        assert_eq!(
+            kilo_environment.get(OsStr::new(CODEX_WEB_TOKEN_ENV)),
+            Some(&None)
+        );
+        assert_eq!(
+            kilo_environment.get(OsStr::new("CWT_PEER_CAPABILITY")),
+            Some(&None)
+        );
+        assert!(!kilo_environment.contains_key(OsStr::new(CLAUDE_DISABLE_AUTOUPDATER_ENV)));
+        assert!(!kilo_environment.contains_key(OsStr::new(AGY_DISABLE_AUTO_UPDATE_ENV)));
+    }
+
+    #[test]
+    fn kilo_launch_has_no_fixed_arguments_and_resolves_the_plain_executable() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let command_path = write_kilo_fixture(directory.path());
+        let config = TerminalConfig {
+            project_dir: directory.path().to_path_buf(),
+            command: command_path.to_string_lossy().into_owned(),
+            arguments: Vec::new(),
+            agent: AgentKind::Kilo,
+            shell: ShellKind::Powershell,
+        };
+
+        let resolved = preflight(&config).expect("Kilo fixture preflight");
+        assert!(!resolved.codex_no_daemon);
+        assert_eq!(
+            probe_command_version(&resolved, directory.path(), AgentKind::Kilo)
+                .expect("Kilo version probe"),
+            "1.2.3"
+        );
+        assert_eq!(
+            inspect_command(&config, false),
+            CommandInspection {
+                state: CommandInspectionState::Ready,
+                version: Some("1.2.3".to_owned()),
+            }
+        );
+
+        let command = pty_command(&config, &resolved);
+        let argv = command
+            .get_argv()
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(!argv.iter().any(|value| value == "--no-daemon"));
+        assert!(!argv.iter().any(|value| value == "--yolo"));
+        assert!(!argv.iter().any(|value| value == "--auto"));
+        assert!(
+            !argv
+                .iter()
+                .any(|value| value == "--dangerously-skip-permissions")
+        );
+    }
+
+    #[cfg(windows)]
+    fn write_kilo_fixture(directory: &Path) -> PathBuf {
+        let path = directory.join("kilo.cmd");
+        std::fs::write(&path, "@echo off\r\necho 1.2.3\r\nexit /b 0\r\n")
+            .expect("write Kilo fixture");
+        path
+    }
+
+    #[cfg(unix)]
+    fn write_kilo_fixture(directory: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = directory.join("kilo");
+        std::fs::write(&path, "#!/bin/sh\necho '1.2.3'\n").expect("write Kilo fixture");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).expect("make fixture executable");
+        path
     }
 
     #[test]

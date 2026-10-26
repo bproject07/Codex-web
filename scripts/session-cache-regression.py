@@ -894,7 +894,7 @@ class SyntheticMobileLayout(SyntheticPeers):
                         "command": "", "shell": "", "verifyCommand": "",
                         "updateCommand": "", "docsUrl": "", "requiresServerAccess": True,
                     },
-                } for kind in ("codex", "claude", "agy")],
+                } for kind in ("codex", "claude", "agy", "kilo")],
             })
             return
         if path == "/api/workspaces":
@@ -1027,7 +1027,7 @@ def run_mobile_layout(browser: Browser, url: str) -> None:
             page.wait_for_function("() => !document.querySelector('[data-agent-refresh]')?.disabled")
 
             starts = picker.locator("[data-agent-start]")
-            assert starts.count() == 3
+            assert starts.count() == 4
             for index in range(starts.count()):
                 assert_touch_control(page, starts.nth(index))
                 assert header.bounding_box() == header_box
@@ -1038,9 +1038,10 @@ def run_mobile_layout(browser: Browser, url: str) -> None:
             assert_touch_control(page, page.get_by_role("button", name="Close agent picker", exact=True))
 
             # A reachable action must also be clickable with the long path present.
+            # Kilo is the last card in the fixed catalog order.
             starts.last.click()
             picker.wait_for(state="detached")
-            assert peers.created == ["agy"]
+            assert peers.created == ["kilo"]
             assert not failures, failures
         finally:
             if peers is not None:

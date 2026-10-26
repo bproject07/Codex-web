@@ -890,6 +890,35 @@ mod tests {
             registry.reserve_session(Some(AgentKind::Agy)),
             Err(RegistryError::AgentUnavailable)
         ));
+        assert!(matches!(
+            registry.reserve_session(Some(AgentKind::Kilo)),
+            Err(RegistryError::AgentUnavailable)
+        ));
+    }
+
+    #[test]
+    fn reserves_kilo_sessions_with_their_configured_profile() {
+        let mut kilo_config = terminal_config();
+        kilo_config.command = "kilo".to_owned();
+        kilo_config.arguments = Vec::new();
+        kilo_config.agent = AgentKind::Kilo;
+        let registry = SessionRegistry::with_agent_configs(
+            terminal_config(),
+            terminal_config(),
+            vec![kilo_config],
+        );
+
+        assert_eq!(
+            registry.available_agents(),
+            vec![AgentKind::Codex, AgentKind::Kilo]
+        );
+        let kilo = registry
+            .reserve_session(Some(AgentKind::Kilo))
+            .expect("configured Kilo session");
+        assert_eq!(kilo.configured_command(), "kilo");
+        assert!(kilo.configured_arguments().is_empty());
+        assert_eq!(kilo.configured_agent(), AgentKind::Kilo);
+        assert_eq!(kilo.snapshot().name, "Kilo 2");
     }
 
     #[test]

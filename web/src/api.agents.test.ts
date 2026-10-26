@@ -95,7 +95,7 @@ describe("agent catalog API", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ error: "route not found" }, 404))
-      .mockResolvedValueOnce(jsonResponse(["codex", "agy"]));
+      .mockResolvedValueOnce(jsonResponse(["codex", "agy", "kilo", "future"]));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(getAgentCatalog("0123456789abcdef")).resolves.toMatchObject({
@@ -104,9 +104,43 @@ describe("agent catalog API", () => {
       agents: [
         { kind: "codex", state: "ready", version: null },
         { kind: "agy", state: "ready", version: null },
+        {
+          kind: "kilo",
+          state: "ready",
+          version: null,
+          install: { verifyCommand: "kilo --version" },
+        },
       ],
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts a Kilo catalog entry with static npm install guidance", async () => {
+    const kiloCatalog: AgentCatalog = {
+      ...CATALOG,
+      agents: [
+        {
+          kind: "kilo",
+          state: "missing",
+          configuration: "auto",
+          version: null,
+          dangerouslySkipPermissions: false,
+          install: {
+            command: "npm install -g @kilocode/cli",
+            shell: "sh",
+            verifyCommand: "kilo --version",
+            updateCommand: "kilo upgrade",
+            docsUrl: "https://kilo.ai/docs/code-with-ai/platforms/cli",
+            requiresServerAccess: true,
+          },
+        },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(kiloCatalog)));
+
+    await expect(getAgentCatalog("0123456789abcdef")).resolves.toEqual(
+      kiloCatalog,
+    );
   });
 
   it("falls back when an older server returns its HTML app shell", async () => {

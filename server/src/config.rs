@@ -39,16 +39,18 @@ pub enum AgentKind {
     Codex,
     Claude,
     Agy,
+    Kilo,
 }
 
 impl AgentKind {
-    pub const ALL: [Self; 3] = [Self::Codex, Self::Claude, Self::Agy];
+    pub const ALL: [Self; 4] = [Self::Codex, Self::Claude, Self::Agy, Self::Kilo];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
             Self::Agy => "AGY",
+            Self::Kilo => "Kilo",
         }
     }
 
@@ -57,6 +59,7 @@ impl AgentKind {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Agy => "agy",
+            Self::Kilo => "kilo",
         }
     }
 }
@@ -71,7 +74,7 @@ pub enum UpdatePolicy {
 #[command(
     name = "codex-web",
     version,
-    about = "Expose real Codex, Claude, and AGY CLI terminals through a local web interface"
+    about = "Expose real Codex, Claude, AGY, and Kilo CLI terminals through a local web interface"
 )]
 pub struct CliArgs {
     /// Address to bind. Use 0.0.0.0 only on a trusted network.
@@ -156,6 +159,10 @@ pub struct CliArgs {
     )]
     pub agy_dangerously_skip_permissions: bool,
 
+    /// Authoritative Kilo Code CLI executable override for the Kilo profile.
+    #[arg(long, env = "CODEX_WEB_KILO_COMMAND")]
+    pub kilo_command: Option<String>,
+
     /// Authentication token. A secure ephemeral token is generated when omitted.
     #[arg(long, env = "CODEX_WEB_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
@@ -195,6 +202,7 @@ pub struct Config {
     pub agy_command: Option<String>,
     pub no_agent_auto_detect: bool,
     pub agy_dangerously_skip_permissions: bool,
+    pub kilo_command: Option<String>,
     pub token: Option<String>,
     pub no_open_browser: bool,
     pub log_level: String,
@@ -241,6 +249,9 @@ impl Config {
         if let Some(command) = args.agy_command.as_deref() {
             validate_nonempty_length("AGY command", command, MAX_COMMAND_LENGTH)?;
         }
+        if let Some(command) = args.kilo_command.as_deref() {
+            validate_nonempty_length("Kilo command", command, MAX_COMMAND_LENGTH)?;
+        }
         validate_nonempty_length("log level", &args.log_level, MAX_LOG_LEVEL_LENGTH)?;
 
         if args
@@ -261,6 +272,10 @@ impl Config {
                 .is_some_and(|command| command.chars().any(|character| character == '\0'))
             || args
                 .agy_command
+                .as_deref()
+                .is_some_and(|command| command.chars().any(|character| character == '\0'))
+            || args
+                .kilo_command
                 .as_deref()
                 .is_some_and(|command| command.chars().any(|character| character == '\0'))
         {
@@ -296,6 +311,7 @@ impl Config {
             agy_command: args.agy_command,
             no_agent_auto_detect: args.no_agent_auto_detect,
             agy_dangerously_skip_permissions: args.agy_dangerously_skip_permissions,
+            kilo_command: args.kilo_command,
             token: args.token,
             no_open_browser: args.no_open_browser,
             log_level: args.log_level,
@@ -345,6 +361,11 @@ impl Config {
             self.claude_command.as_deref(),
         );
         append_optional_argument(&mut arguments, "--agy-command", self.agy_command.as_deref());
+        append_optional_argument(
+            &mut arguments,
+            "--kilo-command",
+            self.kilo_command.as_deref(),
+        );
         if self.claude_dangerously_skip_permissions {
             arguments.push(OsString::from("--claude-dangerously-skip-permissions"));
         }
@@ -529,11 +550,51 @@ mod tests {
             agy_command: None,
             no_agent_auto_detect: false,
             agy_dangerously_skip_permissions: false,
+            kilo_command: None,
             token: Some("0123456789abcdef".to_owned()),
             no_open_browser: true,
             log_level: "info".to_owned(),
             update_policy: UpdatePolicy::Notify,
         }
+    }
+
+    #[test]
+    fn agent_kinds_round_trip_through_wire_and_argument_forms() {
+        assert_eq!(AgentKind::ALL.len(), 4);
+        for agent in AgentKind::ALL {
+            let json = serde_json::to_string(&agent).expect("serialize agent");
+            assert_eq!(json, format!("\"{}\"", agent.argument()));
+            let parsed: AgentKind = serde_json::from_str(&json).expect("deserialize agent");
+            assert_eq!(parsed, agent);
+        }
+        assert_eq!(AgentKind::Kilo.label(), "Kilo");
+        assert_eq!(AgentKind::Kilo.argument(), "kilo");
+        assert!(serde_json::from_str::<AgentKind>("\"unknown\"").is_err());
+    }
+
+    #[test]
+    fn accepts_and_restarts_with_an_explicit_kilo_command() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let mut args = args_for(directory.path());
+        args.kilo_command = Some("kilo-custom".to_owned());
+
+        let config = Config::from_args(args).expect("valid Kilo command");
+        assert_eq!(config.kilo_command.as_deref(), Some("kilo-custom"));
+
+        let arguments = config
+            .restart_arguments()
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["--kilo-command", "kilo-custom"])
+        );
+
+        let mut empty = args_for(directory.path());
+        empty.kilo_command = Some(String::new());
+        assert!(Config::from_args(empty).is_err());
     }
 
     #[test]

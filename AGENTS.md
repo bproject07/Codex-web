@@ -6,9 +6,10 @@ Read it before editing. Human-facing build and runtime details live in
 
 ## Mission
 
-Codex Web Terminal exposes real Codex CLI, Claude Code, and Google Antigravity
-CLI (`agy`) PTYs through an authenticated web interface. It must preserve
-terminal semantics rather than reimplement any agent UI.
+Codex Web Terminal exposes real Codex CLI, Claude Code, Google Antigravity
+CLI (`agy`), and Kilo Code CLI (`kilo`) PTYs through an authenticated web
+interface. It must preserve terminal semantics rather than reimplement any
+agent UI.
 
 The most important properties are:
 
@@ -182,11 +183,24 @@ failures. Keep process containment enabled. Both probes are read-only, bounded,
 and strip the same server secrets and parent-session markers; help text must
 never be logged or returned to the browser. Discovery version probes remain
 exactly `codex --version`. Optional Claude and AGY dangerous-mode switches append only
-the fixed upstream `--dangerously-skip-permissions` argument. Unix and Windows
+the fixed upstream `--dangerously-skip-permissions` argument. Kilo receives
+no fixed arguments and has no `codex-web` bypass switch: its upstream `--auto`
+option is deliberately not exposed, and its `allow`/`ask`/`deny` policy lives
+in Kilo's own configuration file. Unix and Windows
 `cmd` launches keep fixed arguments distinct. The Windows PowerShell wrapper
 must encode each fixed argument as an independently single-quoted literal with
 embedded quotes escaped. Never accept executable arguments from the browser
 API.
+
+Adding or changing an agent kind touches `AgentKind` in `config.rs`, every
+exhaustive `match` in `agents.rs`, `terminal.rs`, and `session.rs`, the
+`--<agent>-command` plumbing including `restart_arguments()`, the frontend
+`AGENT_KINDS` table in `web/src/agents.ts`, the launcher scripts, the
+agent-catalog, peer, and session-cache regressions, and every document that
+lists the supported agents. A browser bundle must keep a session with an
+unrecognized agent value visible and attachable (`agent: null` with a display
+label) and must refuse a restart/update restore plan that would drop it; it
+must never relabel an unknown agent as a runnable kind.
 
 Agent auto-detection is also a platform boundary:
 

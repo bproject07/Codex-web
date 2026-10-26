@@ -8,6 +8,7 @@ const PRIMARY: SessionSnapshot = {
   terminalId: "11111111-1111-4111-8111-111111111111",
   name: "Codex 1",
   agent: "codex",
+  agentLabel: "Codex",
   isPrimary: true,
   createdAt: 1_000,
   sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -49,6 +50,7 @@ const REVIEWER: SessionSnapshot = {
   terminalId: THREAD.reviewerTerminalId!,
   name: "Claude 2",
   agent: "claude",
+  agentLabel: "Claude",
   isPrimary: false,
   createdAt: 2_000,
   purpose: {
@@ -108,6 +110,46 @@ describe("SessionTabs", () => {
     expect(html).toContain(`title="${reason}"`);
     expect(html).toContain(`aria-label="${reason}"`);
     expect(html).toContain("disabled");
+  });
+
+  it("renders Kilo and unsupported-agent tabs from the shared identity helpers", () => {
+    const kilo: SessionSnapshot = {
+      ...PRIMARY,
+      terminalId: "44444444-4444-4444-8444-444444444444",
+      name: "Kilo 3",
+      agent: "kilo",
+      agentLabel: "Kilo",
+      isPrimary: false,
+      createdAt: 3_000,
+    };
+    const unsupported: SessionSnapshot = {
+      ...PRIMARY,
+      terminalId: "55555555-5555-4555-8555-555555555555",
+      name: "future 4",
+      agent: null,
+      agentLabel: "future-agent",
+      isPrimary: false,
+      createdAt: 4_000,
+    };
+    const html = renderToStaticMarkup(
+      <SessionTabs
+        sessions={[PRIMARY, kilo, unsupported]}
+        selectedTerminalId={PRIMARY.terminalId}
+        busy={false}
+        peerThreads={[]}
+        peerDisabledReason={null}
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onPeer={vi.fn()}
+      />,
+    );
+
+    expect(html).toContain("session-tab--agent-kilo");
+    expect(html).toContain("running, Kilo");
+    expect(html).toContain("session-tab--agent-unsupported");
+    expect(html).toContain("running, future-agent");
+    expect(html).toContain("Close future 4");
+    expect(html).not.toContain("session-tab--agent-null");
   });
 
   it("renders only tabs and the @cwt launcher in the top strip", () => {

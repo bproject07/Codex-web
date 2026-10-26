@@ -30,6 +30,8 @@ describe("terminal session helpers", () => {
     expect(session).toMatchObject({
       terminalId: "primary",
       name: "Primary",
+      agent: "codex",
+      agentLabel: "Codex",
       isPrimary: true,
       createdAt: 123,
       directoryId: "",

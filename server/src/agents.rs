@@ -222,6 +222,7 @@ fn agent_command_override(config: &Config, agent: AgentKind) -> Option<String> {
         AgentKind::Codex => config.codex_command.clone(),
         AgentKind::Claude => config.claude_command.clone(),
         AgentKind::Agy => config.agy_command.clone(),
+        AgentKind::Kilo => config.kilo_command.clone(),
     }
 }
 
@@ -230,6 +231,9 @@ fn dangerously_skip_permissions(config: &Config, agent: AgentKind) -> bool {
         AgentKind::Codex => true,
         AgentKind::Claude => config.claude_dangerously_skip_permissions,
         AgentKind::Agy => config.agy_dangerously_skip_permissions,
+        // Kilo exposes a TUI `--auto` switch, but its runtime semantics are
+        // not yet verified natively; no fixed bypass argument is offered.
+        AgentKind::Kilo => false,
     }
 }
 
@@ -240,6 +244,7 @@ fn agent_arguments(config: &Config, agent: AgentKind) -> Vec<String> {
             .then(|| "--dangerously-skip-permissions".to_owned())
             .into_iter()
             .collect(),
+        AgentKind::Kilo => Vec::new(),
     }
 }
 
@@ -248,6 +253,7 @@ const fn default_command(agent: AgentKind) -> &'static str {
         AgentKind::Codex => "codex",
         AgentKind::Claude => "claude",
         AgentKind::Agy => "agy",
+        AgentKind::Kilo => "kilo",
     }
 }
 
@@ -256,6 +262,7 @@ const fn agent_order(agent: AgentKind) -> u8 {
         AgentKind::Codex => 0,
         AgentKind::Claude => 1,
         AgentKind::Agy => 2,
+        AgentKind::Kilo => 3,
     }
 }
 
@@ -302,6 +309,14 @@ const fn install_instructions(agent: AgentKind) -> AgentInstallInstructions {
             docs_url: "https://antigravity.google/docs/cli/install",
             requires_server_access: true,
         },
+        AgentKind::Kilo => AgentInstallInstructions {
+            command: "npm install -g @kilocode/cli",
+            shell: "powershell",
+            verify_command: "kilo --version",
+            update_command: "kilo upgrade",
+            docs_url: "https://kilo.ai/docs/code-with-ai/platforms/cli",
+            requires_server_access: true,
+        },
     }
 }
 
@@ -330,6 +345,14 @@ const fn install_instructions(agent: AgentKind) -> AgentInstallInstructions {
             verify_command: "agy --version",
             update_command: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
             docs_url: "https://antigravity.google/docs/cli/install",
+            requires_server_access: true,
+        },
+        AgentKind::Kilo => AgentInstallInstructions {
+            command: "npm install -g @kilocode/cli",
+            shell: "sh",
+            verify_command: "kilo --version",
+            update_command: "kilo upgrade",
+            docs_url: "https://kilo.ai/docs/code-with-ai/platforms/cli",
             requires_server_access: true,
         },
     }
@@ -361,6 +384,7 @@ mod tests {
             agy_command: None,
             no_agent_auto_detect: false,
             agy_dangerously_skip_permissions: false,
+            kilo_command: None,
             token: None,
             no_open_browser: true,
             log_level: "info".to_owned(),
@@ -374,7 +398,62 @@ mod tests {
 
         assert_eq!(profiles.primary.command, "claude");
         assert_eq!(profiles.new_session.command, "claude");
-        assert_eq!(profiles.additional.len(), 2);
+        assert_eq!(profiles.additional.len(), 3);
+    }
+
+    #[test]
+    fn kilo_profile_uses_fixed_defaults_without_bypass_arguments() {
+        let profiles = build_agent_profiles(&config(AgentKind::Codex));
+        let kilo = profiles
+            .additional
+            .iter()
+            .find(|profile| profile.agent == AgentKind::Kilo)
+            .expect("Kilo profile");
+
+        assert_eq!(kilo.command, "kilo");
+        assert!(kilo.arguments.is_empty());
+        let catalog = profiles
+            .catalog
+            .profiles
+            .iter()
+            .find(|profile| profile.terminal.agent == AgentKind::Kilo)
+            .expect("Kilo catalog profile");
+        assert!(!catalog.explicit_override);
+        assert!(!catalog.dangerously_skip_permissions);
+        assert_eq!(agent_order(AgentKind::Kilo), 3);
+    }
+
+    #[test]
+    fn kilo_primary_and_override_follow_the_shared_resolution_rules() {
+        let mut primary = config(AgentKind::Kilo);
+        primary.kilo_command = Some("trusted-kilo-wrapper".to_owned());
+        let profiles = build_agent_profiles(&primary);
+        assert_eq!(profiles.primary.command, "trusted-kilo-wrapper");
+        assert_eq!(profiles.new_session.command, "trusted-kilo-wrapper");
+        assert!(profiles.primary.arguments.is_empty());
+        assert_eq!(profiles.additional.len(), 3);
+
+        let mut explicit = config(AgentKind::Codex);
+        explicit.no_agent_auto_detect = true;
+        explicit.kilo_command = Some("kilo-custom".to_owned());
+        let profiles = build_agent_profiles(&explicit);
+        assert_eq!(profiles.additional.len(), 1);
+        assert_eq!(profiles.additional[0].agent, AgentKind::Kilo);
+        assert_eq!(profiles.additional[0].command, "kilo-custom");
+    }
+
+    #[test]
+    fn kilo_install_guidance_is_static_npm_metadata() {
+        let instructions = install_instructions(AgentKind::Kilo);
+
+        assert_eq!(instructions.command, "npm install -g @kilocode/cli");
+        assert_eq!(instructions.verify_command, "kilo --version");
+        assert_eq!(instructions.update_command, "kilo upgrade");
+        assert_eq!(
+            instructions.docs_url,
+            "https://kilo.ai/docs/code-with-ai/platforms/cli"
+        );
+        assert!(instructions.requires_server_access);
     }
 
     #[test]

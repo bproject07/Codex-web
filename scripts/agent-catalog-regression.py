@@ -34,6 +34,9 @@ PHONE_USER_AGENT = (
 EXPECTED_VERSION = "9.8.7"
 CLAUDE_VERSION = "2.1.220"
 AGY_VERSION = "1.1.7"
+KILO_VERSION = "1.4.2"
+AGENT_KINDS = ("codex", "claude", "agy", "kilo")
+AGENT_COUNT = len(AGENT_KINDS)
 
 
 def parse_args() -> argparse.Namespace:
@@ -175,19 +178,21 @@ def write_ready_command(path: Path, output: str, label: str) -> None:
     path.chmod(0o700)
 
 
-def write_fake_commands(root: Path) -> tuple[Path, Path, Path, Path]:
+def write_fake_commands(root: Path) -> tuple[Path, Path, Path, Path, Path]:
     auto_bin = root / "auto-bin"
     auto_bin.mkdir()
     if os.name == "nt":
         ready = root / "codex-fixture.cmd"
         claude = auto_bin / "claude.cmd"
         missing_agy = root / "missing-agy.cmd"
+        missing_kilo = root / "missing-kilo.cmd"
     else:
         ready = root / "codex-fixture"
         claude = auto_bin / "claude"
         missing_agy = root / "missing-agy"
+        missing_kilo = root / "missing-kilo"
     write_ready_command(ready, f"codex-cli {EXPECTED_VERSION}", "Codex")
-    return ready, auto_bin, claude, missing_agy
+    return ready, auto_bin, claude, missing_agy, missing_kilo
 
 
 def isolated_server_environment(root: Path, auto_bin: Path) -> dict[str, str]:
@@ -227,9 +232,11 @@ def validate_catalog(
         assert isinstance(server.get(key), str) and server[key], server
 
     agents = catalog.get("agents")
-    assert isinstance(agents, list) and len(agents) == 3, catalog
+    assert isinstance(agents, list) and len(agents) == AGENT_COUNT, catalog
     by_kind = {agent.get("kind"): agent for agent in agents if isinstance(agent, dict)}
-    assert set(by_kind) == {"codex", "claude", "agy"}, catalog
+    assert set(by_kind) == set(AGENT_KINDS), catalog
+    # The catalog is ordered by the fixed agent order, Kilo last.
+    assert [agent.get("kind") for agent in agents] == list(AGENT_KINDS), catalog
 
     assert expected_states.keys() == by_kind.keys(), expected_states
     for kind, expected_state in expected_states.items():
@@ -247,10 +254,19 @@ def validate_catalog(
         assert by_kind["claude"].get("version") == CLAUDE_VERSION, by_kind["claude"]
     if expected_states["agy"] == "ready":
         assert by_kind["agy"].get("version") == AGY_VERSION, by_kind["agy"]
+    if expected_states["kilo"] == "ready":
+        assert by_kind["kilo"].get("version") == KILO_VERSION, by_kind["kilo"]
 
     assert by_kind["claude"].get("dangerouslySkipPermissions") is True, by_kind[
         "claude"
     ]
+    # Kilo has no fixed bypass argument in this release.
+    assert by_kind["kilo"].get("dangerouslySkipPermissions") is False, by_kind["kilo"]
+    kilo_install = by_kind["kilo"].get("install")
+    assert isinstance(kilo_install, dict), by_kind["kilo"]
+    assert kilo_install.get("command") == "npm install -g @kilocode/cli", kilo_install
+    assert kilo_install.get("verifyCommand") == "kilo --version", kilo_install
+    assert kilo_install.get("updateCommand") == "kilo upgrade", kilo_install
     for kind, agent in by_kind.items():
         assert isinstance(agent.get("dangerouslySkipPermissions"), bool), agent
         install = agent.get("install")
@@ -409,6 +425,15 @@ def assert_start_actions_reachable(page: Page, picker: Any) -> None:
         options.evaluate("element => { element.scrollTop = 0; }")
 
 
+def open_header_menu(page: Page) -> None:
+    """Open the Menu popover, expanding the collapsed mobile header first."""
+    disclosure = page.locator(".mobile-header-toggle")
+    if disclosure.is_visible() and disclosure.get_attribute("aria-expanded") == "false":
+        disclosure.click()
+    page.locator(".header-menu-trigger").click()
+    page.locator("[role='menu']").wait_for(state="visible")
+
+
 def advance_workspace_picker(page: Page) -> None:
     """Accept the current folder so the agent picker opens for it."""
     workspace_picker = page.locator(".workspace-picker")
@@ -444,9 +469,8 @@ def exercise_picker(
         f"http://127.0.0.1:{port}/?token={token}",
         wait_until="domcontentloaded",
     )
-    page.locator(".status--connected").wait_for(state="visible")
-    page.locator(".header-menu-trigger").click()
-    page.locator("[role='menu']").wait_for(state="visible")
+    page.locator(".status--connected:visible").wait_for(state="visible")
+    open_header_menu(page)
     with page.expect_request(
         lambda request: "/api/agent-catalog?refresh=true" in request.url
     ):
@@ -455,7 +479,7 @@ def exercise_picker(
     picker = page.locator(".agent-picker")
     picker.wait_for(state="visible")
     page.wait_for_function(
-        "() => document.querySelectorAll('.agent-option').length === 3"
+        f"() => document.querySelectorAll('.agent-option').length === {AGENT_COUNT}"
     )
     automatic_refresh = picker.get_by_role(
         "button", name="Check installed agents again"
@@ -472,7 +496,7 @@ def exercise_picker(
         ".agent-option--missing, .agent-option--misconfigured"
     )
     starts = picker.locator("[data-agent-start]")
-    assert cards.count() == 3
+    assert cards.count() == AGENT_COUNT
     assert ready_cards.count() == ready_count
     assert unavailable_cards.count() == unavailable_count
     ready_text = "\n".join(ready_cards.all_inner_texts())
@@ -480,15 +504,21 @@ def exercise_picker(
     assert EXPECTED_VERSION in ready_text
     if ready_count >= 2:
         assert CLAUDE_VERSION in ready_text
-    if ready_count == 3:
+    if ready_count >= 3:
         assert AGY_VERSION in ready_text
+    if ready_count == AGENT_COUNT:
+        assert KILO_VERSION in ready_text
     assert starts.count() == ready_count
     start_labels = starts.all_inner_texts()
     assert "Start Codex" in start_labels
     if ready_count >= 2:
         assert "Start Claude" in start_labels
-    if ready_count == 3:
+    if ready_count >= 3:
         assert "Start AGY" in start_labels
+    if ready_count == AGENT_COUNT:
+        assert "Start Kilo" in start_labels
+    assert picker.locator(".agent-option--kilo").count() == 1
+    assert "Kilo Code CLI" in picker.inner_text()
     assert_start_actions_reachable(page, picker)
     assert picker.locator("input, textarea").count() == 0
     assert picker.locator(".agent-install-command code").count() == unavailable_count
@@ -585,9 +615,8 @@ def exercise_unavailable_to_ready_focus(
             f"http://127.0.0.1:{port}/?token={token}",
             wait_until="domcontentloaded",
         )
-        page.locator(".status--connected").wait_for(state="visible")
-        page.locator(".header-menu-trigger").click()
-        page.locator("[role='menu']").wait_for(state="visible")
+        page.locator(".status--connected:visible").wait_for(state="visible")
+        open_header_menu(page)
         with page.expect_request(
             lambda request: "/api/agent-catalog?refresh=true" in request.url
         ):
@@ -669,8 +698,8 @@ def main() -> int:
         temporary_root = Path(temp)
         project = temporary_root / "project"
         project.mkdir()
-        ready, auto_bin, claude_command, missing_agy = write_fake_commands(
-            temporary_root
+        ready, auto_bin, claude_command, missing_agy, missing_kilo = (
+            write_fake_commands(temporary_root)
         )
         command = [
             str(args.server),
@@ -687,6 +716,8 @@ def main() -> int:
             "--claude-dangerously-skip-permissions",
             "--agy-command",
             str(missing_agy),
+            "--kilo-command",
+            str(missing_kilo),
             "--token",
             token,
             "--no-open-browser",
@@ -719,6 +750,7 @@ def main() -> int:
                 "codex": "ready",
                 "claude": "missing" if os.name == "nt" else "misconfigured",
                 "agy": "misconfigured",
+                "kilo": "misconfigured",
             }
             initial_api_result = validate_catalog(initial_catalog, initial_states)
 
@@ -736,7 +768,7 @@ def main() -> int:
                         args.port,
                         token,
                         ready_count=1,
-                        unavailable_count=2,
+                        unavailable_count=3,
                     )
 
                     transition_focus_result = exercise_unavailable_to_ready_focus(
@@ -754,6 +786,7 @@ def main() -> int:
                         "codex": "ready",
                         "claude": "ready",
                         "agy": "misconfigured",
+                        "kilo": "misconfigured",
                     }
                     refreshed_api_result = validate_catalog(
                         refreshed_catalog,
@@ -784,13 +817,18 @@ def main() -> int:
                         args.port,
                         token,
                         ready_count=2,
-                        unavailable_count=1,
+                        unavailable_count=2,
                     )
 
                     write_ready_command(
                         missing_agy,
                         AGY_VERSION,
                         "AGY",
+                    )
+                    write_ready_command(
+                        missing_kilo,
+                        KILO_VERSION,
+                        "Kilo",
                     )
                     all_ready_catalog = request_json(
                         args.port,
@@ -801,6 +839,7 @@ def main() -> int:
                         "codex": "ready",
                         "claude": "ready",
                         "agy": "ready",
+                        "kilo": "ready",
                     }
                     all_ready_api_result = validate_catalog(
                         all_ready_catalog,
@@ -811,9 +850,7 @@ def main() -> int:
                         token,
                         "/api/agents",
                     )
-                    assert all_ready_agents == ["codex", "claude", "agy"], (
-                        all_ready_agents
-                    )
+                    assert all_ready_agents == list(AGENT_KINDS), all_ready_agents
                     created_agy = request_json(
                         args.port,
                         token,
@@ -829,11 +866,27 @@ def main() -> int:
                         f"/api/sessions/{created_agy['terminalId']}",
                         method="DELETE",
                     )
+                    created_kilo = request_json(
+                        args.port,
+                        token,
+                        "/api/sessions",
+                        method="POST",
+                        payload={"agent": "kilo"},
+                    )
+                    assert created_kilo["agent"] == "kilo", created_kilo
+                    assert created_kilo["status"] == "running", created_kilo
+                    assert created_kilo["name"].startswith("Kilo "), created_kilo
+                    request_json(
+                        args.port,
+                        token,
+                        f"/api/sessions/{created_kilo['terminalId']}",
+                        method="DELETE",
+                    )
                     all_ready_browser_result = run_browser_checks(
                         browser,
                         args.port,
                         token,
-                        ready_count=3,
+                        ready_count=AGENT_COUNT,
                         unavailable_count=0,
                     )
                 finally:
@@ -852,6 +905,7 @@ def main() -> int:
                             "allReadyAgents": all_ready_agents,
                             "startedAgent": created["agent"],
                             "startedAllReadyAgent": created_agy["agent"],
+                            "startedKiloAgent": created_kilo["agent"],
                         },
                         "browser": {
                             "initial": initial_browser_result,

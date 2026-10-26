@@ -13,6 +13,7 @@ const PRIMARY_SESSION: SessionSnapshot = {
   terminalId: "11111111-1111-4111-8111-111111111111",
   name: "Terminal 1",
   agent: "codex",
+  agentLabel: "Codex",
   isPrimary: true,
   createdAt: 1_000,
   sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -182,6 +183,53 @@ describe("terminal session API selection", () => {
         }),
       }),
     );
+  });
+
+  it("creates a Kilo session and labels it from the shared agent table", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ ...SECONDARY_SESSION, agent: "kilo", name: "Kilo 2" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createSession("0123456789abcdef", "kilo"),
+    ).resolves.toMatchObject({
+      agent: "kilo",
+      agentLabel: "Kilo",
+      name: "Kilo 2",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ agent: "kilo" }),
+      }),
+    );
+  });
+
+  it("keeps an unknown agent visible without collapsing it to a runnable kind", () => {
+    const unknown = normalizeSessionSnapshot(
+      { ...SECONDARY_SESSION, agent: "future-agent\u0007\u00e9" },
+      SECONDARY_SESSION.terminalId,
+    );
+    expect(unknown.agent).toBeNull();
+    expect(unknown.agentLabel).toBe("future-agent");
+    expect(unknown.terminalId).toBe(SECONDARY_SESSION.terminalId);
+
+    const empty = normalizeSessionSnapshot(
+      { ...SECONDARY_SESSION, agent: 42 },
+      SECONDARY_SESSION.terminalId,
+    );
+    expect(empty.agent).toBeNull();
+    expect(empty.agentLabel).toBe("Unknown agent");
+
+    const { agent: _agent, agentLabel: _agentLabel, ...legacy } =
+      SECONDARY_SESSION;
+    const absent = normalizeSessionSnapshot(legacy, SECONDARY_SESSION.terminalId);
+    expect(absent.agent).toBe("codex");
+    expect(absent.agentLabel).toBe("Codex");
   });
 
   it("preserves a current-server directory error instead of reporting an old server", async () => {

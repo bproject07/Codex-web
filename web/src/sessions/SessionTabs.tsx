@@ -7,7 +7,11 @@ import {
 } from "react";
 
 import type { SessionSnapshot } from "../api";
-import { AGENT_LABELS, AGENT_SHORT_LABELS } from "../agents";
+import {
+  agentClassName,
+  sessionAgentLabel,
+  sessionAgentShortLabel,
+} from "../agents";
 import {
   peerStatusLabel,
   peerThreadDisplayId,
@@ -223,12 +227,12 @@ export function SessionTabs({
                 ).length
               : 0;
           const peerLabel = reviewerThread
-            ? `${AGENT_SHORT_LABELS[candidate.agent]}·${peerThreadDisplayId(
+            ? `${sessionAgentShortLabel(candidate)}·${peerThreadDisplayId(
                 reviewerThread.id,
               )}`
             : null;
           const fullLabel = reviewerThread
-            ? `↳ ${AGENT_LABELS[candidate.agent]} Review · ${peerThreadDisplayId(
+            ? `↳ ${sessionAgentLabel(candidate)} Review · ${peerThreadDisplayId(
                 reviewerThread.id,
               )}`
             : candidate.name;
@@ -250,9 +254,9 @@ export function SessionTabs({
               <button
                 type="button"
                 role="tab"
-                className={`session-tab session-tab--agent-${candidate.agent}${
-                  selected ? " session-tab--active" : ""
-                }`}
+                className={`session-tab session-tab--agent-${agentClassName(
+                  candidate.agent,
+                )}${selected ? " session-tab--active" : ""}`}
                 aria-selected={selected}
                 title={candidate.project}
                 onClick={() => onSelect(candidate)}
@@ -266,7 +270,7 @@ export function SessionTabs({
                 <span className="visually-hidden">
                   {peerState ? peerStatusLabel(peerState) : candidate.status}
                   {", "}
-                  {AGENT_LABELS[candidate.agent]}
+                  {sessionAgentLabel(candidate)}
                 </span>
                 {reviewerThread && (
                   <span className="session-tab-peer-arrow" aria-hidden="true">
@@ -281,7 +285,7 @@ export function SessionTabs({
                     compactSessionName(
                       candidate.name,
                       index,
-                      AGENT_SHORT_LABELS[candidate.agent],
+                      sessionAgentShortLabel(candidate),
                     )}
                 </span>
                 {candidate.isPrimary && (

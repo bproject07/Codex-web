@@ -1,6 +1,7 @@
 import {
   ApiError,
   createSession,
+  isAgentKind,
   type AgentKind,
   type SessionSnapshot,
 } from "../api";
@@ -11,7 +12,6 @@ const MAX_STORED_PLAN_LENGTH = 8 * 1024 * 1024;
 const MAX_RESTORED_SESSIONS = 255;
 const MAX_DIRECTORY_ID_LENGTH = 256 * 1024;
 const CLEAN_ID = /^[A-Za-z0-9_-]{1,128}$/;
-const AGENTS: ReadonlySet<AgentKind> = new Set(["codex", "claude", "agy"]);
 
 export interface SessionRestoreStorage {
   getItem(key: string): string | null;
@@ -51,6 +51,33 @@ export interface StageSessionRestoreOptions {
 export interface StageSessionRestoreResult {
   sessionCount: number;
   saved: boolean;
+  /**
+   * Ordinary tabs whose agent this browser bundle cannot recreate. When this
+   * is non-zero the plan is refused instead of silently dropping those tabs.
+   */
+  unsupportedCount: number;
+}
+
+/**
+ * Explains a refused restore plan. `action` names what was not performed,
+ * for example "The update was not started." or "The server was not
+ * restarted."
+ */
+export function describeRefusedSessionRestore(
+  staged: StageSessionRestoreResult,
+  action: string,
+): string {
+  if (staged.unsupportedCount > 0) {
+    const tabs = `${staged.unsupportedCount} terminal tab${
+      staged.unsupportedCount === 1 ? "" : "s"
+    }`;
+    return `${tabs} use${
+      staged.unsupportedCount === 1 ? "s" : ""
+    } an agent this browser build does not recognize, so the tabs cannot be recreated afterwards. Reload the page to load the current web assets, then try again. ${action}`;
+  }
+  return `The browser could not save ${staged.sessionCount} terminal tab${
+    staged.sessionCount === 1 ? "" : "s"
+  } for restoration. ${action}`;
 }
 
 export interface RestoreSessionTabsOptions {
@@ -83,8 +110,12 @@ export function stageSessionRestorePlan({
 }: StageSessionRestoreOptions): StageSessionRestoreResult {
   const resolvedStorage = resolveStorage(storage);
   const primary = sessions.find((session) => session.isPrimary);
-  const restorable = sessions
-    .filter(isRestorableSession)
+  const ordinary = sessions.filter(isRestorableSession);
+  const unsupportedCount = ordinary.filter(
+    (session) => session.agent === null,
+  ).length;
+  const restorable = ordinary
+    .filter(hasRunnableAgent)
     .slice(0, MAX_RESTORED_SESSIONS)
     .map((session) => ({
       sourceTerminalId: session.terminalId,
@@ -92,9 +123,17 @@ export function stageSessionRestorePlan({
       directoryId: session.directoryId,
     }));
 
+  if (unsupportedCount > 0) {
+    // Refuse rather than silently lose tabs this bundle cannot recreate.
+    return {
+      sessionCount: ordinary.length,
+      saved: false,
+      unsupportedCount,
+    };
+  }
   if (restorable.length === 0) {
     discardSessionRestorePlan(resolvedStorage);
-    return { sessionCount: 0, saved: true };
+    return { sessionCount: 0, saved: true, unsupportedCount: 0 };
   }
   if (
     !resolvedStorage ||
@@ -102,7 +141,11 @@ export function stageSessionRestorePlan({
     !validVersion(sourceVersion) ||
     !validVersion(targetVersion)
   ) {
-    return { sessionCount: restorable.length, saved: false };
+    return {
+      sessionCount: restorable.length,
+      saved: false,
+      unsupportedCount: 0,
+    };
   }
 
   const plan: SessionRestorePlan = {
@@ -121,6 +164,7 @@ export function stageSessionRestorePlan({
   return {
     sessionCount: restorable.length,
     saved,
+    unsupportedCount: 0,
   };
 }
 
@@ -260,6 +304,12 @@ function isRestorableSession(session: SessionSnapshot): boolean {
   return !session.isPrimary && session.purpose.kind === "interactive";
 }
 
+function hasRunnableAgent(
+  session: SessionSnapshot,
+): session is SessionSnapshot & { agent: AgentKind } {
+  return session.agent !== null;
+}
+
 function sessionMatchesEntry(
   session: SessionSnapshot,
   entry: RestorableSession,
@@ -351,7 +401,7 @@ function isSessionRestorePlan(value: unknown): value is SessionRestorePlan {
     if (
       !isRecord(session) ||
       !validId(session.sourceTerminalId) ||
-      !AGENTS.has(session.agent as AgentKind) ||
+      !isAgentKind(session.agent) ||
       typeof session.directoryId !== "string" ||
       session.directoryId.length < 1 ||
       session.directoryId.length > MAX_DIRECTORY_ID_LENGTH ||

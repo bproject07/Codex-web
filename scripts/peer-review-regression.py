@@ -1179,7 +1179,9 @@ def exercise_unread_discard(
         payload={
             "sourceTerminalId": source["terminalId"],
             "directoryId": reviewer_directory_id,
-            "targetAgent": "agy",
+            # A Kilo reviewer proves the fourth agent kind flows through the
+            # same helper protocol and naming as the other reviewers.
+            "targetAgent": "kilo",
             "action": "review",
             "instruction": "Review the synthetic case whose unread response will be discarded.",
             "sourceReady": True,
@@ -1187,9 +1189,10 @@ def exercise_unread_discard(
     )
     thread_id = created["id"]
     reviewer_id = created["reviewerTerminalId"]
-    assert created["targetAgent"] == "agy", created
+    assert created["targetAgent"] == "kilo", created
     reviewer = session_by_id(sessions(port, token), reviewer_id)
-    assert reviewer["agent"] == "agy", reviewer
+    assert reviewer["agent"] == "kilo", reviewer
+    assert reviewer["name"].startswith("↳ Kilo Review "), reviewer
     reviewer_root = track_owned_process(owned_processes, int(reviewer["pid"]), "discard reviewer PTY root")
     attachments.append(attach_terminal(port, token, reviewer_id))
     ready = wait_for_event(
@@ -1721,6 +1724,8 @@ def main() -> int:
             "--claude-command",
             str(fixture),
             "--agy-command",
+            str(fixture),
+            "--kilo-command",
             str(fixture),
             "--no-agent-auto-detect",
             "--no-open-browser",

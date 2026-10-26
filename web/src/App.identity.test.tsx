@@ -7,6 +7,7 @@ const SESSION: SessionSnapshot = {
   terminalId: "11111111-1111-4111-8111-111111111111",
   name: "Codex 1",
   agent: "codex",
+  agentLabel: "Codex",
   isPrimary: true,
   createdAt: 1_000,
   sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -77,6 +78,24 @@ describe("AppIdentity", () => {
     expect(html).toContain("active-agent--claude");
     expect(html).toContain("Claude");
     expect(html).not.toContain("demo-app");
+
+    const kilo: SessionSnapshot = { ...SESSION, agent: "kilo", agentLabel: "Kilo" };
+    const kiloHtml = renderIdentity({ session: kilo });
+    expect(kiloHtml).toContain("active-agent--kilo");
+    expect(kiloHtml).toContain(">Kilo<");
+  });
+
+  it("labels an agent this bundle does not recognize without inventing a runnable kind", () => {
+    const unsupported: SessionSnapshot = {
+      ...SESSION,
+      agent: null,
+      agentLabel: "future-agent",
+    };
+    const html = renderIdentity({ session: unsupported });
+
+    expect(html).toContain("active-agent--unsupported");
+    expect(html).toContain(">future-agent<");
+    expect(html).not.toContain("active-agent--codex");
   });
 
   it("keeps status accessible in every non-connected state", () => {

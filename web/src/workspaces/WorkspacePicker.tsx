@@ -8,6 +8,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
+import { AGENT_LABELS } from "../agents";
 import {
   createWorkspaceBrowserState,
   displayDirectoryName,
@@ -974,14 +975,7 @@ function ShortcutRow({
 }
 
 function agentLabel(agent: WorkspaceAgent): string {
-  switch (agent) {
-    case "codex":
-      return "Codex";
-    case "claude":
-      return "Claude";
-    case "agy":
-      return "AGY";
-  }
+  return AGENT_LABELS[agent];
 }
 
 function errorDomainLabel(domain: WorkspaceErrorDomain): string {

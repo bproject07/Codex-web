@@ -701,6 +701,7 @@ async fn test_router_with_options(
         agy_command: None,
         no_agent_auto_detect: true,
         agy_dangerously_skip_permissions: false,
+        kilo_command: None,
         token: None,
         no_open_browser: true,
         log_level: "info".to_owned(),

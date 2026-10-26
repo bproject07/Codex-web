@@ -18,7 +18,7 @@ param(
     [ValidateNotNullOrEmpty()]
     [string] $Command,
 
-    [ValidateSet("codex", "claude", "agy")]
+    [ValidateSet("codex", "claude", "agy", "kilo")]
     [string] $PrimaryAgent = "codex",
 
     [string] $NewSessionCommand,
@@ -32,6 +32,8 @@ param(
     [string] $AgyCommand,
 
     [switch] $AgyDangerouslySkipPermissions,
+
+    [string] $KiloCommand,
 
     [switch] $NoAgentAutoDetect,
 
@@ -102,6 +104,9 @@ if ($AgyCommand) {
 }
 if ($AgyDangerouslySkipPermissions) {
     $arguments += "--agy-dangerously-skip-permissions"
+}
+if ($KiloCommand) {
+    $arguments += @("--kilo-command", $KiloCommand)
 }
 if ($NoAgentAutoDetect) {
     $arguments += "--no-agent-auto-detect"

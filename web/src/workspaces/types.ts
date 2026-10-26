@@ -1,3 +1,5 @@
+import type { AgentKind } from "../agents";
+
 /**
  * A directory on the host that runs Codex Web Terminal.
  *
@@ -10,7 +12,7 @@ export interface WorkspaceDirectory {
   path: string;
 }
 
-export type WorkspaceAgent = "codex" | "claude" | "agy";
+export type WorkspaceAgent = AgentKind;
 
 /**
  * One non-recursive directory listing.

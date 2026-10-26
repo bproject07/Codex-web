@@ -902,6 +902,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kilo_agent_values_persist_and_reopen_without_translation() {
+        let fixture = tempfile::tempdir().expect("temporary state");
+        let state_dir = fixture.path().join("state");
+        let store = WorkspaceStore::open(state_dir.clone())
+            .await
+            .expect("open store");
+        let favorite_path = absolute_test_path("kilo-favorite");
+        store
+            .upsert_favorite(directory(&favorite_path), None, Some(AgentKind::Kilo))
+            .await
+            .expect("create Kilo favorite");
+        store
+            .record_recent(directory(&favorite_path), AgentKind::Kilo)
+            .await
+            .expect("record Kilo recent");
+
+        let serialized = std::fs::read_to_string(store.state_file()).expect("read persisted state");
+        assert!(serialized.contains("\"kilo\""));
+        assert!(!serialized.contains("\"codex\""));
+
+        let reopened = WorkspaceStore::open(state_dir)
+            .await
+            .expect("reopen store")
+            .snapshot()
+            .await;
+        assert_eq!(reopened.favorites[0].preferred_agent, Some(AgentKind::Kilo));
+        assert_eq!(reopened.recent[0].last_agent, AgentKind::Kilo);
+    }
+
+    #[tokio::test]
     async fn favorite_delete_is_persisted_and_unknown_ids_are_rejected() {
         let fixture = tempfile::tempdir().expect("temporary state");
         let state_dir = fixture.path().join("state");

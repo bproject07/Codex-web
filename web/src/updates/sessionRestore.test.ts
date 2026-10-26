@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiError, type SessionSnapshot } from "../api";
 import {
+  describeRefusedSessionRestore,
   discardSessionRestorePlanForOriginalGeneration,
   restoreSessionTabs,
   stageSessionRestorePlan,
@@ -31,6 +32,7 @@ function session(
     terminalId,
     name: terminalId,
     agent: "codex",
+    agentLabel: "Codex",
     isPrimary: false,
     createdAt: 1,
     sessionId: `${terminalId}-generation`,
@@ -69,7 +71,7 @@ describe("update session restoration", () => {
       storage,
     });
 
-    expect(result).toEqual({ sessionCount: 1, saved: true });
+    expect(result).toEqual({ sessionCount: 1, saved: true, unsupportedCount: 0 });
     expect([...storage.values.values()][0]).toContain("ordinary");
     expect([...storage.values.values()][0]).not.toContain("reviewer");
   });
@@ -86,7 +88,83 @@ describe("update session restoration", () => {
       storage: null,
     });
 
-    expect(result).toEqual({ sessionCount: 1, saved: false });
+    expect(result).toEqual({ sessionCount: 1, saved: false, unsupportedCount: 0 });
+  });
+
+  it("stores Kilo tabs and refuses a plan that would drop an unsupported agent", () => {
+    const storage = new MemoryStorage();
+    const kilo = stageSessionRestorePlan({
+      sourceVersion: "0.3.0",
+      targetVersion: "0.4.0",
+      sessions: [
+        session("primary", { isPrimary: true }),
+        session("kilo-tab", { agent: "kilo", agentLabel: "Kilo" }),
+      ],
+      selectedTerminalId: "kilo-tab",
+      storage,
+    });
+    expect(kilo).toEqual({ sessionCount: 1, saved: true, unsupportedCount: 0 });
+    expect([...storage.values.values()][0]).toContain('"agent":"kilo"');
+
+    const refused = stageSessionRestorePlan({
+      sourceVersion: "0.3.0",
+      targetVersion: "0.4.0",
+      sessions: [
+        session("primary", { isPrimary: true }),
+        session("kilo-tab", { agent: "kilo", agentLabel: "Kilo" }),
+        session("future-tab", { agent: null, agentLabel: "future-agent" }),
+      ],
+      selectedTerminalId: "kilo-tab",
+      storage,
+    });
+    expect(refused).toEqual({
+      sessionCount: 2,
+      saved: false,
+      unsupportedCount: 1,
+    });
+    expect(
+      describeRefusedSessionRestore(refused, "The update was not started."),
+    ).toBe(
+      "1 terminal tab uses an agent this browser build does not recognize, so the tabs cannot be recreated afterwards. Reload the page to load the current web assets, then try again. The update was not started.",
+    );
+    // The earlier valid plan is untouched by a refusal.
+    expect([...storage.values.values()][0]).toContain('"agent":"kilo"');
+    expect([...storage.values.values()][0]).not.toContain("future-tab");
+  });
+
+  it("rejects a stored plan whose agent this bundle cannot run", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(
+      "codex-web-update-session-restore",
+      JSON.stringify({
+        schemaVersion: 1,
+        sourceVersion: "0.3.0",
+        targetVersion: "0.4.0",
+        primaryTerminalId: "primary-old",
+        selectedTerminalId: "",
+        sessions: [
+          {
+            sourceTerminalId: "ordinary-old",
+            agent: "future-agent",
+            directoryId: "1-d29ya3NwYWNl",
+          },
+        ],
+        restored: [],
+      }),
+    );
+    const create = vi.fn();
+
+    return restoreSessionTabs({
+      token: "0123456789abcdef",
+      serverVersion: "0.4.0",
+      sessions: [session("primary-new", { isPrimary: true })],
+      storage,
+      create,
+    }).then((result) => {
+      expect(create).not.toHaveBeenCalled();
+      expect(result.sessions).toHaveLength(1);
+      expect(storage.values.size).toBe(0);
+    });
   });
 
   it("discards a failed plan only while the original primary still exists", () => {

@@ -1,5 +1,6 @@
 import {
   apiRequest,
+  isAgentKind,
   type AgentKind,
 } from "../api";
 import type {
@@ -288,7 +289,7 @@ function requirePeerStatus(value: unknown): PeerStatus {
 }
 
 function requireAgentKind(value: unknown): AgentKind {
-  if (value !== "codex" && value !== "claude" && value !== "agy") {
+  if (!isAgentKind(value)) {
     throw new Error("The server returned an invalid peer agent.");
   }
   return value;

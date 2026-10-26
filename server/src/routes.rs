@@ -994,6 +994,10 @@ mod tests {
             parse_create_session_request(br#"{"agent":"claude","command":"malicious"}"#).is_err()
         );
         assert!(parse_create_session_request(br#"{"agent":"unknown"}"#).is_err());
+
+        let kilo = parse_create_session_request(br#"{"agent":"kilo"}"#).expect("Kilo request");
+        assert_eq!(kilo.agent, Some(AgentKind::Kilo));
+        assert!(parse_create_session_request(br#"{"agent":"Kilo"}"#).is_err());
     }
 
     #[test]

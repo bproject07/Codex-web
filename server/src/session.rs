@@ -1042,6 +1042,7 @@ fn automation_prompt_policy(agent: AgentKind) -> AutomationPromptPolicy {
         AgentKind::Codex => AUTOMATION_PROMPT_SETTLE_DELAY,
         AgentKind::Claude => AUTOMATION_PROMPT_SETTLE_DELAY,
         AgentKind::Agy => AUTOMATION_PROMPT_SETTLE_DELAY,
+        AgentKind::Kilo => AUTOMATION_PROMPT_SETTLE_DELAY,
     };
     AutomationPromptPolicy {
         settle_delay,

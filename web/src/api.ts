@@ -1,3 +1,9 @@
+import {
+  AGENT_LABELS,
+  isAgentKind,
+  unsupportedAgentLabel,
+  type AgentKind,
+} from "./agents";
 import { requestTimeout } from "./requestTimeout";
 import type {
   WorkspaceDirectory,
@@ -6,6 +12,9 @@ import type {
   WorkspaceLibrary,
   WorkspaceRecent,
 } from "./workspaces";
+
+export { AGENT_KINDS, isAgentKind } from "./agents";
+export type { AgentKind } from "./agents";
 
 const TOKEN_STORAGE_KEY = "codex-web-token";
 const SELECTED_TERMINAL_STORAGE_KEY = "codex-web-selected-terminal";
@@ -20,8 +29,6 @@ export type SessionLifecycle =
   | "terminated"
   | "exited"
   | "failed";
-
-export type AgentKind = "codex" | "claude" | "agy";
 
 export type SessionPurpose =
   | { kind: "interactive" }
@@ -82,7 +89,14 @@ export interface HealthSnapshot {
 export interface SessionSnapshot {
   terminalId: string;
   name: string;
-  agent: AgentKind;
+  /**
+   * Runnable agent kind. `null` means the server reported an agent this
+   * browser bundle does not recognize; the tab stays attachable, but
+   * creation, restore planning, and agent-specific actions are unavailable.
+   */
+  agent: AgentKind | null;
+  /** Display label for the agent, also for unsupported values. */
+  agentLabel: string;
   isPrimary: boolean;
   createdAt: number;
   sessionId: string | null;
@@ -354,7 +368,7 @@ export async function getAgentCatalog(
       install: {
         command: "",
         shell: "server shell",
-        verifyCommand: `${kind === "agy" ? "agy" : kind} --version`,
+        verifyCommand: `${kind} --version`,
         updateCommand: "",
         docsUrl: "",
         requiresServerAccess: true,
@@ -537,27 +551,33 @@ type LegacySessionSnapshot = Omit<
   | "terminalId"
   | "name"
   | "agent"
+  | "agentLabel"
   | "isPrimary"
   | "createdAt"
   | "directoryId"
   | "purpose"
 >;
 
+type RawSessionSnapshot = Partial<Omit<SessionSnapshot, "agent">> &
+  LegacySessionSnapshot & { agent?: unknown };
+
 export function normalizeSessionSnapshot(
-  session: Partial<SessionSnapshot> & LegacySessionSnapshot,
+  session: RawSessionSnapshot,
   fallbackTerminalId: string,
 ): SessionSnapshot {
   const terminalId =
     typeof session.terminalId === "string" && session.terminalId
       ? session.terminalId
       : fallbackTerminalId;
+  const { agent, agentLabel } = normalizeSessionAgent(
+    session.agent,
+    Object.prototype.hasOwnProperty.call(session, "agent"),
+  );
   return {
     ...session,
     terminalId,
-    agent:
-      session.agent === "claude" || session.agent === "agy"
-        ? session.agent
-        : "codex",
+    agent,
+    agentLabel,
     name:
       typeof session.name === "string" && session.name.trim()
         ? session.name
@@ -577,6 +597,24 @@ export function normalizeSessionSnapshot(
       Object.prototype.hasOwnProperty.call(session, "purpose"),
     ),
   };
+}
+
+/**
+ * Distinguishes an absent legacy field (older servers only ran Codex) from an
+ * explicit value this bundle does not recognize. Unknown values are never
+ * collapsed to a runnable kind.
+ */
+function normalizeSessionAgent(
+  value: unknown,
+  fieldIsPresent: boolean,
+): { agent: AgentKind | null; agentLabel: string } {
+  if (!fieldIsPresent || value === undefined) {
+    return { agent: "codex", agentLabel: AGENT_LABELS.codex };
+  }
+  if (isAgentKind(value)) {
+    return { agent: value, agentLabel: AGENT_LABELS[value] };
+  }
+  return { agent: null, agentLabel: unsupportedAgentLabel(value) };
 }
 
 function normalizeSessionPurpose(
@@ -818,10 +856,6 @@ function normalizeAgentCatalogEntry(entry: unknown): AgentCatalogEntry {
       requiresServerAccess: true,
     },
   };
-}
-
-function isAgentKind(value: unknown): value is AgentKind {
-  return value === "codex" || value === "claude" || value === "agy";
 }
 
 function isAgentDiscoveryState(value: unknown): value is AgentDiscoveryState {

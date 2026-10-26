@@ -55,6 +55,19 @@ const CATALOG: AgentCatalog = {
         verifyCommand: "agy --version",
       },
     },
+    {
+      kind: "kilo",
+      state: "ready",
+      configuration: "auto",
+      version: "1.4.0",
+      dangerouslySkipPermissions: false,
+      install: {
+        ...INSTALL,
+        command: "npm install -g @kilocode/cli",
+        verifyCommand: "kilo --version",
+        updateCommand: "kilo upgrade",
+      },
+    },
   ],
 };
 
@@ -87,6 +100,11 @@ describe("AgentPicker", () => {
     expect(html).toContain("Start Codex");
     expect(html).not.toContain("Start Claude");
     expect(html).not.toContain("Start AGY");
+    expect(html).toContain("Start Kilo");
+    expect(html).toContain("Kilo Code CLI");
+    expect(html).toContain("Installed version 1.4.0");
+    expect(html).toContain('data-agent-start="kilo"');
+    expect(html).toContain("agent-option--kilo");
     expect(html).toContain("install claude");
     expect(html).toContain("Official docs");
     expect(html).toContain("Check again");

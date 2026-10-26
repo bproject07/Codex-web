@@ -18,6 +18,7 @@ export {
   waitForServerVersion,
 } from "./restart";
 export {
+  describeRefusedSessionRestore,
   discardSessionRestorePlan,
   discardSessionRestorePlanForOriginalGeneration,
   restoreSessionTabs,

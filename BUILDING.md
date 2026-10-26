@@ -170,10 +170,11 @@ Both Windows and Linux builds require:
 - Python 3.11 or newer for regression and redistribution-license scripts
 - enough space for `web/node_modules` and `server/target`
 
-Codex, Claude, and AGY are not needed to compile or run the automated unit
-tests. At least the selected primary CLI is required for a real application
-session and the final runtime smoke test. Testing all three profiles requires
-all three CLIs on the runtime host.
+Codex, Claude, AGY, and Kilo are not needed to compile or run the automated
+unit tests. At least the selected primary CLI is required for a real
+application session and the final runtime smoke test. Testing all four
+profiles requires all four CLIs on the runtime host (Kilo additionally needs
+Node.js and npm there).
 
 | Component | Build machine | Packaged runtime host |
 | --- | --- | --- |
@@ -197,6 +198,7 @@ python --version
 codex --version
 claude --version
 agy --version
+kilo --version
 ```
 
 The frontend dependency graph is locked by `web/package-lock.json`. Use
@@ -365,7 +367,7 @@ Install the equivalent of:
 - Node.js `^20.19.0` or `>=22.12.0` with npm
 - stable Rust and Cargo
 - Python 3 only if running the optional browser/mobile regression utilities
-- the selected Codex, Claude, or AGY CLI for a real runtime session
+- the selected Codex, Claude, AGY, or Kilo CLI for a real runtime session
 
 On Arch Linux, the required native build tools are normally provided by
 `base-devel`. Rust can be installed with rustup or the distribution packages.
@@ -834,6 +836,7 @@ Agent discovery is enabled by default. Verify the intended entry points first:
 codex --version
 claude --version
 agy --version
+kilo --version
 ```
 
 Start a disposable loopback server without command overrides:
@@ -853,7 +856,8 @@ server OS, and become ready after a host-side installation followed by
 **Refresh** or **Check again**. The check must not execute an installer,
 updater, package manager, login flow, or shell expression.
 
-Repeat with explicit `--command`, `--codex-command`, `--claude-command`, and `--agy-command`
+Repeat with explicit `--command`, `--codex-command`, `--claude-command`,
+`--agy-command`, and `--kilo-command`
 paths. A deliberately invalid explicit path must be `misconfigured` and must
 not fall back to a PATH entry. Repeat with `--no-agent-auto-detect`: the
 primary profile is still resolved and validated, while optional profiles
@@ -863,7 +867,20 @@ For an explicit dangerous-mode launch test, add
 `--claude-dangerously-skip-permissions` and
 `--agy-dangerously-skip-permissions`. These switches pass the fixed upstream
 `--dangerously-skip-permissions` argument directly to the respective process
-and must remain off for normal validation.
+and must remain off for normal validation. Kilo has no such switch and must
+start with an empty fixed-argument list.
+
+For the Kilo profile specifically, confirm with the real CLI on each platform:
+the `--version` probe returns a strict semantic version inside the 3-second
+deadline; the Windows npm `kilo.cmd` shim launches through `cmd.exe /d /s /c
+call` and the TUI appears in the managed ConPTY; terminating the session also
+ends any child or local server process Kilo started (Job Object containment
+on Windows, process group on Linux); a `@cwt` review with Kilo as reviewer
+reaches `__cwt-peer` through Kilo's shell tool with the inherited `CWT_*`
+environment; and `/resume-claude` / `/resume-codex` list sessions created by
+managed Claude Code and Codex tabs in the same directory and import one of
+them. Record any deviation as a limitation in `README.md` and `OPERATIONS.md`
+rather than working around it in the launcher.
 
 Run this matrix on both Windows and Linux. Validate real native PTY startup for
 each installed agent, not only catalog JSON or mocked commands. If an upstream
@@ -1028,8 +1045,10 @@ Another native review is explicitly discarded while its response is unread:
 the exact-turn HTTP DELETE must return 204, remove the thread/session, stop
 the reviewer process tree, and leave the other sessions unchanged. The source
 helper must reject retrieval with broker HTTP 404, and the source must still
-answer a health input. The regression checks the requested AGY reviewer identity
-and rejects discard with an actual previous turn ID. The helper unit test also
+answer a health input. The regression checks the requested Kilo reviewer
+identity and name (the fourth agent kind flows through the same helper
+protocol) and rejects discard with an actual previous turn ID. The helper unit
+test also
 checks the recovery hint when output succeeded but its receipt could not be
 confirmed.
 The regression also verifies that WebSocket
@@ -1287,6 +1306,8 @@ command -v claude
 claude --version
 command -v agy
 agy --version
+command -v kilo
+kilo --version
 test -r /dev/ptmx
 ```
 

@@ -8,21 +8,21 @@
 full, self-hosted access to the real Codex CLI experience directly from any
 desktop or mobile browser.**
 
-Codex Web Terminal runs the **real Codex CLI, Claude Code, or Google
-Antigravity CLI (`agy`)** in a native pseudo-terminal (ConPTY on Windows, a
-Unix PTY on Linux and macOS) and exposes that terminal to a browser through an
-authenticated WebSocket. It does not reimplement or scrape an agent
-interface. ANSI output, cursor movement, menus, approval prompts, diffs,
-spinners, keyboard input, and the rest of each TUI are interpreted by xterm.js
-from the original PTY byte stream.
+Codex Web Terminal runs the **real Codex CLI, Claude Code, Google
+Antigravity CLI (`agy`), or Kilo Code CLI (`kilo`)** in a native
+pseudo-terminal (ConPTY on Windows, a Unix PTY on Linux and macOS) and exposes
+that terminal to a browser through an authenticated WebSocket. It does not
+reimplement or scrape an agent interface. ANSI output, cursor movement, menus,
+approval prompts, diffs, spinners, keyboard input, and the rest of each TUI
+are interpreted by xterm.js from the original PTY byte stream.
 
 The project is an independent wrapper. It does not download, vendor, modify,
 or silently install or update any agent CLI.
 
 > [!IMPORTANT]
 > This is an independent, unofficial community project. It is not affiliated
-> with, sponsored by, or endorsed by OpenAI, Anthropic, or Google. Agent CLIs
-> are installed separately and are not included in this repository.
+> with, sponsored by, or endorsed by OpenAI, Anthropic, Google, or Kilo Code.
+> Agent CLIs are installed separately and are not included in this repository.
 
 > **This application provides remote terminal access.**
 > **Do not expose it directly to the public internet.**
@@ -87,7 +87,7 @@ Rust server
                     └── Unix: resolved executable
                           │
                           ▼
-               Codex, Claude, or AGY
+             Codex, Claude, AGY, or Kilo
                in each selected folder
 ```
 
@@ -105,8 +105,8 @@ session's bounded terminal output buffer before it resumes live output.
 - 20 persistent, web-managed session entries per server by default,
   configurable from 1 through 256; each running entry owns one agent process
 - One primary agent session, started automatically
-- Read-only discovery of Codex, Claude, and AGY with installed version and
-  `ready`, `missing`, or `misconfigured` status
+- Read-only discovery of Codex, Claude, AGY, and Kilo with installed version
+  and `ready`, `missing`, or `misconfigured` status
 - Up to four authenticated WebSocket clients per terminal session
 - A canonicalized default project directory selected when the server starts
 - Per-session working-folder selection from server-side Favorites, Recent,
@@ -114,7 +114,7 @@ session's bounded terminal output buffer before it resumes live output.
 - Server-side persistence for up to 100 Favorites and 30 deduplicated Recent
   folders
 - Supervised `@cwt` handoff, independent review, return, and same-reviewer
-  `Recheck` between Codex, Claude, and AGY sessions
+  `Recheck` between Codex, Claude, AGY, and Kilo sessions
 - A fresh dedicated reviewer PTY for every new peer thread; ordinary sessions
   are never selected or reused as reviewers
 - One raw terminal output buffer per session, bounded to 16 MiB and 16,384 chunks
@@ -313,9 +313,10 @@ npm --version
 ### Agent CLIs
 
 Install at least the primary CLI on the machine that will run `codex-web`.
-Codex Web Terminal detects Codex, Claude Code, and AGY in the server account's
-`PATH` and documented per-user install locations. Detection runs only each
-CLI's `--version` command; it never installs software or starts a login flow.
+Codex Web Terminal detects Codex, Claude Code, AGY, and Kilo Code CLI in the
+server account's `PATH` and documented per-user install locations. Detection
+runs only each CLI's `--version` command; it never installs software or
+starts a login flow.
 
 Official native install commands:
 
@@ -324,11 +325,17 @@ Official native install commands:
 | Codex | `powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 \| iex"` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` |
 | Claude Code | `irm https://claude.ai/install.ps1 \| iex` | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | AGY | `irm https://antigravity.google/cli/install.ps1 \| iex` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` |
+| Kilo Code CLI | `npm install -g @kilocode/cli` | `npm install -g @kilocode/cli` |
+
+Kilo Code CLI is distributed through npm, so Node.js and npm must already be
+installed on the server host. Update it with `kilo upgrade` (or
+`npm update -g @kilocode/cli`).
 
 Review the current upstream instructions before executing downloaded scripts:
 [Codex CLI](https://learn.chatgpt.com/docs/codex/cli),
-[Claude Code](https://code.claude.com/docs/en/setup), and
-[Antigravity CLI](https://antigravity.google/docs/cli/install).
+[Claude Code](https://code.claude.com/docs/en/setup),
+[Antigravity CLI](https://antigravity.google/docs/cli/install), and
+[Kilo Code CLI](https://kilo.ai/docs/code-with-ai/platforms/cli).
 
 Verify and authenticate each CLI directly on the server host:
 
@@ -336,12 +343,13 @@ Verify and authenticate each CLI directly on the server host:
 codex --version
 claude --version
 agy --version
+kilo --version
 ```
 
-Run `codex login`, `claude`, or `agy` once when that CLI requires interactive
-authentication. Codex Web Terminal neither copies nor reads agent credentials.
-Each child inherits the server account's environment and existing CLI
-configuration.
+Run `codex login`, `claude`, `agy`, or `kilo` (then `/connect`) once when
+that CLI requires interactive authentication. Codex Web Terminal neither
+copies nor reads agent credentials. Each child inherits the server account's
+environment and existing CLI configuration.
 
 Every Codex terminal receives `--yolo`, including the primary terminal, **New**,
 restarts, and dedicated `@cwt` reviewers. It disables Codex approval prompts
@@ -405,7 +413,7 @@ remains available to assistive technology.
 The header reads left to right: the identity area (the active project's full
 server path — it may visually ellipsize on narrow screens while the complete
 value stays in the tooltip and accessible text — the selected session's agent
-(Codex, Claude, or AGY; the backend exposes no finer-grained LLM model
+(Codex, Claude, AGY, or Kilo; the backend exposes no finer-grained LLM model
 identity), and the connection-status dot), then the ellipsis **Menu** button
 (`…`, labelled "Menu" on hover), then the left-aligned session tabs and the
 **@cwt** peer button. There is no manual reconnect button; the browser retries
@@ -425,12 +433,38 @@ project folder**:
   never lists files. A full, absolute path on the server can also be opened
   manually.
 
-After **Use folder**, **New terminal** shows the detected Codex, Claude, and
-AGY status and installed version; choose a ready agent to start it in that
-folder. A Favorite with a remembered preferred agent or a Recent entry with
-its last agent also provides a direct **Start Codex**, **Start Claude**, or
-**Start AGY** shortcut. If that agent is no longer ready, the normal agent
-picker opens instead.
+After **Use folder**, **New terminal** shows the detected Codex, Claude, AGY,
+and Kilo status and installed version; choose a ready agent to start it in
+that folder. A Favorite with a remembered preferred agent or a Recent entry
+with its last agent also provides a direct **Start Codex**, **Start Claude**,
+**Start AGY**, or **Start Kilo** shortcut. If that agent is no longer ready,
+the normal agent picker opens instead.
+
+### Continuing a Claude Code or Codex conversation in Kilo
+
+Kilo Code CLI can import a Claude Code or Codex transcript recorded for the
+current directory. When a Claude or Codex subscription limit is exhausted, or
+when switching agents is otherwise preferable, this is the supported way to
+carry the conversation over. Codex Web Terminal adds nothing to it: the server
+never reads agent transcript files and never parses terminal text.
+
+1. **New terminal** → choose the **same folder** as the Claude or Codex tab →
+   **Start Kilo**.
+2. In the new Kilo tab, at an empty prompt, type `/resume-claude` or
+   `/resume-codex`. Kilo lists the most recent sessions recorded for that
+   directory (or accepts that agent's own session identifier). Pick the one
+   to continue.
+3. Continue working. The imported history keeps its order and ends with an
+   import notice that lists any content Kilo could not represent.
+
+Only the import into Kilo is a Kilo feature; it is one-way. Kilo-to-Kilo
+continuation uses `kilo --continue`, `kilo export`, and `kilo import`.
+Moving a conversation into Claude Code, Codex, or AGY has no equivalent and
+currently requires a hand-written summary pasted into the new tab. This is a
+transcript import, not a resumed process: approvals, environment, and running
+state of the original agent are not carried over, and the managed session
+identifier shown by Codex Web Terminal is unrelated to any agent's own
+session identifier.
 
 The **New terminal** title, **Refresh**, and Close stay visible while its
 folder details and agent cards scroll together. A long folder path does not
@@ -730,13 +764,14 @@ Supported arguments:
 | `--state-dir` | Dedicated directory for server-side Favorites and Recent state; uses the per-user OS default when omitted |
 | `--shell` | Windows-only: `powershell` or `cmd`; ignored on Unix |
 | `--command` | Explicit executable override for the primary terminal |
-| `--primary-agent` | Agent represented by `--command`: `codex`, `claude`, or `agy`; defaults to `codex` |
+| `--primary-agent` | Agent represented by `--command`: `codex`, `claude`, `agy`, or `kilo`; defaults to `codex` |
 | `--new-session-command` | Optional executable used when **New** starts the primary agent; defaults to the resolved primary command |
 | `--codex-command` | Explicit Codex CLI executable override |
 | `--claude-command` | Explicit Claude Code executable override |
 | `--claude-dangerously-skip-permissions` | Launch Claude with `--dangerously-skip-permissions` |
 | `--agy-command` | Explicit Google Antigravity CLI executable override |
 | `--agy-dangerously-skip-permissions` | Launch AGY with `--dangerously-skip-permissions` |
+| `--kilo-command` | Explicit Kilo Code CLI executable override |
 | `--no-agent-auto-detect` | Disable automatic discovery of optional agent CLIs |
 | `--token` | Authentication token, minimum 16 characters |
 | `--no-open-browser` | Do not launch the default browser |
@@ -750,18 +785,22 @@ Unix, the resolved executable is launched directly without a shell wrapper.
 Codex always receives fixed `--yolo`, plus `--no-daemon` only when its bounded
 `--help` probe confirms support. The two
 optional permission switches add the fixed upstream
-`--dangerously-skip-permissions` argument to Claude or AGY. On Unix and Windows
+`--dangerously-skip-permissions` argument to Claude or AGY. Kilo is launched
+with no fixed arguments; its permission policy comes from Kilo's own
+configuration file. On Unix and Windows
 `cmd` launches each remains a distinct process argument. The Windows
 PowerShell wrapper encodes each as a
 single-quoted literal with embedded quotes escaped. These arguments cannot be
 selected or altered by a browser client.
 
 With auto-detection enabled (the default), the primary executable name follows
-`--primary-agent`, and the server probes `codex`, `claude`, and `agy` plus
-their documented per-user locations. An explicit `--command`,
-`--codex-command`, `--claude-command`, or `--agy-command` is authoritative: a
-typo or broken path is reported as `misconfigured` and never falls back
-silently. Use
+`--primary-agent`, and the server probes `codex`, `claude`, `agy`, and `kilo`
+plus their documented per-user locations (for Kilo, the npm global prefix
+`%APPDATA%\npm` on Windows and the usual `~/.local/bin`, `/usr/local/bin`,
+and `/opt/homebrew/bin` on Unix). An explicit `--command`,
+`--codex-command`, `--claude-command`, `--agy-command`, or `--kilo-command`
+is authoritative: a typo or broken path is reported as `misconfigured` and
+never falls back silently. Use
 `--no-agent-auto-detect` when deployment policy requires optional agents to
 have explicit profiles. The primary profile is still resolved and validated.
 
@@ -769,7 +808,8 @@ have explicit profiles. The primary profile is still resolved and validated.
 that resumes a specific Codex thread. For example, start the primary with that
 trusted wrapper and pass `--new-session-command codex` so **New** always opens
 an independent Codex session when the Codex (primary-agent) card is selected.
-Claude and AGY cards continue to use their own override or default command.
+Claude, AGY, and Kilo cards continue to use their own override or default
+command.
 
 Normally no additional flags are needed to expose installed CLIs. Explicit
 paths are useful for services with a restricted `PATH`:
@@ -779,7 +819,8 @@ paths are useful for services with a restricted `PATH`:
   --project "C:\Projects\my-app" `
   --command codex `
   --claude-command "$HOME\.local\bin\claude.exe" `
-  --agy-command "$env:LOCALAPPDATA\agy\bin\agy.exe"
+  --agy-command "$env:LOCALAPPDATA\agy\bin\agy.exe" `
+  --kilo-command "$env:APPDATA\npm\kilo.cmd"
 ```
 
 Codex starts with `--yolo`, disabling approvals and sandboxing. When its help
@@ -800,7 +841,11 @@ They launch `claude --dangerously-skip-permissions` and
 `agy --dangerously-skip-permissions`, respectively. Both upstream CLIs warn
 that this bypasses their normal safety confirmations. The similar Claude flag
 `--allow-dangerously-skip-permissions` merely makes bypass mode available; it
-does not enable bypass mode at startup.
+does not enable bypass mode at startup. Codex Web Terminal offers no
+equivalent switch for Kilo: Kilo's `--auto` option and `/auto-approve`
+command exist upstream, but they are not appended by this server. Configure
+Kilo's `allow` / `ask` / `deny` permissions in its own configuration file
+instead.
 
 ## Environment variables
 
@@ -822,6 +867,7 @@ CLI arguments override environment variables.
 | `CODEX_WEB_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS` | `false` |
 | `CODEX_WEB_AGY_COMMAND` | Unset; auto-detects `agy` |
 | `CODEX_WEB_AGY_DANGEROUSLY_SKIP_PERMISSIONS` | `false` |
+| `CODEX_WEB_KILO_COMMAND` | Unset; auto-detects `kilo` |
 | `CODEX_WEB_NO_AGENT_AUTO_DETECT` | `false` |
 | `CODEX_WEB_SHELL` | `powershell`; Windows-only and ignored on Unix |
 | `CODEX_WEB_LOG_LEVEL` | `info` |
@@ -1046,7 +1092,8 @@ are capped at 256 KiB; larger requests return HTTP 413. New `@cwt` peer
 requests use the same cap so a valid opaque Windows directory ID still fits;
 their instruction remains independently limited to 4 KiB.
 
-`/api/agent-catalog` uses schema version 1 and reports each known agent as
+`/api/agent-catalog` uses schema version 1 and reports each known agent
+(`codex`, `claude`, `agy`, `kilo`, in that fixed order) as
 `ready`, `missing`, or `misconfigured`. The `configuration` field is `auto` or
 `override`, so a broken authoritative override can be repaired instead of
 mistaken for a missing installation. Install metadata is an allowlisted
@@ -1056,7 +1103,9 @@ verification command, update command, official documentation URL, and
 **Check again**
 performs detection only. No API endpoint executes that command.
 
-Each session snapshot contains a stable `terminalId`, display `name`, `agent`,
+Each session snapshot contains a stable `terminalId`, display `name`, `agent`
+(one of the catalog kinds above; a browser bundle that does not recognize a
+value keeps the tab visible as an unknown agent rather than relabelling it),
 `isPrimary`, `createdAt`, the display `project` path, and its opaque
 `directoryId`. The existing `sessionId` identifies the current PTY generation
 and therefore changes when that terminal is restarted. `purpose` is
@@ -1195,7 +1244,8 @@ user who starts it. Anyone with the authenticated URL can interact with the
 selected agent and potentially cause commands to run in any directory readable
 by that operating-system account. Codex sessions always use `--yolo`, so Codex
 approval prompts and sandboxing are disabled; Claude and AGY can be configured
-similarly. The same token authorizes filesystem-root discovery, directory
+similarly, and Kilo's own configuration file decides its permission prompts.
+The same token authorizes filesystem-root discovery, directory
 browsing, manual absolute-path resolution, Favorites/Recent access, and PTY
 launch. `--project` is only the default working directory; it is not a sandbox
 or an authorization boundary.
@@ -1367,6 +1417,8 @@ where.exe claude
 claude --version
 where.exe agy
 agy --version
+where.exe kilo
+kilo --version
 ```
 
 On Linux:
@@ -1378,13 +1430,15 @@ command -v claude
 claude --version
 command -v agy
 agy --version
+command -v kilo
+kilo --version
 ```
 
-For an npm installation, `where.exe` should normally show `codex.cmd`. Restart
-PowerShell after installation so it receives the updated `PATH`. You can also
-pass a trusted absolute path with `--command`, `--codex-command`,
-`--claude-command`, or `--agy-command`. On Linux, ensure the resolved file is
-executable. An explicit
+For an npm installation, `where.exe` should normally show `codex.cmd` or
+`kilo.cmd`. Restart PowerShell after installation so it receives the updated
+`PATH`. You can also pass a trusted absolute path with `--command`,
+`--codex-command`, `--claude-command`, `--agy-command`, or `--kilo-command`.
+On Linux, ensure the resolved file is executable. An explicit
 override never falls back to auto-detection; correct or remove it, restart the
 server if its startup configuration changed, and press **Refresh** or
 **Check again**. Run any displayed install command on the server host, never
@@ -1425,7 +1479,8 @@ issue because it contains filesystem paths and usage history.
 Check `/api/sessions` through the UI status, confirm that the selected
 `terminalId` still exists, and inspect the server log. Confirm that
 the selected agent's verification command (`codex --version`,
-`claude --version`, or `agy --version`) succeeds for the same operating-system
+`claude --version`, `agy --version`, or `kilo --version`) succeeds for the
+same operating-system
 user. The browser retries the WebSocket automatically; reload the page to
 force a fresh attachment, then restart only the affected managed session.
 Browser privacy extensions that block WebSockets can also cause a blank
@@ -1502,6 +1557,20 @@ when available.
   turn waiting; terminal output is never parsed to infer completion.
 - Agent discovery is local and read-only. The browser cannot install, update,
   authenticate, or repair a CLI; it only shows vetted host-side instructions.
+- Kilo Code CLI is launched with no fixed arguments. Its interactive
+  `--auto` option is not exposed as a `codex-web` switch, and the Kilo
+  transcript import (`/resume-claude`, `/resume-codex`) is a Kilo feature the
+  user runs inside the Kilo tab; it is one-way and skips content Kilo cannot
+  represent. The server never reads transcript files on an agent's behalf.
+- Saved workspace state and browser restore plans that mention `kilo` are
+  rejected by releases older than the one that introduced it: an older
+  executable quarantines the whole `workspaces.json` and starts with empty
+  Favorites/Recent, and an older browser bundle discards such a restore plan.
+  Conversely, a cached older web bundle shows a session created with a newer
+  server's unrecognized agent as an "unknown agent" tab: it stays usable for
+  input and output, but agent-specific actions are hidden and **Restart
+  server** / software update refuse to proceed until the page is reloaded with
+  current assets, so that tab is never silently lost.
 - Application self-update is separate from agent CLI management. It is
   available only to marked official release packages, uses a fixed repository
   and exact assets, and always requires an explicit restart confirmation.

@@ -268,6 +268,22 @@ button:disabled {
   color: #cbc3ff;
 }
 
+.active-agent--kilo,
+.session-agent-badge--kilo {
+  border-color: #2f9e8f;
+  background: #16332f;
+  color: #a9f0e4;
+}
+
+/* An agent value this bundle cannot run: neutral, clearly distinct. */
+.active-agent--unsupported,
+.session-agent-badge--unsupported {
+  border-color: #6b6b6b;
+  background: #2a2a2a;
+  color: #d0d0d0;
+  border-style: dashed;
+}
+
 /* Tabs and @cwt sit left, directly after the identity/menu group. Overflow
    lives solely inside the .session-tabs strip, so the Menu trigger can never
    be scrolled away with the tabs. */
@@ -521,6 +537,16 @@ button:disabled {
 .header-actions .session-tab--agent-agy,
 .header-actions .session-tab--agent-agy:hover {
   border-left-color: #7565c7;
+}
+
+.header-actions .session-tab--agent-kilo,
+.header-actions .session-tab--agent-kilo:hover {
+  border-left-color: #2f9e8f;
+}
+
+.header-actions .session-tab--agent-unsupported,
+.header-actions .session-tab--agent-unsupported:hover {
+  border-left-color: #6b6b6b;
 }
 
 .session-tab-status {
@@ -2167,6 +2193,12 @@ details.peer-composer__readiness p {
   border-color: #7565c7;
   background: #292144;
   color: #cbc3ff;
+}
+
+.agent-mark--kilo {
+  border-color: #2f9e8f;
+  background: #16332f;
+  color: #a9f0e4;
 }
 
 .sessions-title-row {

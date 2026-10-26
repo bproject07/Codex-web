@@ -34,7 +34,7 @@ import {
   type AgentKind,
   type SessionSnapshot,
 } from "./api";
-import { agentLabel } from "./agents";
+import { agentClassName, agentLabel, sessionAgentLabel } from "./agents";
 import { AgentPicker } from "./AgentPicker";
 import type { TerminalViewHandle } from "./terminal/TerminalView";
 import { TerminalDeck } from "./terminal/TerminalDeck";
@@ -73,6 +73,7 @@ import {
   applyUpdate,
   checkForUpdate,
   getUpdateStatus,
+  describeRefusedSessionRestore,
   discardSessionRestorePlan,
   discardSessionRestorePlanForOriginalGeneration,
   isUpdateHandoffState,
@@ -190,7 +191,7 @@ export function App() {
     ["exited", "failed", "terminated"].includes(session.status)
       ? "codex_exited"
       : connectionStatus;
-  const selectedAgentLabel = session ? agentLabel(session.agent) : "Agent";
+  const selectedAgentLabel = session ? sessionAgentLabel(session) : "Agent";
   const peerSourceSession = useMemo(() => {
     if (!session) {
       return null;
@@ -478,9 +479,7 @@ export function App() {
       });
       if (!staged.saved) {
         setUpdateError(
-          `The browser could not save ${staged.sessionCount} terminal tab${
-            staged.sessionCount === 1 ? "" : "s"
-          } for restoration. The update was not started.`,
+          describeRefusedSessionRestore(staged, "The update was not started."),
         );
         return;
       }
@@ -1273,9 +1272,10 @@ export function App() {
       });
       if (!staged.saved) {
         throw new Error(
-          `The browser could not save ${staged.sessionCount} terminal tab${
-            staged.sessionCount === 1 ? "" : "s"
-          } for restoration. The server was not restarted.`,
+          describeRefusedSessionRestore(
+            staged,
+            "The server was not restarted.",
+          ),
         );
       }
 
@@ -1486,7 +1486,7 @@ export function App() {
     if (
       !(await requestConfirmation({
         title: `Remove "${target.name}"?`,
-        body: `Its ${agentLabel(target.agent)} process will be terminated.`,
+        body: `Its ${sessionAgentLabel(target)} process will be terminated.`,
         confirmLabel: "Remove",
         danger: true,
       }))
@@ -2110,8 +2110,10 @@ export function AppIdentity({
       <h1 className="app-context" title={session?.project || undefined}>
         <span className="app-context-project">{projectPath}</span>
         {session && (
-          <span className={`active-agent active-agent--${session.agent}`}>
-            {agentLabel(session.agent)}
+          <span
+            className={`active-agent active-agent--${agentClassName(session.agent)}`}
+          >
+            {sessionAgentLabel(session)}
           </span>
         )}
         <span className={`app-status status--${effectiveStatus}`}>
@@ -2288,9 +2290,9 @@ function SessionsPanel({
                   <div className="session-name-row">
                     <h3 title={candidate.name}>{candidate.name}</h3>
                     <span
-                      className={`session-badge session-agent-badge session-agent-badge--${candidate.agent}`}
+                      className={`session-badge session-agent-badge session-agent-badge--${agentClassName(candidate.agent)}`}
                     >
-                      {agentLabel(candidate.agent)}
+                      {sessionAgentLabel(candidate)}
                     </span>
                     {candidate.isPrimary && (
                       <span className="session-badge">Primary</span>

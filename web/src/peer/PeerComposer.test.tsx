@@ -9,6 +9,7 @@ const SOURCE: SessionSnapshot = {
   terminalId: "11111111-1111-4111-8111-111111111111",
   name: "Codex 1",
   agent: "codex",
+  agentLabel: "Codex",
   isPrimary: true,
   createdAt: 1_000,
   sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",

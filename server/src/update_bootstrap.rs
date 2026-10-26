@@ -1175,6 +1175,7 @@ mod tests {
             agy_command: None,
             no_agent_auto_detect: false,
             agy_dangerously_skip_permissions: false,
+            kilo_command: None,
             token: None,
             no_open_browser: true,
             log_level: "info".to_owned(),
