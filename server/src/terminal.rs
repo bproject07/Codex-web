@@ -1031,9 +1031,12 @@ mod command_tests {
     #[test]
     fn kilo_launch_has_no_fixed_arguments_and_resolves_the_plain_executable() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let command_path = write_kilo_fixture(directory.path());
+        // Preflight re-canonicalizes the project directory; a Windows temp
+        // path may be an 8.3 short name, so start from the canonical form.
+        let project_dir = dunce::canonicalize(directory.path()).expect("canonical fixture path");
+        let command_path = write_kilo_fixture(&project_dir);
         let config = TerminalConfig {
-            project_dir: directory.path().to_path_buf(),
+            project_dir: project_dir.clone(),
             command: command_path.to_string_lossy().into_owned(),
             arguments: Vec::new(),
             agent: AgentKind::Kilo,
@@ -1043,7 +1046,7 @@ mod command_tests {
         let resolved = preflight(&config).expect("Kilo fixture preflight");
         assert!(!resolved.codex_no_daemon);
         assert_eq!(
-            probe_command_version(&resolved, directory.path(), AgentKind::Kilo)
+            probe_command_version(&resolved, &project_dir, AgentKind::Kilo)
                 .expect("Kilo version probe"),
             "1.2.3"
         );
