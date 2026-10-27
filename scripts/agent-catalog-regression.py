@@ -16,6 +16,7 @@ import secrets
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any
@@ -153,18 +154,29 @@ def wait_for_server(
 
 def write_ready_command(path: Path, output: str, label: str) -> None:
     if os.name == "nt":
-        path.write_text(
-            "@echo off\r\n"
-            'if /i "%~1"=="--version" (\r\n'
-            f"  echo {output}\r\n"
-            "  exit /b 0\r\n"
-            ")\r\n"
-            # Use the fixture's ordinary path, not cmd's expansion of the
-            # canonical launch path (which can carry a Windows \\?\ prefix).
-            f'> "{path}.args" echo(%*\r\n'
-            f"echo disposable {label} fixture ready\r\n"
-            "ping 127.0.0.1 -t >nul\r\n",
+        # Match the Python-backed .cmd fixture used by the native peer tests.
+        # Capture decoded argv inside the child, without cmd echo/path expansion.
+        fixture = path.with_suffix(".py")
+        fixture.write_text(
+            "from pathlib import Path\n"
+            "import sys, time\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            f"    print({output!r})\n"
+            "    raise SystemExit(0)\n"
+            "if sys.argv[1:] == ['--help']:\n"
+            "    print('Synthetic fixture help')\n"
+            "    raise SystemExit(0)\n"
+            f"Path({str(path) + '.args'!r}).write_text('\\n'.join(sys.argv[1:]), encoding='utf-8')\n"
+            f"print({'disposable ' + label + ' fixture ready'!r}, flush=True)\n"
+            "while True:\n"
+            "    time.sleep(60)\n",
             encoding="utf-8",
+        )
+        launch = subprocess.list2cmdline([sys.executable, "-u", str(fixture)])
+        path.write_text(
+            f"@echo off\r\n{launch} %*\r\nexit /b %ERRORLEVEL%\r\n",
+            encoding="utf-8",
+            newline="",
         )
         return
 
@@ -891,8 +903,7 @@ def main() -> int:
                         if recorded_args:
                             break
                         time.sleep(0.05)
-                    # cmd may retain quotes around the one fixed argument.
-                    assert recorded_args in {"--auto", '"--auto"'}, recorded_args
+                    assert recorded_args == "--auto", recorded_args
                     request_json(
                         args.port, token, f"/api/sessions/{created_kilo['terminalId']}/restart",
                         method="POST",
