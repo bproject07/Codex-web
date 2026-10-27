@@ -460,7 +460,7 @@ mod windows_privacy {
                 let creator = unsafe {
                     IsWellKnownSid(sid, windows_sys::Win32::Security::WinCreatorOwnerSid)
                 } != 0;
-                if !trusted(sid) && !(creator && header.AceFlags & 8 != 0) {
+                if !(trusted(sid) || creator && header.AceFlags & 8 != 0) {
                     return Err(Error("unsafe_state_file"));
                 }
             }
