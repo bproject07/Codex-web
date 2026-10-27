@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import csv
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
@@ -25,6 +26,21 @@ peer = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = peer
 spec.loader.exec_module(peer)
 TOKEN = "synthetic-sharing-owner-token"
+
+
+def private_fixture_directory(root: Path):
+    if os.name != "nt":
+        root.chmod(0o700)
+        return
+    identity = subprocess.check_output(["whoami", "/user", "/fo", "csv", "/nh"],
+        text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    sid = next(csv.reader(identity.splitlines()))[1]
+    assert sid.startswith("S-1-") and all(c.isdigit() or c in "S-" for c in sid)
+    result = subprocess.run(["icacls", str(root), "/inheritance:r", "/grant:r",
+        "*"+sid+":(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW)
+    assert result.returncode == 0, "Could not make the disposable sharing directory private"
 
 
 def fixture(root: Path) -> Path:
@@ -149,6 +165,7 @@ def main():
     peer.assert_isolated_port(args.port)
     with tempfile.TemporaryDirectory(prefix="cwt-sharing-") as temporary:
         root = Path(temporary)
+        private_fixture_directory(root)
         command = fixture(root)
         environment = {key: value for key, value in os.environ.items()
             if not key.upper().startswith("CWT_") and key.upper() not in {"CODEX_THREAD_ID", "CLAUDECODE"}}
@@ -171,6 +188,13 @@ def main():
             return process
         def api(path, method="GET", payload=None, token=TOKEN, status=200):
             code, data = peer.http_request(args.port, path, token=token, method=method, payload=payload)
+            if code == 503 and status != 503:
+                # Never dump startup URLs, credentials or arbitrary server logs.
+                log.flush()
+                diagnostic = (root / "server.log").read_text(encoding="utf-8", errors="replace")
+                known = [reason for reason in ["unsafe_state_directory", "unsafe_state_file",
+                    "sharing_store_in_use", "sharing_schema_too_new", "storage_unavailable"] if reason in diagnostic]
+                print(json.dumps({"sharingStorageFailure": known}))
             assert code == status, f"{method} {path}: HTTP {code}, expected {status}"
             return data
         process = start()
