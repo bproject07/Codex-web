@@ -566,7 +566,11 @@ def exercise_picker(
     assert picker.locator(".agent-option--kilo").count() == 1
     assert "Kilo Code CLI" in picker.inner_text()
     assert_start_actions_reachable(page, picker)
-    assert picker.locator("input, textarea").count() == 0
+    # Recording is a boolean launch option. The picker must still expose no
+    # executable, argument, environment or other free-text input to the host.
+    assert picker.locator("input:not([type=checkbox]), textarea").count() == 0
+    recording = picker.get_by_role("checkbox", name="Record terminal history on this server")
+    assert recording.count() == 1 and not recording.is_checked()
     assert picker.locator(".agent-install-command code").count() == unavailable_count
     assert picker.locator(".agent-docs-link").count() == unavailable_count
     assert (
@@ -594,7 +598,8 @@ def exercise_picker(
         }"""
     )
     assert len(refresh_requests) == 2, refresh_requests
-    assert picker.locator("input, textarea").count() == 0
+    assert picker.locator("input:not([type=checkbox]), textarea").count() == 0
+    assert recording.count() == 1 and not recording.is_checked()
 
     after_refresh = picker_metrics(page)
     assert_picker_layout(after_refresh)
