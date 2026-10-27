@@ -9,6 +9,7 @@ temporary directory and never installs or updates a real agent.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,15 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from playwright.sync_api import Browser, Page, sync_playwright
+
+
+_peer_spec = importlib.util.spec_from_file_location(
+    "peer_regression", Path(__file__).with_name("peer-review-regression.py")
+)
+peer = importlib.util.module_from_spec(_peer_spec)
+assert _peer_spec.loader is not None
+sys.modules["peer_regression"] = peer
+_peer_spec.loader.exec_module(peer)
 
 
 DEFAULT_PORT = 8802
@@ -192,6 +202,26 @@ def write_ready_command(path: Path, output: str, label: str) -> None:
         encoding="utf-8",
     )
     path.chmod(0o700)
+
+
+def assert_kilo_launch_arguments(port: int, token: str, terminal_id: str, path: Path) -> None:
+    # ConPTY waits for the terminal's cursor-position reply before launching
+    # the command. Use the same attachment handshake as the native peer tests.
+    attachment = peer.attach_terminal(port, token, terminal_id)
+    try:
+        deadline = time.monotonic() + 10
+        recorded_args = ""
+        while time.monotonic() < deadline:
+            try:
+                recorded_args = path.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                pass
+            if recorded_args:
+                break
+            time.sleep(0.05)
+        assert recorded_args == "--auto", {"args": recorded_args, "captureExists": path.exists()}
+    finally:
+        attachment.close()
 
 
 def write_fake_commands(root: Path) -> tuple[Path, Path, Path, Path, Path]:
@@ -893,17 +923,8 @@ def main() -> int:
                     assert created_kilo["status"] == "running", created_kilo
                     assert created_kilo["name"].startswith("Kilo "), created_kilo
                     kilo_args = Path(str(missing_kilo) + ".args")
-                    deadline = time.monotonic() + 10
-                    recorded_args = ""
-                    while time.monotonic() < deadline:
-                        try:
-                            recorded_args = kilo_args.read_text(encoding="utf-8").strip()
-                        except FileNotFoundError:
-                            pass
-                        if recorded_args:
-                            break
-                        time.sleep(0.05)
-                    assert recorded_args == "--auto", recorded_args
+                    assert_kilo_launch_arguments(args.port, token, created_kilo["terminalId"], kilo_args)
+                    kilo_args.unlink()
                     request_json(
                         args.port, token, f"/api/sessions/{created_kilo['terminalId']}/restart",
                         method="POST",
@@ -914,6 +935,7 @@ def main() -> int:
                     )
                     assert restarted_kilo["status"] == "running"
                     assert restarted_kilo["sessionId"] != created_kilo["sessionId"]
+                    assert_kilo_launch_arguments(args.port, token, created_kilo["terminalId"], kilo_args)
                     request_json(
                         args.port,
                         token,
