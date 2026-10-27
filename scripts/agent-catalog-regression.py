@@ -159,7 +159,9 @@ def write_ready_command(path: Path, output: str, label: str) -> None:
             f"  echo {output}\r\n"
             "  exit /b 0\r\n"
             ")\r\n"
-            'echo %* > "%~f0.args"\r\n'
+            # Use the fixture's ordinary path, not cmd's expansion of the
+            # canonical launch path (which can carry a Windows \\?\ prefix).
+            f'> "{path}.args" echo(%*\r\n'
             f"echo disposable {label} fixture ready\r\n"
             "ping 127.0.0.1 -t >nul\r\n",
             encoding="utf-8",
@@ -880,9 +882,17 @@ def main() -> int:
                     assert created_kilo["name"].startswith("Kilo "), created_kilo
                     kilo_args = Path(str(missing_kilo) + ".args")
                     deadline = time.monotonic() + 10
-                    while not kilo_args.exists() and time.monotonic() < deadline:
+                    recorded_args = ""
+                    while time.monotonic() < deadline:
+                        try:
+                            recorded_args = kilo_args.read_text(encoding="utf-8").strip()
+                        except FileNotFoundError:
+                            pass
+                        if recorded_args:
+                            break
                         time.sleep(0.05)
-                    assert kilo_args.read_text(encoding="utf-8").strip() == "--auto"
+                    # cmd may retain quotes around the one fixed argument.
+                    assert recorded_args in {"--auto", '"--auto"'}, recorded_args
                     request_json(
                         args.port, token, f"/api/sessions/{created_kilo['terminalId']}/restart",
                         method="POST",
