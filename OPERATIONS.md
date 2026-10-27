@@ -697,7 +697,8 @@ secret hashes are stored. Proposal text and terminal output are sensitive
 plaintext on disk, so protect the state directory and backups as terminal
 data. Unix permissions are `0700` for the directory and `0600` for files;
 Windows validates the directory and database/sidecar ACLs, allowing only the
-current account, Administrators and SYSTEM (plus inheritable CREATOR OWNER).
+current account, Administrators and SYSTEM (plus inheritable CREATOR OWNER
+and OWNER RIGHTS when the object's owner is trusted).
 Broad access, null DACLs and reparse points disable sharing; existing ACLs are
 never silently changed. Use a private state directory owned by the service
 account. Concurrent servers must use distinct state directories.

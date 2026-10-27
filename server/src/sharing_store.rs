@@ -460,7 +460,12 @@ mod windows_privacy {
                 let creator = unsafe {
                     IsWellKnownSid(sid, windows_sys::Win32::Security::WinCreatorOwnerSid)
                 } != 0;
-                if !(trusted(sid) || creator && header.AceFlags & 8 != 0) {
+                // OWNER RIGHTS (S-1-3-4), used by Python's private directories,
+                // grants only the already-validated owner access to this object.
+                let owner_rights = unsafe {
+                    IsWellKnownSid(sid, windows_sys::Win32::Security::WinCreatorOwnerRightsSid)
+                } != 0;
+                if !(trusted(sid) || owner_rights || creator && header.AceFlags & 8 != 0) {
                     return Err(Error("unsafe_state_file"));
                 }
             }
@@ -849,6 +854,24 @@ CREATE TABLE approval_attempts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_accepts_owner_rights_for_a_trusted_owner() {
+        use std::os::windows::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("state");
+        crate::workspaces::prepare_state_directory_sync(&directory).unwrap();
+        let changed = std::process::Command::new("icacls.exe")
+            .arg(&directory)
+            .args(["/grant", "*S-1-3-4:(OI)(CI)F"])
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(changed.status.success());
+        let store = Store::open(directory).await.unwrap();
+        store.flush().await.unwrap();
+    }
 
     #[cfg(windows)]
     #[tokio::test]
