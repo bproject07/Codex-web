@@ -161,10 +161,16 @@ pub struct PeerBroker {
     inner: Arc<BrokerInner>,
 }
 
+/// Observer invoked after a PTY generation's capability has been revoked and
+/// the broker lock has been released. Used by the transfer coordinator so its
+/// own lock is never nested inside the broker lock.
+pub type RevocationObserver = Arc<dyn Fn(Uuid, Uuid) + Send + Sync>;
+
 struct BrokerInner {
     endpoint: SocketAddr,
     helper_path: PathBuf,
     state: Mutex<BrokerState>,
+    revocation_observer: Mutex<Option<RevocationObserver>>,
 }
 
 #[derive(Default)]
@@ -320,8 +326,15 @@ impl PeerBroker {
                 endpoint,
                 helper_path,
                 state: Mutex::new(BrokerState::default()),
+                revocation_observer: Mutex::new(None),
             }),
         }
+    }
+
+    /// Registers the single observer that learns about every revoked
+    /// generation. It is called outside the broker lock.
+    pub fn set_revocation_observer(&self, observer: RevocationObserver) {
+        *lock(&self.inner.revocation_observer) = Some(observer);
     }
 
     pub fn activate_session(
@@ -400,6 +413,15 @@ impl PeerBroker {
     }
 
     pub fn revoke_session(&self, terminal_id: Uuid, session_id: Uuid) {
+        self.revoke_session_locked(terminal_id, session_id);
+        // Notify outside the broker lock so the observer may take its own locks.
+        let observer = lock(&self.inner.revocation_observer).clone();
+        if let Some(observer) = observer {
+            observer(terminal_id, session_id);
+        }
+    }
+
+    fn revoke_session_locked(&self, terminal_id: Uuid, session_id: Uuid) {
         let mut state = lock(&self.inner.state);
         let Some(capability) = state.capabilities.remove(&(terminal_id, session_id)) else {
             return;
@@ -462,6 +484,20 @@ impl PeerBroker {
         lock(&self.inner.state)
             .capabilities
             .contains_key(&(terminal_id, session_id))
+    }
+
+    /// Test-only access to a generation's secret so unit tests can
+    /// authenticate as that PTY without a real helper process.
+    #[cfg(test)]
+    pub(crate) fn capability_for_test(
+        &self,
+        terminal_id: Uuid,
+        session_id: Uuid,
+    ) -> Option<String> {
+        lock(&self.inner.state)
+            .capabilities
+            .get(&(terminal_id, session_id))
+            .map(|record| record.secret.clone())
     }
 
     pub fn begin_shutdown(&self) {
@@ -1289,7 +1325,7 @@ impl PeerBroker {
     }
 }
 
-fn validate_instruction(value: String) -> std::result::Result<String, PeerError> {
+pub(crate) fn validate_instruction(value: String) -> std::result::Result<String, PeerError> {
     validate_text(
         value,
         MAX_PEER_INSTRUCTION_BYTES,
@@ -1298,7 +1334,7 @@ fn validate_instruction(value: String) -> std::result::Result<String, PeerError>
     )
 }
 
-fn validate_artifact(value: String) -> std::result::Result<String, PeerError> {
+pub(crate) fn validate_artifact(value: String) -> std::result::Result<String, PeerError> {
     let value = validate_text(
         value,
         MAX_PEER_ARTIFACT_BYTES,

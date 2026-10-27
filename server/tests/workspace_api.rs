@@ -18,6 +18,7 @@ use codex_web_terminal::{
     peer::PeerBroker,
     registry::SessionRegistry,
     routes::{AppState, build_router},
+    transfer::TransferCoordinator,
     updater::UpdateManager,
     workspaces::WorkspaceStore,
 };
@@ -732,6 +733,7 @@ async fn test_router_with_options(
         auth: AuthState::new(TOKEN.to_owned()),
         sessions: sessions.clone(),
         peers: peers.clone(),
+        transfers: TransferCoordinator::new(peers.clone(), sessions.clone()),
         agents: profiles.catalog,
         directories: DirectoryBrowser::new(project),
         workspaces: WorkspaceStore::open(state_dir)

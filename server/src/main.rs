@@ -29,6 +29,7 @@ use codex_web_terminal::{
     peer_cli, peer_routes,
     registry::SessionRegistry,
     routes::{AppState, build_router},
+    transfer::TransferCoordinator,
     update_bootstrap,
     updater::{UpdateActivation, UpdateManager},
     workspaces::{WorkspaceStore, prepare_state_directory_sync},
@@ -174,6 +175,7 @@ async fn run(
         peers.clone(),
         config.max_sessions,
     );
+    let transfers = TransferCoordinator::new(peers.clone(), sessions.clone());
     let directories = DirectoryBrowser::new(config.project_dir.clone());
     let workspaces = WorkspaceStore::open(config.state_dir.clone())
         .await
@@ -235,6 +237,7 @@ async fn run(
         auth: AuthState::new(token.clone()),
         sessions: sessions.clone(),
         peers: peers.clone(),
+        transfers: transfers.clone(),
         agents: agent_catalog,
         directories,
         workspaces,
@@ -245,7 +248,10 @@ async fn run(
         readiness_nonce,
     };
     let app = build_router(state, static_directory);
-    let peer_app = peer_routes::internal_router(peers.clone());
+    let peer_app = peer_routes::internal_router(peer_routes::InternalBridge {
+        peers: peers.clone(),
+        transfers: transfers.clone(),
+    });
     updates.spawn_background_checks(public_shutdown.clone());
 
     if !config.no_open_browser
@@ -279,6 +285,7 @@ async fn run(
     coordinated_shutdown(
         &public_shutdown,
         &peers,
+        &transfers,
         sessions.shutdown(),
         &peer_shutdown,
     )
@@ -485,6 +492,7 @@ where
 async fn coordinated_shutdown<F>(
     public_shutdown: &CancellationToken,
     peers: &PeerBroker,
+    transfers: &TransferCoordinator,
     session_shutdown: F,
     peer_shutdown: &CancellationToken,
 ) where
@@ -495,11 +503,15 @@ async fn coordinated_shutdown<F>(
     // generation.
     public_shutdown.cancel();
     peers.begin_shutdown();
+    // Transfer admission closes and both transfer roles lose their grants
+    // before the bridge listener goes away.
+    transfers.begin_shutdown();
     session_shutdown.await;
     // A launch that was already inside its blocking startup section may have
     // activated a generation while shutdown waited for that section. Sweep
     // once more so termination failures cannot leave a usable capability.
     peers.begin_shutdown();
+    transfers.begin_shutdown();
     peer_shutdown.cancel();
 }
 
@@ -713,6 +725,16 @@ mod tests {
             .expect("capability environment");
         let shutdown_started = Arc::new(Notify::new());
         let allow_shutdown = Arc::new(Notify::new());
+        let transfers = TransferCoordinator::new(
+            broker.clone(),
+            SessionRegistry::new(codex_web_terminal::terminal::TerminalConfig {
+                project_dir: PathBuf::from("."),
+                command: "codex".to_owned(),
+                arguments: Vec::new(),
+                agent: codex_web_terminal::config::AgentKind::Codex,
+                shell: codex_web_terminal::config::ShellKind::Powershell,
+            }),
+        );
 
         let public_for_task = public_shutdown.clone();
         let public_for_session = public_shutdown.clone();
@@ -720,6 +742,7 @@ mod tests {
         let peer_for_session = peer_shutdown.clone();
         let broker_for_task = broker.clone();
         let broker_for_session = broker.clone();
+        let transfers_for_task = transfers.clone();
         let capability_for_session = capability.clone();
         let started_for_session = shutdown_started.clone();
         let allow_for_session = allow_shutdown.clone();
@@ -727,6 +750,7 @@ mod tests {
             coordinated_shutdown(
                 &public_for_task,
                 &broker_for_task,
+                &transfers_for_task,
                 async move {
                     assert!(public_for_session.is_cancelled());
                     assert!(!peer_for_session.is_cancelled());

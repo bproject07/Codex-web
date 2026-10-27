@@ -890,8 +890,64 @@ The import is one-way. It is a transcript import, not a resumed process:
 the original agent's approvals, environment, and running state are not
 carried over. The old tab can be closed with its tab × action or kept.
 Kilo-to-Kilo continuation uses `kilo --continue`, `kilo export`, and
-`kilo import`; moving a conversation into Claude Code, Codex, or AGY has no
-equivalent and currently requires a manual summary pasted into the new tab.
+`kilo import`. For every other direction, including Kilo → Claude Code or
+Codex, use **Continue in…** below.
+
+### Continue in… (context transfer between any agents)
+
+**Menu → Manage sessions** shows **Continue in…** on every ordinary tab. It
+moves one written handoff from that tab to another ordinary terminal — a new
+tab of any ready agent, or an existing running tab — so the work continues
+there as a fresh conversation. The source may be running, stopped, or no
+longer able to answer.
+
+1. Press **Continue in…** on the source tab and choose how the handoff is
+   written:
+   - **Ask the source agent** — only for a running source. Confirm the source
+     shows an empty agent prompt; the server then sends it one prompt asking
+     it to write a self-contained handoff from its own context and submit it
+     through the local bridge. While it works, the composer shows *Source is
+     preparing the handoff* and the source cannot be restarted, terminated,
+     removed, or used for `@cwt`.
+   - **Write it myself** — type or paste the handoff; **Insert template**
+     gives a skeleton. You can also switch to this while the source is still
+     preparing: **Take over and save** withdraws the request, and a late
+     submission from the source is ignored.
+2. Edit the handoff and **Save handoff**. Then choose **New <Agent> tab**
+   (change the folder first if needed) or **Existing tab: …**. A new tab is
+   created at once, appears in the tab strip, and is selected behind the
+   dialog. The selected tab shows what the agent is doing; finish sign-in or
+   folder trust there if it asks.
+3. When the target shows an empty agent prompt, press **Deliver**. The server
+   sends the target one prompt asking it to retrieve the handoff through the
+   local bridge and continue the work. *Delivery unconfirmed* stays visible
+   until the target's agent confirms the receipt; nothing is resent. **Show
+   target tab** switches to the target without closing the composer.
+4. On *Delivered*, press **Go to <target>**. The source tab stays open and
+   can be removed later like any other tab.
+
+Recoverable situations:
+
+- **The target ended before it confirmed** — the handoff draft is kept and
+  the composer returns to the target choice; pick a target and deliver again.
+- **The new tab could not start** — the draft is kept; choose again. If its
+  process could not be confirmed stopped, the tab stays listed with **Retry
+  cleanup** in the composer; abandoning leaves it as an ordinary tab you can
+  remove.
+- **"Delivery unconfirmed" does not change** — the target agent did not run
+  the bridge helper (declined tool call, sandbox, provider policy). Check the
+  target tab. **Discard** ends the transfer; the prompt already sent cannot
+  be recalled, but the target can no longer retrieve the handoff.
+- **"Session capacity reached"** — a new tab cannot be created, but an
+  existing running tab can still be chosen.
+- A transfer allows at most eight target attempts, and at most 256 transfers
+  can be active at once. A controlled **Restart server** or software update
+  discards unfinished transfers; the restore plan recreates ordinary target
+  tabs as fresh terminals without the handoff.
+
+The handoff text stays in server memory only until the transfer finishes and
+is never logged. Delivering sends it to the target agent's configured provider
+under that agent's own credentials.
 
 ### Reconnection
 

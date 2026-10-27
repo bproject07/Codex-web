@@ -8,6 +8,7 @@ use std::{
     },
 };
 
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
@@ -28,11 +29,53 @@ pub enum RegistryError {
     InvalidPeerSession,
     PeerSessionManaged,
     PeerSessionsActive,
+    /// The terminal is a source or target of an active transfer, or has peer
+    /// provisioning in flight, so lifecycle mutation and new claims are refused.
+    ParticipantBusy,
+    /// The transfer claim on the terminal does not belong to the caller.
+    TransferClaimMismatch,
+    /// The requested transfer target is not an eligible running ordinary session.
+    TransferTargetNotEligible,
+    /// A reserved session failed to start and its rollback could not confirm
+    /// process termination; the registry entry is retained for an explicit retry.
+    StartRollbackFailed(anyhow::Error),
     ShuttingDown,
     RestoreConflict,
     RestoreDeleted,
     RestoreLimitReached,
     OperationFailed(anyhow::Error),
+}
+
+/// Which side of a context transfer a terminal participates in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferRole {
+    Source,
+    Target,
+}
+
+/// A registry-owned claim that excludes lifecycle mutation and peer
+/// provisioning on a terminal while one transfer uses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferClaim {
+    pub transfer_id: Uuid,
+    pub role: TransferRole,
+}
+
+#[derive(Default)]
+struct ParticipantClaims {
+    pending_peer: usize,
+    transfer: Option<TransferClaim>,
+}
+
+impl ParticipantClaims {
+    fn is_empty(&self) -> bool {
+        self.pending_peer == 0 && self.transfer.is_none()
+    }
+
+    fn is_busy(&self) -> bool {
+        !self.is_empty()
+    }
 }
 
 impl fmt::Display for RegistryError {
@@ -66,6 +109,21 @@ impl fmt::Display for RegistryError {
                     "the terminal has an active dedicated peer session"
                 )
             }
+            Self::ParticipantBusy => write!(
+                formatter,
+                "the terminal is busy with an active transfer or peer provisioning"
+            ),
+            Self::TransferClaimMismatch => {
+                write!(formatter, "the transfer does not own this terminal")
+            }
+            Self::TransferTargetNotEligible => write!(
+                formatter,
+                "the transfer target must be a running ordinary terminal with the stated session"
+            ),
+            Self::StartRollbackFailed(error) => write!(
+                formatter,
+                "the session did not start and its cleanup is still pending: {error}"
+            ),
             Self::ShuttingDown => write!(formatter, "the server is shutting down"),
             Self::RestoreConflict => write!(
                 formatter,
@@ -84,7 +142,7 @@ impl fmt::Display for RegistryError {
 impl std::error::Error for RegistryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::OperationFailed(error) => Some(error.as_ref()),
+            Self::OperationFailed(error) | Self::StartRollbackFailed(error) => Some(error.as_ref()),
             _ => None,
         }
     }
@@ -120,11 +178,32 @@ struct RegistryState {
     next_terminal_number: usize,
     sessions: HashMap<Uuid, SessionManager>,
     lifecycle_mutations: HashMap<Uuid, usize>,
+    participant_claims: HashMap<Uuid, ParticipantClaims>,
 }
 
 struct LifecycleMutationGuard {
     inner: Arc<RegistryInner>,
     terminal_id: Uuid,
+}
+
+/// Holds a pending peer-provisioning claim on a source terminal from the moment
+/// a thread is admitted until its dedicated reviewer exists or provisioning is
+/// compensated. While held, the source cannot become a transfer participant.
+pub struct PeerAdmissionGuard {
+    inner: Arc<RegistryInner>,
+    terminal_id: Uuid,
+}
+
+impl Drop for PeerAdmissionGuard {
+    fn drop(&mut self) {
+        let mut state = lock(&self.inner.state);
+        if let Some(claims) = state.participant_claims.get_mut(&self.terminal_id) {
+            claims.pending_peer = claims.pending_peer.saturating_sub(1);
+            if claims.is_empty() {
+                state.participant_claims.remove(&self.terminal_id);
+            }
+        }
+    }
 }
 
 impl Drop for LifecycleMutationGuard {
@@ -242,6 +321,7 @@ impl SessionRegistry {
                     next_terminal_number: 2,
                     sessions,
                     lifecycle_mutations: HashMap::new(),
+                    participant_claims: HashMap::new(),
                 }),
                 shutting_down: AtomicBool::new(false),
                 restores: tokio::sync::Mutex::new(HashMap::new()),
@@ -404,17 +484,221 @@ impl SessionRegistry {
             let terminal_id = session.snapshot().terminal_id;
             if let Err(error) = session.start().await {
                 if let Err(cleanup_error) = session.shutdown_checked().await {
-                    return Err(RegistryError::OperationFailed(
+                    return Err(RegistryError::StartRollbackFailed(
                         cleanup_error.context("failed to roll back a session that did not start"),
                     ));
                 }
-                lock(&inner.state).sessions.remove(&terminal_id);
+                let mut state = lock(&inner.state);
+                state.sessions.remove(&terminal_id);
+                state.participant_claims.remove(&terminal_id);
                 return Err(RegistryError::OperationFailed(error));
             }
             Ok(session.snapshot())
         })
         .await
         .map_err(|error| RegistryError::OperationFailed(anyhow::Error::new(error)))?
+    }
+
+    /// Reserves a fresh ordinary session with a caller-chosen terminal ID and
+    /// binds it to a transfer in the same critical section, so the session is
+    /// listed, user-owned, and lifecycle-protected from the moment it exists.
+    /// The caller then starts it with [`Self::start_transfer_target`].
+    pub(crate) fn reserve_transfer_target(
+        &self,
+        agent: AgentKind,
+        project_dir: PathBuf,
+        terminal_id: Uuid,
+        transfer_id: Uuid,
+    ) -> Result<SessionManager, RegistryError> {
+        self.reserve_session_with_purpose(
+            agent,
+            Some(project_dir),
+            SessionPurpose::Interactive,
+            None,
+            Some(terminal_id),
+            Some(TransferClaim {
+                transfer_id,
+                role: TransferRole::Target,
+            }),
+        )
+    }
+
+    /// Starts a session reserved by [`Self::reserve_transfer_target`]. A failed
+    /// start whose rollback confirmed termination removes the entry and its
+    /// claim; an unconfirmed rollback keeps both and reports
+    /// [`RegistryError::StartRollbackFailed`] so the exact identity can be
+    /// cleaned up later.
+    pub(crate) async fn start_transfer_target(
+        &self,
+        session: SessionManager,
+    ) -> Result<SessionSnapshot, RegistryError> {
+        self.start_reserved_session(session).await
+    }
+
+    /// Retries cleanup of a transfer target whose start rolled back without
+    /// confirmed termination. Only the owning transfer may do this, and only
+    /// for the exact generation it reserved.
+    pub(crate) async fn cleanup_transfer_target(
+        &self,
+        terminal_id: Uuid,
+        transfer_id: Uuid,
+        expected_session_id: Option<Uuid>,
+    ) -> Result<(), RegistryError> {
+        let (session, mutation) = {
+            let mut state = lock(&self.inner.state);
+            let session = state
+                .sessions
+                .get(&terminal_id)
+                .cloned()
+                .ok_or(RegistryError::NotFound)?;
+            let claim = state
+                .participant_claims
+                .get(&terminal_id)
+                .and_then(|claims| claims.transfer);
+            if claim
+                != Some(TransferClaim {
+                    transfer_id,
+                    role: TransferRole::Target,
+                })
+            {
+                return Err(RegistryError::TransferClaimMismatch);
+            }
+            if session.snapshot().session_id != expected_session_id {
+                return Err(RegistryError::TransferClaimMismatch);
+            }
+            if state.lifecycle_mutations.contains_key(&terminal_id) {
+                return Err(RegistryError::ParticipantBusy);
+            }
+            state.lifecycle_mutations.insert(terminal_id, 1);
+            (
+                session,
+                LifecycleMutationGuard {
+                    inner: self.inner.clone(),
+                    terminal_id,
+                },
+            )
+        };
+        self.delete_with_mutation(terminal_id, session, mutation)
+            .await?;
+        let mut state = lock(&self.inner.state);
+        state.participant_claims.remove(&terminal_id);
+        Ok(())
+    }
+
+    /// Records that a peer thread is being provisioned for `source_terminal_id`.
+    /// Fails while the source is a transfer participant. The returned guard
+    /// releases the claim when provisioning completes or is compensated.
+    pub(crate) fn begin_peer_admission(
+        &self,
+        source_terminal_id: Uuid,
+    ) -> Result<PeerAdmissionGuard, RegistryError> {
+        let mut state = lock(&self.inner.state);
+        let session = state
+            .sessions
+            .get(&source_terminal_id)
+            .ok_or(RegistryError::NotFound)?;
+        if !matches!(session.purpose(), SessionPurpose::Interactive) {
+            return Err(RegistryError::PeerSessionManaged);
+        }
+        let claims = state
+            .participant_claims
+            .entry(source_terminal_id)
+            .or_default();
+        if claims.transfer.is_some() {
+            return Err(RegistryError::ParticipantBusy);
+        }
+        claims.pending_peer = claims.pending_peer.saturating_add(1);
+        Ok(PeerAdmissionGuard {
+            inner: self.inner.clone(),
+            terminal_id: source_terminal_id,
+        })
+    }
+
+    /// Claims an existing ordinary terminal as a transfer source or target.
+    /// The terminal must be interactive, free of peer children, pending peer
+    /// provisioning, lifecycle mutation, and other transfer claims. A target
+    /// (and a source for automated preparation) must be running with exactly
+    /// the stated generation. Returns the snapshot observed under the lock.
+    pub(crate) fn claim_transfer_participant(
+        &self,
+        terminal_id: Uuid,
+        claim: TransferClaim,
+        expected_session_id: Option<Uuid>,
+    ) -> Result<SessionSnapshot, RegistryError> {
+        let mut state = lock(&self.inner.state);
+        if self.inner.shutting_down.load(Ordering::SeqCst) {
+            return Err(RegistryError::ShuttingDown);
+        }
+        let session = state
+            .sessions
+            .get(&terminal_id)
+            .cloned()
+            .ok_or(RegistryError::NotFound)?;
+        if !matches!(session.purpose(), SessionPurpose::Interactive) {
+            return Err(RegistryError::PeerSessionManaged);
+        }
+        if state.lifecycle_mutations.contains_key(&terminal_id) {
+            return Err(RegistryError::ParticipantBusy);
+        }
+        if state.sessions.values().any(|candidate| {
+            matches!(
+                candidate.purpose(),
+                SessionPurpose::Peer {
+                    parent_terminal_id,
+                    ..
+                } if *parent_terminal_id == terminal_id
+            )
+        }) {
+            return Err(RegistryError::PeerSessionsActive);
+        }
+        if state
+            .participant_claims
+            .get(&terminal_id)
+            .is_some_and(ParticipantClaims::is_busy)
+        {
+            return Err(RegistryError::ParticipantBusy);
+        }
+        let snapshot = session.snapshot();
+        if let Some(expected) = expected_session_id
+            && (snapshot.status != Lifecycle::Running || snapshot.session_id != Some(expected))
+        {
+            return Err(match claim.role {
+                TransferRole::Target => RegistryError::TransferTargetNotEligible,
+                TransferRole::Source => RegistryError::InvalidPeerParent,
+            });
+        }
+        state
+            .participant_claims
+            .entry(terminal_id)
+            .or_default()
+            .transfer = Some(claim);
+        Ok(snapshot)
+    }
+
+    /// Releases a transfer claim if it still belongs to `transfer_id`.
+    pub(crate) fn release_transfer_participant(&self, terminal_id: Uuid, transfer_id: Uuid) {
+        let mut state = lock(&self.inner.state);
+        let Some(claims) = state.participant_claims.get_mut(&terminal_id) else {
+            return;
+        };
+        if claims
+            .transfer
+            .is_some_and(|claim| claim.transfer_id == transfer_id)
+        {
+            claims.transfer = None;
+        }
+        if claims.is_empty() {
+            state.participant_claims.remove(&terminal_id);
+        }
+    }
+
+    /// The transfer claim currently held on a terminal, if any.
+    #[cfg(test)]
+    pub(crate) fn transfer_claim(&self, terminal_id: Uuid) -> Option<TransferClaim> {
+        lock(&self.inner.state)
+            .participant_claims
+            .get(&terminal_id)
+            .and_then(|claims| claims.transfer)
     }
 
     pub async fn restart(&self, terminal_id: Uuid) -> Result<(), RegistryError> {
@@ -570,6 +854,7 @@ impl SessionRegistry {
             SessionPurpose::Interactive,
             None,
             None,
+            None,
         )
     }
 
@@ -595,6 +880,7 @@ impl SessionRegistry {
             },
             Some((parent_terminal_id, parent_session_id)),
             Some(reviewer_terminal_id),
+            None,
         )
     }
 
@@ -605,6 +891,7 @@ impl SessionRegistry {
         purpose: SessionPurpose,
         peer_parent: Option<(Uuid, Uuid)>,
         terminal_id: Option<Uuid>,
+        transfer_claim: Option<TransferClaim>,
     ) -> Result<SessionManager, RegistryError> {
         let mut state = lock(&self.inner.state);
         if self.inner.shutting_down.load(Ordering::SeqCst) {
@@ -617,6 +904,13 @@ impl SessionRegistry {
         if let Some((parent_terminal_id, parent_session_id)) = peer_parent {
             if state.lifecycle_mutations.contains_key(&parent_terminal_id) {
                 return Err(RegistryError::InvalidPeerParent);
+            }
+            if state
+                .participant_claims
+                .get(&parent_terminal_id)
+                .is_some_and(|claims| claims.transfer.is_some())
+            {
+                return Err(RegistryError::ParticipantBusy);
             }
             let parent = state
                 .sessions
@@ -632,7 +926,9 @@ impl SessionRegistry {
         }
 
         let terminal_id = terminal_id.unwrap_or_else(Uuid::new_v4);
-        if state.sessions.contains_key(&terminal_id) {
+        if state.sessions.contains_key(&terminal_id)
+            || state.participant_claims.contains_key(&terminal_id)
+        {
             return Err(RegistryError::InvalidPeerSession);
         }
         let mut terminal_config = self
@@ -662,6 +958,15 @@ impl SessionRegistry {
             self.inner.peer_broker.clone(),
         );
         state.sessions.insert(terminal_id, session.clone());
+        if let Some(claim) = transfer_claim {
+            state.participant_claims.insert(
+                terminal_id,
+                ParticipantClaims {
+                    pending_peer: 0,
+                    transfer: Some(claim),
+                },
+            );
+        }
         Ok(session)
     }
 
@@ -739,6 +1044,13 @@ impl SessionRegistry {
             )
         }) {
             return Err(RegistryError::PeerSessionsActive);
+        }
+        if state
+            .participant_claims
+            .get(&terminal_id)
+            .is_some_and(ParticipantClaims::is_busy)
+        {
+            return Err(RegistryError::ParticipantBusy);
         }
         let count = state.lifecycle_mutations.entry(terminal_id).or_default();
         *count = count.saturating_add(1);
@@ -1372,6 +1684,231 @@ mod tests {
         ));
         assert_eq!(registry.session_count(), 1);
         assert_eq!(registry.list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn transfer_claims_exclude_lifecycle_mutation_and_peer_provisioning() {
+        let fixture = tempfile::tempdir().expect("temporary project");
+        let command = write_long_running_fixture(fixture.path());
+        let project_dir = dunce::canonicalize(fixture.path()).expect("canonical temporary project");
+        let mut config = terminal_config();
+        config.project_dir = project_dir.clone();
+        config.command = command.to_string_lossy().into_owned();
+        let broker = PeerBroker::new(
+            "127.0.0.1:43123"
+                .parse::<SocketAddr>()
+                .expect("loopback peer endpoint"),
+            PathBuf::from("codex-web"),
+        );
+        let registry = SessionRegistry::with_agent_configs_and_peer_broker(
+            config.clone(),
+            config,
+            Vec::new(),
+            broker.clone(),
+        );
+        registry.start_primary().await.expect("start primary");
+        let primary = registry.primary();
+        wait_for_output(&primary, "WORKSPACE-READY").await;
+        let primary_snapshot = primary.snapshot();
+        let primary_id = primary_snapshot.terminal_id;
+        let generation = primary_snapshot.session_id.expect("running generation");
+        let transfer_id = Uuid::new_v4();
+        let source_claim = TransferClaim {
+            transfer_id,
+            role: TransferRole::Source,
+        };
+
+        // A source claim needs the exact running generation.
+        assert!(matches!(
+            registry.claim_transfer_participant(primary_id, source_claim, Some(Uuid::new_v4())),
+            Err(RegistryError::InvalidPeerParent)
+        ));
+        let observed = registry
+            .claim_transfer_participant(primary_id, source_claim, Some(generation))
+            .expect("claim the running source");
+        assert_eq!(observed.session_id, Some(generation));
+        assert_eq!(registry.transfer_claim(primary_id), Some(source_claim));
+
+        // While claimed: no second claim, no lifecycle mutation, no peer admission,
+        // and no dedicated child reservation for this parent.
+        assert!(matches!(
+            registry.claim_transfer_participant(
+                primary_id,
+                TransferClaim {
+                    transfer_id: Uuid::new_v4(),
+                    role: TransferRole::Target,
+                },
+                Some(generation),
+            ),
+            Err(RegistryError::ParticipantBusy)
+        ));
+        assert!(matches!(
+            registry.restart(primary_id).await,
+            Err(RegistryError::ParticipantBusy)
+        ));
+        assert!(matches!(
+            registry.terminate(primary_id).await,
+            Err(RegistryError::ParticipantBusy)
+        ));
+        assert!(matches!(
+            registry.begin_peer_admission(primary_id),
+            Err(RegistryError::ParticipantBusy)
+        ));
+        assert!(matches!(
+            registry.reserve_peer_session_in(
+                AgentKind::Codex,
+                project_dir.clone(),
+                Uuid::new_v4(),
+                primary_id,
+                generation,
+                Uuid::new_v4(),
+            ),
+            Err(RegistryError::ParticipantBusy)
+        ));
+
+        // Releasing with the wrong transfer is a no-op; the right one frees it.
+        registry.release_transfer_participant(primary_id, Uuid::new_v4());
+        assert_eq!(registry.transfer_claim(primary_id), Some(source_claim));
+        registry.release_transfer_participant(primary_id, transfer_id);
+        assert_eq!(registry.transfer_claim(primary_id), None);
+
+        // Pending peer provisioning excludes transfer claims until the guard drops.
+        let admission = registry
+            .begin_peer_admission(primary_id)
+            .expect("admit a peer thread");
+        assert!(matches!(
+            registry.claim_transfer_participant(primary_id, source_claim, Some(generation)),
+            Err(RegistryError::ParticipantBusy)
+        ));
+        assert!(matches!(
+            registry.restart(primary_id).await,
+            Err(RegistryError::ParticipantBusy)
+        ));
+        drop(admission);
+        registry
+            .claim_transfer_participant(primary_id, source_claim, Some(generation))
+            .expect("claim after provisioning released");
+        registry.release_transfer_participant(primary_id, transfer_id);
+
+        // A new transfer target is listed, lifecycle-protected, and owned by its
+        // transfer from reservation onward; cleanup is refused for other owners.
+        let target_id = Uuid::new_v4();
+        let reserved = registry
+            .reserve_transfer_target(
+                AgentKind::Codex,
+                project_dir.clone(),
+                target_id,
+                transfer_id,
+            )
+            .expect("reserve transfer target");
+        assert_eq!(reserved.snapshot().terminal_id, target_id);
+        assert_eq!(reserved.snapshot().purpose, SessionPurpose::Interactive);
+        assert_eq!(registry.session_count(), 2);
+        assert_eq!(
+            registry.transfer_claim(target_id),
+            Some(TransferClaim {
+                transfer_id,
+                role: TransferRole::Target,
+            })
+        );
+        assert!(matches!(
+            registry.reserve_transfer_target(
+                AgentKind::Codex,
+                project_dir.clone(),
+                target_id,
+                Uuid::new_v4()
+            ),
+            Err(RegistryError::InvalidPeerSession)
+        ));
+        let started = registry
+            .start_transfer_target(reserved)
+            .await
+            .expect("start transfer target");
+        assert_eq!(started.status, Lifecycle::Running);
+        assert!(matches!(
+            registry.delete(target_id).await,
+            Err(RegistryError::ParticipantBusy)
+        ));
+        assert!(matches!(
+            registry
+                .cleanup_transfer_target(target_id, Uuid::new_v4(), started.session_id)
+                .await,
+            Err(RegistryError::TransferClaimMismatch)
+        ));
+        assert!(matches!(
+            registry
+                .cleanup_transfer_target(target_id, transfer_id, Some(Uuid::new_v4()))
+                .await,
+            Err(RegistryError::TransferClaimMismatch)
+        ));
+        registry
+            .cleanup_transfer_target(target_id, transfer_id, started.session_id)
+            .await
+            .expect("owner cleanup removes the target");
+        assert!(registry.get(target_id).is_none());
+        assert_eq!(registry.transfer_claim(target_id), None);
+
+        // An existing running ordinary tab can be claimed as a target only with
+        // its exact generation; a stopped or mismatched one is not eligible.
+        let other = registry
+            .create_in(Some(AgentKind::Codex), Some(project_dir.clone()))
+            .await
+            .expect("create an ordinary tab");
+        assert!(matches!(
+            registry.claim_transfer_participant(
+                other.terminal_id,
+                TransferClaim {
+                    transfer_id,
+                    role: TransferRole::Target,
+                },
+                Some(Uuid::new_v4()),
+            ),
+            Err(RegistryError::TransferTargetNotEligible)
+        ));
+        registry
+            .claim_transfer_participant(
+                other.terminal_id,
+                TransferClaim {
+                    transfer_id,
+                    role: TransferRole::Target,
+                },
+                other.session_id,
+            )
+            .expect("claim the running tab");
+        registry.release_transfer_participant(other.terminal_id, transfer_id);
+
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_transfer_target_start_releases_its_claim() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        let mut config = terminal_config();
+        config.project_dir = directory.path().to_path_buf();
+        config.command = directory
+            .path()
+            .join("missing-agent-command")
+            .to_string_lossy()
+            .into_owned();
+        let registry = SessionRegistry::new(config);
+        let target_id = Uuid::new_v4();
+        let transfer_id = Uuid::new_v4();
+
+        let reserved = registry
+            .reserve_transfer_target(
+                AgentKind::Codex,
+                directory.path().to_path_buf(),
+                target_id,
+                transfer_id,
+            )
+            .expect("reserve transfer target");
+        assert!(matches!(
+            registry.start_transfer_target(reserved).await,
+            Err(RegistryError::OperationFailed(_))
+        ));
+        assert!(registry.get(target_id).is_none());
+        assert_eq!(registry.transfer_claim(target_id), None);
+        assert_eq!(registry.session_count(), 1);
     }
 
     #[tokio::test]

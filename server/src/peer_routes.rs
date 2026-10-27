@@ -20,6 +20,7 @@ use crate::{
     peer_cli::{INTERNAL_PEER_PATH, InternalPeerRequest, InternalPeerResponse},
     registry::RegistryError,
     routes::AppState,
+    transfer::{TransferCoordinator, TransferError, TransferErrorCode},
 };
 
 const MAX_PEER_COMMAND_BODY: usize = 256 * 1024;
@@ -85,11 +86,21 @@ pub fn protected_router() -> Router<AppState> {
         .route("/api/peer/threads/{id}/return", post(return_turn))
 }
 
-pub fn internal_router(broker: PeerBroker) -> Router {
+/// State of the loopback bridge: the peer broker authenticates every
+/// capability; peer-turn operations stay with the broker and transfer
+/// operations go to the coordinator. Dispatch is by operation name, so a
+/// transfer identifier can never be interpreted as a peer turn.
+#[derive(Clone)]
+pub struct InternalBridge {
+    pub peers: PeerBroker,
+    pub transfers: TransferCoordinator,
+}
+
+pub fn internal_router(bridge: InternalBridge) -> Router {
     Router::new()
         .route(INTERNAL_PEER_PATH, post(internal_request))
         .layer(DefaultBodyLimit::max(MAX_INTERNAL_PEER_BODY))
-        .with_state(broker)
+        .with_state(bridge)
 }
 
 #[derive(Default, Deserialize)]
@@ -173,8 +184,18 @@ async fn create_thread(State(state): State<AppState>, body: Bytes) -> Response {
         }
     };
 
+    // Claim the source for peer provisioning before the thread is published so
+    // a concurrent transfer cannot claim the same terminal in between.
+    let admission = match state
+        .sessions
+        .begin_peer_admission(request.source_terminal_id)
+    {
+        Ok(admission) => admission,
+        Err(error) => return registry_create_error(error),
+    };
     let provisioning_state = state.clone();
     match tokio::spawn(async move {
+        let _admission = admission;
         provision_thread(
             &provisioning_state,
             source,
@@ -663,7 +684,7 @@ async fn close_thread_owned(
 }
 
 async fn internal_request(
-    State(broker): State<PeerBroker>,
+    State(bridge): State<InternalBridge>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Bytes,
@@ -678,14 +699,11 @@ async fn internal_request(
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
+    let broker = &bridge.peers;
     let result = match request {
         InternalPeerRequest::Submit { turn_id, content } => broker
             .submit(capability, turn_id, content)
-            .map(|_| InternalPeerResponse {
-                content: None,
-                error: None,
-                acknowledge: false,
-            }),
+            .map(|_| empty_internal_response()),
         InternalPeerRequest::Receive { turn_id } => {
             broker
                 .receive(capability, turn_id)
@@ -693,20 +711,122 @@ async fn internal_request(
                     content: Some(artifact.content),
                     error: None,
                     acknowledge: artifact.kind == PeerArtifactKind::Response,
+                    state: None,
                 })
         }
         InternalPeerRequest::Acknowledge { turn_id } => broker
             .acknowledge_response(capability, turn_id)
-            .map(|_| InternalPeerResponse {
-                content: None,
-                error: None,
-                acknowledge: false,
-            }),
+            .map(|_| empty_internal_response()),
+        InternalPeerRequest::TransferSubmit {
+            transfer_id,
+            attempt_id,
+            content,
+        } => {
+            return transfer_bridge_response(&bridge, capability, |subject| {
+                bridge
+                    .transfers
+                    .submit(subject, transfer_id, attempt_id, content)
+                    .map(|_| empty_internal_response())
+            });
+        }
+        InternalPeerRequest::TransferReceive { transfer_id } => {
+            return transfer_bridge_response(&bridge, capability, |subject| {
+                bridge
+                    .transfers
+                    .receive(subject, transfer_id)
+                    .map(|artifact| InternalPeerResponse {
+                        content: Some(artifact.content),
+                        error: None,
+                        acknowledge: artifact.acknowledge,
+                        state: None,
+                    })
+            });
+        }
+        InternalPeerRequest::TransferAcknowledge { transfer_id } => {
+            return transfer_bridge_response(&bridge, capability, |subject| {
+                bridge
+                    .transfers
+                    .acknowledge(subject, transfer_id)
+                    .map(|_| empty_internal_response())
+            });
+        }
+        InternalPeerRequest::TransferStatus { transfer_id } => {
+            return transfer_bridge_response(&bridge, capability, |subject| {
+                bridge
+                    .transfers
+                    .status(subject, transfer_id)
+                    .map(|state| InternalPeerResponse {
+                        content: None,
+                        error: None,
+                        acknowledge: false,
+                        state: Some(state.as_str().to_owned()),
+                    })
+            });
+        }
     };
     match result {
         Ok(response) => no_store(Json(response).into_response()),
         Err(error) => no_store(internal_error_response(error)),
     }
+}
+
+/// Authenticates the capability with the broker (its lock is released before
+/// dispatch) and runs a transfer operation with the resulting subject.
+fn transfer_bridge_response(
+    bridge: &InternalBridge,
+    capability: &str,
+    operation: impl FnOnce(
+        &crate::peer::CapabilitySubject,
+    ) -> Result<InternalPeerResponse, TransferError>,
+) -> Response {
+    let subject = match bridge.peers.authenticate_capability(capability) {
+        Ok(subject) => subject,
+        Err(error) => return no_store(internal_error_response(error)),
+    };
+    match operation(&subject) {
+        Ok(response) => no_store(Json(response).into_response()),
+        Err(error) => no_store(internal_transfer_error_response(error)),
+    }
+}
+
+fn empty_internal_response() -> InternalPeerResponse {
+    InternalPeerResponse {
+        content: None,
+        error: None,
+        acknowledge: false,
+        state: None,
+    }
+}
+
+fn internal_transfer_error_response(error: TransferError) -> Response {
+    let status = match error.code() {
+        TransferErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+        TransferErrorCode::TransferNotFound => StatusCode::NOT_FOUND,
+        TransferErrorCode::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        TransferErrorCode::InvalidInput => StatusCode::BAD_REQUEST,
+        _ => StatusCode::CONFLICT,
+    };
+    (
+        status,
+        Json(InternalPeerResponse {
+            content: None,
+            error: Some(format!(
+                "{}: {}",
+                error_code_name(error.code()),
+                error.message()
+            )),
+            acknowledge: false,
+            state: None,
+        }),
+    )
+        .into_response()
+}
+
+fn error_code_name(code: TransferErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "invalid_state".to_owned())
 }
 
 fn capability_header(headers: &HeaderMap) -> Option<&str> {
@@ -772,6 +892,11 @@ fn registry_create_error(error: RegistryError) -> Response {
             StatusCode::CONFLICT,
             "The dedicated reviewer is managed by its peer thread.",
         ),
+        RegistryError::ParticipantBusy => api_error(
+            StatusCode::CONFLICT,
+            "The source terminal is busy with an active transfer.",
+        ),
+        RegistryError::NotFound => api_error(StatusCode::NOT_FOUND, "Source terminal not found."),
         RegistryError::ShuttingDown => api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "The server is shutting down.",
@@ -815,6 +940,7 @@ fn internal_error_response(error: PeerError) -> Response {
             content: None,
             error: Some(error.to_string()),
             acknowledge: false,
+            state: None,
         }),
     )
         .into_response()
@@ -872,7 +998,7 @@ fn action_label(action: PeerAction) -> &'static str {
     }
 }
 
-fn compact_for_prompt(value: &str) -> String {
+pub(crate) fn compact_for_prompt(value: &str) -> String {
     value
         .chars()
         .map(|character| {
@@ -956,8 +1082,21 @@ mod tests {
             content: "Bounded handoff".to_owned(),
         })
         .expect("bridge payload");
+        let bridge = InternalBridge {
+            peers: broker.clone(),
+            transfers: TransferCoordinator::new(
+                broker.clone(),
+                crate::registry::SessionRegistry::new(crate::terminal::TerminalConfig {
+                    project_dir: std::path::PathBuf::from("."),
+                    command: "codex".to_owned(),
+                    arguments: Vec::new(),
+                    agent: AgentKind::Codex,
+                    shell: crate::config::ShellKind::Powershell,
+                }),
+            ),
+        };
 
-        let response = internal_router(broker.clone())
+        let response = internal_router(bridge.clone())
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -986,7 +1125,44 @@ mod tests {
             PeerStatus::AwaitingPreview
         );
 
-        let remote = internal_router(broker)
+        // A transfer operation with a valid capability but no such transfer is
+        // refused without falling through to peer authorization.
+        let transfer_payload = serde_json::to_vec(&InternalPeerRequest::TransferReceive {
+            transfer_id: thread.current_turn.id,
+        })
+        .expect("transfer payload");
+        let refused = internal_router(bridge.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(INTERNAL_PEER_PATH)
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("{CAPABILITY_SCHEME}{capability}"),
+                    )
+                    .extension(ConnectInfo(SocketAddr::from((
+                        std::net::Ipv4Addr::LOCALHOST,
+                        45_012,
+                    ))))
+                    .body(Body::from(transfer_payload))
+                    .expect("transfer request"),
+            )
+            .await
+            .expect("transfer bridge response");
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(refused.into_body(), MAX_INTERNAL_PEER_BODY)
+            .await
+            .expect("refused body");
+        let decoded: InternalPeerResponse = serde_json::from_slice(&body).expect("refused JSON");
+        assert!(decoded.content.is_none());
+        assert!(
+            decoded
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("unauthorized"))
+        );
+
+        let remote = internal_router(bridge)
             .oneshot(
                 Request::builder()
                     .method("POST")

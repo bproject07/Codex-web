@@ -29,12 +29,36 @@ const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const MAX_HTTP_RESPONSE_BYTES: usize = MAX_PEER_ARTIFACT_BYTES * 6 + 16 * 1024;
 const MAX_HTTP_REQUEST_BYTES: usize = MAX_PEER_ARTIFACT_BYTES * 6 + 4 * 1024;
 
+/// Private bridge operations. Peer-thread operations are keyed by turn; the
+/// transfer operations use their own namespace so a transfer identifier can
+/// never be interpreted as a peer turn or vice versa.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum InternalPeerRequest {
-    Submit { turn_id: Uuid, content: String },
-    Receive { turn_id: Uuid },
-    Acknowledge { turn_id: Uuid },
+    Submit {
+        turn_id: Uuid,
+        content: String,
+    },
+    Receive {
+        turn_id: Uuid,
+    },
+    Acknowledge {
+        turn_id: Uuid,
+    },
+    TransferSubmit {
+        transfer_id: Uuid,
+        attempt_id: Uuid,
+        content: String,
+    },
+    TransferReceive {
+        transfer_id: Uuid,
+    },
+    TransferAcknowledge {
+        transfer_id: Uuid,
+    },
+    TransferStatus {
+        transfer_id: Uuid,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,12 +69,35 @@ pub struct InternalPeerResponse {
     pub error: Option<String>,
     #[serde(default)]
     pub acknowledge: bool,
+    /// Transfer state for `transfer_status`; absent for every other operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 enum PeerCliCommand {
-    Submit { turn_id: Uuid, input: SubmitInput },
-    Receive { turn_id: Uuid },
+    Submit {
+        turn_id: Uuid,
+        input: SubmitInput,
+    },
+    Receive {
+        turn_id: Uuid,
+    },
+    TransferSubmit {
+        transfer_id: Uuid,
+        attempt_id: Uuid,
+        input: SubmitInput,
+    },
+    TransferReceive {
+        transfer_id: Uuid,
+    },
+    TransferAck {
+        transfer_id: Uuid,
+    },
 }
+
+/// Bounded retries of a receipt-only acknowledgement after the artifact was
+/// written and flushed. Never re-requests content.
+const TRANSFER_ACK_ATTEMPTS: usize = 3;
 
 enum SubmitInput {
     File(PathBuf),
@@ -79,35 +126,127 @@ pub fn try_run_from_environment() -> Result<bool> {
     Ok(true)
 }
 
+enum Receipt {
+    None,
+    PeerTurn(Uuid),
+    Transfer(Uuid),
+}
+
 fn execute(command: PeerCliCommand) -> Result<()> {
-    let (request, received_turn) = match command {
+    let (request, receipt) = match command {
         PeerCliCommand::Submit { turn_id, input } => {
-            let content = match input {
-                SubmitInput::File(path) => read_bounded_file(&path)?,
-                SubmitInput::Stdin => read_bounded_stdin()?,
-            };
-            (InternalPeerRequest::Submit { turn_id, content }, None)
+            let content = read_submit_input(input)?;
+            (
+                InternalPeerRequest::Submit { turn_id, content },
+                Receipt::None,
+            )
         }
-        PeerCliCommand::Receive { turn_id } => {
-            (InternalPeerRequest::Receive { turn_id }, Some(turn_id))
+        PeerCliCommand::Receive { turn_id } => (
+            InternalPeerRequest::Receive { turn_id },
+            Receipt::PeerTurn(turn_id),
+        ),
+        PeerCliCommand::TransferSubmit {
+            transfer_id,
+            attempt_id,
+            input,
+        } => {
+            let content = read_submit_input(input)?;
+            (
+                InternalPeerRequest::TransferSubmit {
+                    transfer_id,
+                    attempt_id,
+                    content,
+                },
+                Receipt::None,
+            )
         }
+        PeerCliCommand::TransferReceive { transfer_id } => (
+            InternalPeerRequest::TransferReceive { transfer_id },
+            Receipt::Transfer(transfer_id),
+        ),
+        PeerCliCommand::TransferAck { transfer_id } => (
+            InternalPeerRequest::TransferAcknowledge { transfer_id },
+            Receipt::None,
+        ),
     };
 
     let endpoint = read_endpoint()?;
     let capability = read_capability()?;
     let response = send_request(endpoint, &capability, &request)?;
 
-    if let Some(turn_id) = received_turn {
-        write_received_response(response, &mut io::stdout().lock(), || {
-            send_request(
-                endpoint,
-                &capability,
-                &InternalPeerRequest::Acknowledge { turn_id },
-            )
-            .map(|_| ())
-        })?;
+    match receipt {
+        Receipt::None => {}
+        Receipt::PeerTurn(turn_id) => {
+            write_received_response(response, &mut io::stdout().lock(), || {
+                send_request(
+                    endpoint,
+                    &capability,
+                    &InternalPeerRequest::Acknowledge { turn_id },
+                )
+                .map(|_| ())
+            })?;
+        }
+        Receipt::Transfer(transfer_id) => {
+            write_received_transfer(response, &mut io::stdout().lock(), transfer_id, || {
+                send_request(
+                    endpoint,
+                    &capability,
+                    &InternalPeerRequest::TransferAcknowledge { transfer_id },
+                )
+                .map(|_| ())
+            })?;
+        }
     }
     Ok(())
+}
+
+fn read_submit_input(input: SubmitInput) -> Result<String> {
+    match input {
+        SubmitInput::File(path) => read_bounded_file(&path),
+        SubmitInput::Stdin => read_bounded_stdin(),
+    }
+}
+
+/// Writes a transferred artifact, flushes it, and only then acknowledges the
+/// receipt. A lost acknowledgement reply is retried a bounded number of times
+/// without ever re-requesting the content; if it still fails, the user-facing
+/// hint names the exact receipt-only command to run.
+fn write_received_transfer(
+    response: InternalPeerResponse,
+    output: &mut dyn Write,
+    transfer_id: Uuid,
+    mut acknowledge: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    let content = response
+        .content
+        .context("the transfer broker returned no artifact content")?;
+    validate_content(&content)?;
+    output
+        .write_all(content.as_bytes())
+        .context("failed to write the transferred context")?;
+    if !content.ends_with('\n') {
+        output
+            .write_all(b"\n")
+            .context("failed to finish the transferred context output")?;
+    }
+    output
+        .flush()
+        .context("failed to flush the transferred context")?;
+    if !response.acknowledge {
+        return Ok(());
+    }
+    let mut last_error = None;
+    for _ in 0..TRANSFER_ACK_ATTEMPTS {
+        match acknowledge() {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error
+        .expect("at least one acknowledgement attempt ran")
+        .context(format!(
+            "context written; receipt unconfirmed; run `__cwt-peer transfer-ack --transfer {transfer_id}`"
+        )))
 }
 
 fn write_received_response(
@@ -135,14 +274,18 @@ fn write_received_response(
     Ok(())
 }
 
+const OPERATIONS_HELP: &str = "expected `submit`, `receive`, `transfer-submit`, `transfer-receive`, or `transfer-ack` after __cwt-peer";
+
 fn parse_arguments(arguments: Vec<OsString>) -> Result<PeerCliCommand> {
     let mut arguments = arguments.into_iter();
     let operation = arguments
         .next()
         .and_then(|value| value.into_string().ok())
-        .context("expected `submit` or `receive` after __cwt-peer")?;
+        .context(OPERATIONS_HELP)?;
 
     let mut turn_id = None;
+    let mut transfer_id = None;
+    let mut attempt_id = None;
     let mut input = None;
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
@@ -155,6 +298,28 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<PeerCliCommand> {
                     .and_then(|value| value.into_string().ok())
                     .context("--turn requires a UTF-8 UUID value")?;
                 turn_id = Some(Uuid::parse_str(&value).context("--turn is not a valid UUID")?);
+            }
+            Some("--transfer") => {
+                if transfer_id.is_some() {
+                    bail!("--transfer may be supplied only once");
+                }
+                let value = arguments
+                    .next()
+                    .and_then(|value| value.into_string().ok())
+                    .context("--transfer requires a UTF-8 UUID value")?;
+                transfer_id =
+                    Some(Uuid::parse_str(&value).context("--transfer is not a valid UUID")?);
+            }
+            Some("--attempt") => {
+                if attempt_id.is_some() {
+                    bail!("--attempt may be supplied only once");
+                }
+                let value = arguments
+                    .next()
+                    .and_then(|value| value.into_string().ok())
+                    .context("--attempt requires a UTF-8 UUID value")?;
+                attempt_id =
+                    Some(Uuid::parse_str(&value).context("--attempt is not a valid UUID")?);
             }
             Some("--file") => {
                 if input.is_some() {
@@ -176,19 +341,51 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<PeerCliCommand> {
         }
     }
 
-    let turn_id = turn_id.context("--turn is required")?;
     match operation.as_str() {
-        "submit" => Ok(PeerCliCommand::Submit {
-            turn_id,
-            input: input.context("submit requires exactly one of --file or --stdin")?,
-        }),
-        "receive" => {
-            if input.is_some() {
-                bail!("receive does not accept --file or --stdin");
+        "submit" | "receive" => {
+            if transfer_id.is_some() || attempt_id.is_some() {
+                bail!("--transfer and --attempt apply only to transfer operations");
             }
-            Ok(PeerCliCommand::Receive { turn_id })
+            let turn_id = turn_id.context("--turn is required")?;
+            if operation == "submit" {
+                Ok(PeerCliCommand::Submit {
+                    turn_id,
+                    input: input.context("submit requires exactly one of --file or --stdin")?,
+                })
+            } else {
+                if input.is_some() {
+                    bail!("receive does not accept --file or --stdin");
+                }
+                Ok(PeerCliCommand::Receive { turn_id })
+            }
         }
-        _ => bail!("expected `submit` or `receive` after __cwt-peer"),
+        "transfer-submit" | "transfer-receive" | "transfer-ack" => {
+            if turn_id.is_some() {
+                bail!("--turn applies only to peer turn operations");
+            }
+            let transfer_id = transfer_id.context("--transfer is required")?;
+            match operation.as_str() {
+                "transfer-submit" => Ok(PeerCliCommand::TransferSubmit {
+                    transfer_id,
+                    attempt_id: attempt_id.context("--attempt is required for transfer-submit")?,
+                    input: input
+                        .context("transfer-submit requires exactly one of --file or --stdin")?,
+                }),
+                "transfer-receive" => {
+                    if input.is_some() || attempt_id.is_some() {
+                        bail!("transfer-receive accepts only --transfer");
+                    }
+                    Ok(PeerCliCommand::TransferReceive { transfer_id })
+                }
+                _ => {
+                    if input.is_some() || attempt_id.is_some() {
+                        bail!("transfer-ack accepts only --transfer");
+                    }
+                    Ok(PeerCliCommand::TransferAck { transfer_id })
+                }
+            }
+        }
+        _ => bail!(OPERATIONS_HELP),
     }
 }
 
@@ -338,6 +535,7 @@ fn parse_http_response(response: &[u8]) -> Result<InternalPeerResponse> {
             content: None,
             error: None,
             acknowledge: false,
+            state: None,
         }
     } else {
         serde_json::from_slice::<InternalPeerResponse>(&body)
@@ -439,6 +637,7 @@ mod tests {
                     content: Some("Synthetic artifact".to_owned()),
                     error: None,
                     acknowledge,
+                    state: None,
                 },
                 &mut Sink { fail_flush },
                 || {
@@ -459,6 +658,7 @@ mod tests {
                 content: Some("Synthetic artifact".to_owned()),
                 error: None,
                 acknowledge: true,
+                state: None,
             },
             &mut output,
             || bail!("Synthetic receipt failure"),
@@ -469,6 +669,173 @@ mod tests {
         assert!(message.contains("retry receive for this turn"));
         assert!(message.contains("Synthetic receipt failure"));
         assert_eq!(output, b"Synthetic artifact\n");
+    }
+
+    #[test]
+    fn transfer_receipt_retries_acknowledgement_only_after_a_flushed_write() {
+        let transfer_id = Uuid::new_v4();
+
+        // A flaky acknowledgement succeeds within the bounded retries.
+        let mut output = Vec::new();
+        let mut attempts = 0;
+        write_received_transfer(
+            InternalPeerResponse {
+                content: Some("Transferred context".to_owned()),
+                error: None,
+                acknowledge: true,
+                state: None,
+            },
+            &mut output,
+            transfer_id,
+            || {
+                attempts += 1;
+                if attempts < 2 {
+                    bail!("Synthetic lost reply")
+                }
+                Ok(())
+            },
+        )
+        .expect("retried acknowledgement succeeds");
+        assert_eq!(attempts, 2);
+        assert_eq!(output, b"Transferred context\n");
+
+        // A persistently lost reply keeps the written output and names the
+        // receipt-only recovery command.
+        let mut output = Vec::new();
+        let mut attempts = 0;
+        let error = write_received_transfer(
+            InternalPeerResponse {
+                content: Some("Transferred context".to_owned()),
+                error: None,
+                acknowledge: true,
+                state: None,
+            },
+            &mut output,
+            transfer_id,
+            || {
+                attempts += 1;
+                bail!("Synthetic lost reply")
+            },
+        )
+        .expect_err("exhausted retries must fail");
+        assert_eq!(attempts, TRANSFER_ACK_ATTEMPTS);
+        let message = format!("{error:#}");
+        assert!(message.contains("receipt unconfirmed"));
+        assert!(message.contains(&format!("transfer-ack --transfer {transfer_id}")));
+        assert_eq!(output, b"Transferred context\n");
+
+        // A failed flush never acknowledges.
+        struct BrokenFlush;
+        impl Write for BrokenFlush {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::from(io::ErrorKind::BrokenPipe))
+            }
+        }
+        let mut acknowledged = false;
+        assert!(
+            write_received_transfer(
+                InternalPeerResponse {
+                    content: Some("Transferred context".to_owned()),
+                    error: None,
+                    acknowledge: true,
+                    state: None,
+                },
+                &mut BrokenFlush,
+                transfer_id,
+                || {
+                    acknowledged = true;
+                    Ok(())
+                },
+            )
+            .is_err()
+        );
+        assert!(!acknowledged);
+    }
+
+    #[test]
+    fn parses_transfer_commands_in_their_own_namespace() {
+        let transfer_id = Uuid::new_v4();
+        let attempt_id = Uuid::new_v4();
+        let submit = parse_arguments(vec![
+            OsString::from("transfer-submit"),
+            OsString::from("--transfer"),
+            OsString::from(transfer_id.to_string()),
+            OsString::from("--attempt"),
+            OsString::from(attempt_id.to_string()),
+            OsString::from("--stdin"),
+        ])
+        .expect("transfer-submit args");
+        assert!(matches!(
+            submit,
+            PeerCliCommand::TransferSubmit {
+                transfer_id: parsed_transfer,
+                attempt_id: parsed_attempt,
+                input: SubmitInput::Stdin,
+            } if parsed_transfer == transfer_id && parsed_attempt == attempt_id
+        ));
+        assert!(matches!(
+            parse_arguments(vec![
+                OsString::from("transfer-receive"),
+                OsString::from("--transfer"),
+                OsString::from(transfer_id.to_string()),
+            ])
+            .expect("transfer-receive args"),
+            PeerCliCommand::TransferReceive { transfer_id: parsed } if parsed == transfer_id
+        ));
+        assert!(matches!(
+            parse_arguments(vec![
+                OsString::from("transfer-ack"),
+                OsString::from("--transfer"),
+                OsString::from(transfer_id.to_string()),
+            ])
+            .expect("transfer-ack args"),
+            PeerCliCommand::TransferAck { transfer_id: parsed } if parsed == transfer_id
+        ));
+
+        // Namespaces never mix: a transfer id is not a turn and vice versa.
+        assert!(
+            parse_arguments(vec![
+                OsString::from("transfer-submit"),
+                OsString::from("--transfer"),
+                OsString::from(transfer_id.to_string()),
+                OsString::from("--stdin"),
+            ])
+            .is_err(),
+            "transfer-submit requires --attempt"
+        );
+        assert!(
+            parse_arguments(vec![
+                OsString::from("transfer-receive"),
+                OsString::from("--turn"),
+                OsString::from(transfer_id.to_string()),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_arguments(vec![
+                OsString::from("receive"),
+                OsString::from("--transfer"),
+                OsString::from(transfer_id.to_string()),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_arguments(vec![
+                OsString::from("transfer-ack"),
+                OsString::from("--transfer"),
+                OsString::from(transfer_id.to_string()),
+                OsString::from("--stdin"),
+            ])
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(InternalPeerRequest::TransferReceive { transfer_id })
+                .expect("wire form"),
+            serde_json::json!({ "operation": "transfer_receive", "transfer_id": transfer_id })
+        );
     }
 
     #[test]

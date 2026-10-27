@@ -226,6 +226,13 @@ jobs:
             --server .\dist\codex-web.exe `
             --port 8814
 
+      - name: Exercise packaged context transfer
+        shell: pwsh
+        run: |
+          python -B .\scripts\transfer-regression.py `
+            --server .\dist\codex-web.exe `
+            --port 8828
+
       - name: Exercise bounded terminal output
         shell: pwsh
         run: python -B ./scripts/terminal-flow-regression.py --server ./dist/codex-web.exe --port 8824
@@ -390,6 +397,14 @@ jobs:
           python3 -B ./scripts/peer-review-regression.py \
             --server ./dist-linux/codex-web \
             --port 8815
+
+      - name: Exercise packaged context transfer
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B ./scripts/transfer-regression.py \
+            --server ./dist-linux/codex-web \
+            --port 8828
 
       - name: Exercise bounded terminal output
         shell: bash

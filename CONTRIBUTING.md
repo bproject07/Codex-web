@@ -67,7 +67,8 @@ server:
 Run the package script and a native PTY/runtime smoke test on each affected
 platform when relevant. See [BUILDING.md](BUILDING.md) for exact commands.
 Changes to peer coordination must run `scripts/peer-review-regression.py`
-against the packaged Windows and Linux binaries. Dependency or release changes
+against the packaged Windows and Linux binaries; changes to context transfer
+must additionally run `scripts/transfer-regression.py`. Dependency or release changes
 must also generate and review the Windows MSVC and Linux GNU
 `THIRD_PARTY_LICENSES` bundles.
 Updater changes additionally require malicious ZIP/TAR tests and

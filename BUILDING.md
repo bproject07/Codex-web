@@ -607,8 +607,8 @@ both archives but cannot attest or publish a GitHub Release.
 The workflow uses Node.js 22.23.1 and Rust 1.95.0, repeats the complete
 frontend/Rust validation, builds fresh packages on Windows MSVC and Ubuntu
 22.04, generates the target-specific license bundles, and exercises
-`scripts/peer-review-regression.py` against each packaged executable. It then
-creates exactly:
+`scripts/peer-review-regression.py` and `scripts/transfer-regression.py`
+against each packaged executable. It then creates exactly:
 
 ```text
 codex-web-terminal-vX.Y.Z-windows-x86_64.zip
@@ -1113,6 +1113,54 @@ For a disposable manual peer smoke:
 
 Do not run this smoke against ports `8788`, `8789`, or `8790`, and do not use a
 live conversation or private repository as test content.
+
+The context-transfer regression runs alongside the peer one whenever the
+transfer coordinator, registry participant claims, helper verbs, bridge
+dispatch, or transfer routes change. It starts the packaged server with
+`--max-sessions 4` and only synthetic agents, then drives the public
+`/api/transfers` routes and the private `transfer-submit` /
+`transfer-receive` / `transfer-ack` helper verbs through those agents:
+
+On Windows:
+
+```powershell
+python -B .\scripts\transfer-regression.py `
+  --server .\dist\codex-web.exe `
+  --port 8828
+```
+
+On Linux:
+
+```bash
+python3 -B ./scripts/transfer-regression.py \
+  --server ./dist-linux/codex-web \
+  --port 8828
+```
+
+It asserts automated preparation through the helper with an idempotent
+duplicate and a refused changed body, lifecycle and peer exclusion of a
+preparing source, idempotent and conflicting creates, manual override racing
+a held late submit, existing-target binding with exact generation and
+duplicate/changed target requests, Deliver readiness/revision/generation
+checks, helper receive-write-flush-acknowledge with wrong-role refusal and
+status-only receive afterwards, text erasure on completion, target end before
+delivery keeping the draft, discard during delivery, manual drafts from a
+stopped source, mutual exclusion with peer threads, capacity refusal for new
+targets while existing targets stay allowed, and ledger listing.
+
+For a disposable manual transfer smoke:
+
+1. start a package on an unused port with an isolated `--state-dir`;
+2. open **Manage sessions → Continue in…** on a running source tab;
+3. choose **Ask the source agent** at an empty source prompt and wait for the
+   handoff to appear; edit it and **Save handoff**;
+4. choose **New <Agent> tab**, confirm the tab appears and is selected behind
+   the dialog, finish any sign-in or trust prompt there;
+5. press **Deliver** at an empty target prompt and wait for **Delivered**;
+   confirm the target retrieved the handoff and the source kept running;
+6. repeat with **Write it myself** from a terminated source into an
+   **Existing tab**;
+7. stop the disposable server.
 
 The workspace-picker regression owns a disposable server, synthetic
 directories, isolated state, a synthetic long-running CLI, and its cleanup. It

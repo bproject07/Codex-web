@@ -63,6 +63,14 @@ import {
   type ReturnPeerTurnInput,
 } from "./peer";
 import {
+  TransferComposer,
+  generateRequestId,
+  targetTerminalToSelect,
+  useTransferController,
+  type TransferMode,
+  type TransferTargetSelection,
+} from "./transfer";
+import {
   WorkspacePicker,
   type WorkspaceAgent,
   type WorkspaceBrowserAdapter,
@@ -118,6 +126,7 @@ export function App() {
     useState<WorkspaceDirectory | null>(null);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [peerComposerOpen, setPeerComposerOpen] = useState(false);
+  const [transferSourceId, setTransferSourceId] = useState<string | null>(null);
   const [agentCatalog, setAgentCatalog] = useState<AgentCatalog | null>(null);
   const [agentCatalogLoading, setAgentCatalogLoading] = useState(false);
   const [agentCatalogError, setAgentCatalogError] = useState<string | null>(
@@ -157,6 +166,7 @@ export function App() {
   const updateReconnectRef = useRef<AbortController | null>(null);
   const suppressTerminalFocusOnceRef = useRef(false);
   const peerController = usePeerController(token);
+  const transferController = useTransferController(token);
 
   selectedTerminalIdRef.current = selectedTerminalId;
 
@@ -216,6 +226,18 @@ export function App() {
     maxSessions !== null && sessions.length >= maxSessions;
   const newPeerThreadDisabledReason = sessionCapacityReached
     ? `Session capacity reached (${sessions.length} of ${maxSessions}). Close a terminal tab before starting a new reviewer. Existing reviewer conversations remain available.`
+    : null;
+  const transferSourceSession = useMemo(
+    () =>
+      transferSourceId
+        ? (sessions.find((candidate) => candidate.terminalId === transferSourceId) ??
+          null)
+        : null,
+    [sessions, transferSourceId],
+  );
+  const transferComposerOpen = transferSourceSession !== null;
+  const newTransferTargetDisabledReason = sessionCapacityReached
+    ? `Session capacity reached (${sessions.length} of ${maxSessions}). Close a terminal tab before starting a new one.`
     : null;
 
   useEffect(() => {
@@ -553,6 +575,7 @@ export function App() {
       workspacePickerOpen ||
       agentPickerOpen ||
       peerComposerOpen ||
+      transferComposerOpen ||
       confirmRequest !== null ||
       window.matchMedia("(pointer: coarse)").matches
     ) {
@@ -573,6 +596,7 @@ export function App() {
     workspacePickerOpen,
     agentPickerOpen,
     peerComposerOpen,
+    transferComposerOpen,
     token,
   ]);
 
@@ -603,6 +627,7 @@ export function App() {
             workspacePickerOpen ||
             agentPickerOpen ||
             peerComposerOpen ||
+            transferComposerOpen ||
             confirmRequest !== null,
           editableTarget,
           terminalAvailable:
@@ -655,6 +680,7 @@ export function App() {
     workspacePickerOpen,
     agentPickerOpen,
     peerComposerOpen,
+    transferComposerOpen,
     token,
   ]);
 
@@ -1333,10 +1359,38 @@ export function App() {
     setWorkspacePickerOpen(false);
     setAgentPickerOpen(false);
     setLaunchDirectory(null);
+    setTransferSourceId(null);
     setPeerComposerOpen(true);
     peerController.clearError();
     void peerController.refresh();
     void refreshAgentCatalog(true);
+  };
+
+  const closeTransferComposer = () => {
+    setTransferSourceId(null);
+    transferController.follow(null);
+    if (window.matchMedia("(pointer: coarse)").matches) {
+      suppressTerminalFocusOnceRef.current = true;
+      return;
+    }
+    focusTerminalForFinePointer();
+  };
+
+  const openTransferComposer = (source: SessionSnapshot) => {
+    if (source.purpose.kind !== "interactive") {
+      setMessage("A dedicated peer reviewer cannot be a transfer source.");
+      return;
+    }
+    setSettingsOpen(false);
+    setSessionsOpen(false);
+    setWorkspacePickerOpen(false);
+    setAgentPickerOpen(false);
+    setLaunchDirectory(null);
+    setPeerComposerOpen(false);
+    transferController.follow(null);
+    setTransferSourceId(source.terminalId);
+    void refreshAgentCatalog(true);
+    void refreshSessions(selectedTerminalIdRef.current || undefined);
   };
 
   const closeWorkspacePicker = () => {
@@ -1350,6 +1404,7 @@ export function App() {
 
   const openWorkspaceLauncher = () => {
     setPeerComposerOpen(false);
+    setTransferSourceId(null);
     setSessionsOpen(false);
     setSettingsOpen(false);
     setAgentPickerOpen(false);
@@ -1361,6 +1416,7 @@ export function App() {
 
   const openSessionsManager = () => {
     setPeerComposerOpen(false);
+    setTransferSourceId(null);
     setWorkspacePickerOpen(false);
     setLaunchDirectory(null);
     setAgentPickerOpen(false);
@@ -1371,6 +1427,7 @@ export function App() {
 
   const openSettings = () => {
     setPeerComposerOpen(false);
+    setTransferSourceId(null);
     setWorkspacePickerOpen(false);
     setLaunchDirectory(null);
     setAgentPickerOpen(false);
@@ -1404,6 +1461,94 @@ export function App() {
     setConnectionStatus("connecting");
     setMessage(null);
     closeSessions();
+  };
+
+  /**
+   * Selects a tab while a dialog stays open (the transfer composer shows the
+   * target behind it). Does not force terminal focus; the dialog keeps it.
+   */
+  const selectTerminalBehindDialog = (terminalId: string) => {
+    if (selectedTerminalIdRef.current === terminalId) {
+      return;
+    }
+    const nextSession = sessions.find(
+      (candidate) => candidate.terminalId === terminalId,
+    );
+    sessionSelectionEpochRef.current += 1;
+    selectedTerminalIdRef.current = terminalId;
+    setSelectedTerminalId(terminalId);
+    writeSelectedTerminalId(terminalId);
+    if (nextSession) {
+      setSession(nextSession);
+    }
+    setCtrlMode(false);
+    setConnectionStatus("connecting");
+    setMessage(null);
+  };
+
+  const handleTransferCreate = async (
+    mode: TransferMode,
+    instruction: string,
+  ) => {
+    if (!transferSourceSession) {
+      return;
+    }
+    await transferController.create({
+      transferId: generateRequestId(),
+      sourceTerminalId: transferSourceSession.terminalId,
+      sourceSessionId: transferSourceSession.sessionId,
+      mode,
+      sourceReady: mode === "prepare",
+      instruction,
+    });
+  };
+
+  const handleTransferChooseTarget = async (
+    selection: TransferTargetSelection,
+  ) => {
+    const next = await transferController.chooseTarget({
+      targetRequestId: generateRequestId(),
+      target: selection,
+    });
+    // The target is published at reservation; show it so the user can finish
+    // sign-in or folder trust before confirming readiness.
+    const targetId = targetTerminalToSelect(next);
+    if (targetId) {
+      await refreshSessions(targetId);
+      selectTerminalBehindDialog(targetId);
+    } else {
+      void refreshSessions(selectedTerminalIdRef.current || undefined);
+    }
+  };
+
+  const handleTransferDeliver = async (
+    expectedRevision: number,
+    targetSessionId: string,
+  ) => {
+    await transferController.deliver({
+      expectedRevision,
+      targetSessionId,
+      targetReady: true,
+    });
+  };
+
+  const handleTransferCleanup = async (
+    targetTerminalId: string,
+    targetSessionId: string | null,
+  ) => {
+    try {
+      await transferController.cleanup({ targetTerminalId, targetSessionId });
+    } finally {
+      void refreshSessions(selectedTerminalIdRef.current || undefined);
+    }
+  };
+
+  const handleTransferAbandon = async () => {
+    try {
+      await transferController.abandon();
+    } finally {
+      void refreshSessions(selectedTerminalIdRef.current || undefined);
+    }
   };
 
   const handleCreateSession = async (
@@ -1924,6 +2069,33 @@ export function App() {
         />
       )}
 
+      {transferSourceSession && (
+        <TransferComposer
+          sourceSession={transferSourceSession}
+          sessions={sessions}
+          workspaceAdapter={workspaceAdapter}
+          catalog={agentCatalog}
+          catalogLoading={agentCatalogLoading}
+          catalogError={agentCatalogError}
+          newTargetDisabledReason={newTransferTargetDisabledReason}
+          transfer={transferController.transfer}
+          draft={transferController.draft}
+          operation={transferController.operation}
+          error={transferController.error}
+          onCreate={handleTransferCreate}
+          onSaveDraft={async (expectedRevision, content) => {
+            await transferController.saveDraft(expectedRevision, content);
+          }}
+          onChooseTarget={handleTransferChooseTarget}
+          onDeliver={handleTransferDeliver}
+          onCleanup={handleTransferCleanup}
+          onAbandon={handleTransferAbandon}
+          onSelectTerminal={selectTerminalBehindDialog}
+          onClearError={transferController.clearError}
+          onClose={closeTransferComposer}
+        />
+      )}
+
       {workspacePickerOpen && (
         <div
           className="dialog-backdrop"
@@ -2009,6 +2181,7 @@ export function App() {
           loading={sessionsLoading}
           onAttach={attachSession}
           onRemove={(target) => void handleCloseSessionTab(target)}
+          onContinue={openTransferComposer}
           onRefresh={() => void refreshSessions()}
           onClose={closeSessions}
         />
@@ -2217,6 +2390,8 @@ interface SessionsPanelProps {
   loading: boolean;
   onAttach: (session: SessionSnapshot) => void;
   onRemove: (session: SessionSnapshot) => void;
+  /** Opens the "Continue in…" transfer composer with this tab as the source. */
+  onContinue: (session: SessionSnapshot) => void;
   onRefresh: () => void;
   onClose: () => void;
 }
@@ -2228,6 +2403,7 @@ function SessionsPanel({
   loading,
   onAttach,
   onRemove,
+  onContinue,
   onRefresh,
   onClose,
 }: SessionsPanelProps) {
@@ -2334,6 +2510,18 @@ function SessionsPanel({
                   >
                     {attached ? "Attached" : "Attach"}
                   </button>
+                  {candidate.purpose.kind === "interactive" && (
+                    <button
+                      type="button"
+                      className="session-continue"
+                      data-session-continue={candidate.terminalId}
+                      disabled={busy}
+                      title="Write or request a handoff and continue this work in another terminal"
+                      onClick={() => onContinue(candidate)}
+                    >
+                      Continue in…
+                    </button>
+                  )}
                   {!candidate.isPrimary && (
                     <button
                       type="button"

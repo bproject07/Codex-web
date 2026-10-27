@@ -117,6 +117,9 @@ session's bounded terminal output buffer before it resumes live output.
   `Recheck` between Codex, Claude, AGY, and Kilo sessions
 - A fresh dedicated reviewer PTY for every new peer thread; ordinary sessions
   are never selected or reused as reviewers
+- **Continue in…** context transfer of a written handoff from any ordinary
+  session to a new or existing ordinary session of any ready agent, with
+  explicit readiness confirmation and no automatic resend
 - One raw terminal output buffer per session, bounded to 16 MiB and 16,384 chunks
 - Final PTY output remains readable when process exit precedes the last read;
   restarted sessions reject output from the previous generation
@@ -458,13 +461,53 @@ never reads agent transcript files and never parses terminal text.
    import notice that lists any content Kilo could not represent.
 
 Only the import into Kilo is a Kilo feature; it is one-way. Kilo-to-Kilo
-continuation uses `kilo --continue`, `kilo export`, and `kilo import`.
-Moving a conversation into Claude Code, Codex, or AGY has no equivalent and
-currently requires a hand-written summary pasted into the new tab. This is a
-transcript import, not a resumed process: approvals, environment, and running
-state of the original agent are not carried over, and the managed session
-identifier shown by Codex Web Terminal is unrelated to any agent's own
-session identifier.
+continuation uses `kilo --continue`, `kilo export`, and `kilo import`. For
+every other direction use **Continue in…** below. This is a transcript
+import, not a resumed process: approvals, environment, and running state of
+the original agent are not carried over, and the managed session identifier
+shown by Codex Web Terminal is unrelated to any agent's own session
+identifier.
+
+### Continue in… (context transfer between any agents)
+
+**Manage sessions** offers **Continue in…** on every ordinary tab. It moves
+one written Markdown handoff from that tab to another ordinary terminal —
+a new tab of any ready agent, or an existing running tab, including the
+primary — so the work can continue there in a fresh conversation. It works
+in every direction (Claude → Kilo, Kilo → Codex, Codex → Claude, and so on)
+and does not depend on the source agent being able to respond.
+
+1. **Manage sessions → Continue in…** on the source tab. Choose how the
+   handoff is written:
+   - **Ask the source agent** — the server sends the source one prompt asking
+     it to write a self-contained handoff from its own context and submit it
+     through the local bridge (`__cwt-peer transfer-submit`). Available only
+     for a running source that is at an empty prompt; you confirm that by
+     choosing this option.
+   - **Write it myself** — type or paste the handoff. Works for a stopped or
+     unresponsive source, and you can take over at any time while the source
+     is still preparing; a late submission from the source is then ignored.
+2. Review and edit the handoff, then choose the target: **New <Agent> tab**
+   (in the source folder or another folder) or **Existing tab**. A new tab is
+   created immediately, listed, and selected behind the dialog so you can
+   finish sign-in or folder trust in it.
+3. When the target shows an empty agent prompt, press **Deliver**. The server
+   sends the target one prompt asking it to retrieve the handoff
+   (`__cwt-peer transfer-receive`) and continue. Until the target's agent
+   acknowledges the receipt the composer shows **Delivery unconfirmed**;
+   nothing is resent automatically. If the target ends first, the draft is
+   kept and you can choose another target.
+4. Continue in the target tab. The source tab stays open until you close it.
+
+The handoff is treated by the target as transferred context, not verified
+fact; the prompt asks it to inspect the workspace first. The text lives in
+server memory only until the transfer finishes and is never logged. While a
+transfer is active, its source (during automated preparation) and its bound
+target cannot be restarted, terminated, deleted, or used for `@cwt`, and the
+reverse exclusion applies. Each transfer allows at most eight target
+attempts; a bounded, non-evicting ledger of 4,096 transfer records per server
+run guarantees that a delayed duplicate request can never create a second
+target. A server restart or software update discards unfinished transfers.
 
 The **New terminal** title, **Refresh**, and Close stay visible while its
 folder details and agent cards scroll together. A long folder path does not
@@ -976,6 +1019,15 @@ Endpoints:
 | `POST` | `/api/peer/threads/{threadId}/dispatch` | Approve and deliver the current handoff preview |
 | `POST` | `/api/peer/threads/{threadId}/return` | Return a ready reviewer response to the source |
 | `DELETE` | `/api/peer/threads/{threadId}` | Close the reviewer and purge the in-memory thread |
+| `GET` | `/api/transfers?source=&target=&id=` | List transfer ledger snapshots (no artifact text) |
+| `POST` | `/api/transfers` | Create a transfer from an ordinary source (`prepare` or `manual`) |
+| `GET` | `/api/transfers/{id}` | Read one transfer snapshot |
+| `GET` | `/api/transfers/{id}/draft` | Read the current handoff draft while the transfer is active |
+| `PUT` | `/api/transfers/{id}/draft` | Write the draft with an expected revision (manual entry or override) |
+| `POST` | `/api/transfers/{id}/target` | Choose a new or existing target with a client `targetRequestId` |
+| `POST` | `/api/transfers/{id}/deliver` | Explicitly deliver the approved revision to the bound target |
+| `POST` | `/api/transfers/{id}/cleanup` | Retry cleanup of a target whose start rolled back unconfirmed |
+| `POST` | `/api/transfers/{id}/abandon` | Abandon the transfer (a discard once delivery was queued) |
 | `GET` | `/api/session` | Legacy alias for primary-session metadata |
 | `POST` | `/api/session/restart` | Legacy alias for restarting the primary session |
 | `POST` | `/api/session/terminate` | Legacy alias for terminating the primary session |
@@ -997,6 +1049,25 @@ are rejected while `returning`. To explicitly discard an unread response,
 `discardUnreadTurnId` equal to that thread's current turn ID. An omitted body
 keeps the normal close behavior; a stale discard ID is rejected. The generic
 session DELETE endpoint never overrides this protection.
+
+Transfer requests are bounded (create 64 KiB, draft 6 × 64 KiB + 16 KiB,
+target 256 KiB for directory IDs, others 16 KiB) and reject unknown fields.
+`POST /api/transfers` with `mode: "prepare"` requires `sourceReady: true` and
+the observed running `sourceSessionId`; `mode: "manual"` works for any
+ordinary source, also stopped ones. `/target` takes `{"mode":"new","agent",
+"directoryId"?}` or `{"mode":"existing","terminalId","sessionId"}`; the same
+`targetRequestId` with the same parameters is idempotent. `/deliver` requires
+`targetReady: true`, the observed target `sessionId`, and the expected draft
+revision. Snapshots carry a monotonic `revision`, the `state`
+(`preparing`, `preview`, `starting`, `cleanup_pending`, `target_bound`,
+`delivering`, `awaiting_receipt`, `delivered`, `failed`, `abandoned`), the
+current attempt and its outcome, `attemptsUsed`, and an error `code` such as
+`queue_rejected`, `target_ended`, `attempt_limit_reached`, `capacity_full`,
+`participant_busy`, `generation_conflict`, or `revision_conflict`. Errors use
+HTTP 409 for state conflicts, 404 for unknown transfers, 400/413 for invalid
+or oversized bodies, and 503 when the limits or shutdown refuse admission.
+Lifecycle endpoints return 409 with `"code":"participant_busy"` for a
+terminal that is a transfer participant.
 
 No response contains the authentication token, terminal input, terminal
 output, Codex credentials, or Codex authentication files.
@@ -1403,6 +1474,23 @@ python scripts/workspace-picker-regression.py --server PATH_TO_BUILT_SERVER --po
 It owns and removes its temporary server, state, paths, and synthetic CLI, and
 refuses the reserved live ports `8788`, `8789`, and `8790`.
 
+The peer and transfer workflows have their own API-level regressions against
+the packaged executable, using only synthetic agents:
+
+```text
+python scripts/peer-review-regression.py --server PATH_TO_BUILT_SERVER --port 8814
+python scripts/transfer-regression.py --server PATH_TO_BUILT_SERVER --port 8828
+```
+
+The transfer regression covers automated preparation through the helper,
+idempotent and conflicting creates, manual override racing a late submit,
+new-target publication and duplicate requests, existing-target binding with
+exact generation, explicit delivery with readiness/revision/generation
+checks, helper receive/acknowledge and wrong-role refusal, lifecycle and
+peer exclusion of participants, target end before delivery, discard during
+delivery, manual drafts from stopped sources, and capacity refusal for new
+targets while existing ones stay allowed.
+
 ## Troubleshooting
 
 ### An agent is `missing` or `misconfigured`
@@ -1547,6 +1635,16 @@ when available.
   16 MiB output buffer.
 - Peer threads and their bounded handoff/response artifacts are in memory only.
   A server restart closes their PTYs and cannot restore reviewer context.
+- Context transfers are in memory only. A server restart or software update
+  fails unfinished transfers; their targets are recreated as fresh PTYs by
+  the normal restore plan and the handoff is not replayed. A transfer moves a
+  written handoff, not a running process: the target starts a new
+  conversation from that text, and its agent decides how to use it. The
+  server never resends a delivery; if the target does not acknowledge, the
+  composer keeps reporting it as unconfirmed until you discard it.
+- Delivering a handoff sends its text to the target's configured provider
+  under that agent's own credentials; the server does not route API keys or
+  models between agents.
 - Dedicated peer tabs isolate conversational context from ordinary tabs, but
   are not an operating-system security boundary. All configured CLIs run as
   the same server account.

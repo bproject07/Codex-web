@@ -29,6 +29,8 @@ use crate::{
     peer_routes,
     registry::{RegistryError, SessionRegistry},
     session::SessionSnapshot,
+    transfer::TransferCoordinator,
+    transfer_routes,
     updater::{UpdateManager, UpdateState, UpdateStatus},
     websocket,
     workspaces::{WorkspaceError, WorkspaceLibrary, WorkspaceStore},
@@ -41,6 +43,7 @@ pub struct AppState {
     pub auth: AuthState,
     pub sessions: SessionRegistry,
     pub peers: PeerBroker,
+    pub transfers: TransferCoordinator,
     pub agents: AgentCatalog,
     pub directories: DirectoryBrowser,
     pub workspaces: WorkspaceStore,
@@ -161,6 +164,7 @@ pub fn build_router(state: AppState, static_directory: Option<PathBuf>) -> Route
         .route("/api/sessions/{id}/restart", post(restart_session))
         .route("/api/sessions/{id}/terminate", post(terminate_session))
         .merge(peer_routes::protected_router())
+        .merge(transfer_routes::protected_router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_http_auth,
@@ -689,6 +693,7 @@ async fn restart_by_id(state: &AppState, terminal_id: Uuid) -> Response {
             }),
         )
             .into_response(),
+        Err(RegistryError::ParticipantBusy) => participant_busy("restarted"),
         Err(error) => {
             tracing::error!(%error, %terminal_id, "session restart request failed");
             (
@@ -754,6 +759,7 @@ async fn terminate_by_id(state: &AppState, terminal_id: Uuid) -> Response {
             }),
         )
             .into_response(),
+        Err(RegistryError::ParticipantBusy) => participant_busy("terminated"),
         Err(error) => {
             tracing::error!(%error, %terminal_id, "session terminate request failed");
             (
@@ -839,6 +845,7 @@ async fn delete_session(State(state): State<AppState>, Path(terminal_id): Path<U
             }),
         )
             .into_response(),
+        Err(RegistryError::ParticipantBusy) => participant_busy("deleted"),
         Err(error) => {
             tracing::error!(%error, %terminal_id, "session delete request failed");
             (
@@ -856,6 +863,19 @@ fn has_open_peer_thread(state: &AppState, terminal_id: Uuid) -> bool {
     state.peers.list_threads().iter().any(|thread| {
         thread.source_terminal_id == terminal_id && thread.status != PeerStatus::Closed
     })
+}
+
+fn participant_busy(action: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": format!(
+                "This terminal is part of an active context transfer and cannot be {action} until the transfer finishes or is abandoned."
+            ),
+            "code": "participant_busy",
+        })),
+    )
+        .into_response()
 }
 
 fn session_not_found() -> Response {

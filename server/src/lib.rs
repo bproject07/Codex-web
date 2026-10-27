@@ -11,6 +11,8 @@ pub mod registry;
 pub mod routes;
 pub mod session;
 pub mod terminal;
+pub mod transfer;
+pub mod transfer_routes;
 pub mod update_bootstrap;
 pub mod update_fs;
 pub mod update_manifest;

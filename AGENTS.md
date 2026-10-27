@@ -67,6 +67,7 @@ The most important properties are:
 │   ├── session-tabs-regression.py
 │   ├── session-cache-regression.py  Synthetic tab retention and routing regression
 │   ├── terminal-flow-regression.py  Output flow control, restore retry, and IPv6
+│   ├── transfer-regression.py  Context transfer API, helper verbs, claims, lifecycle
 │   └── workspace-picker-regression.py  Auth/CWD/persistence/mobile regression
 ├── server/
 │   ├── Cargo.toml
@@ -88,6 +89,8 @@ The most important properties are:
 │   │   ├── routes.rs          Protected HTTP API and static serving
 │   │   ├── session.rs         PTY lifecycle, replay buffer, process management
 │   │   ├── terminal.rs        Command resolution and platform-specific PTY launch
+│   │   ├── transfer.rs        Context transfer coordinator: states, attempts, grants
+│   │   ├── transfer_routes.rs Bearer-protected transfer API
 │   │   ├── update_bootstrap.rs  Stable-root worker activation and recovery
 │   │   ├── update_fs.rs       Hardened updater state and filesystem operations
 │   │   ├── update_manifest.rs Signed-package identity and target validation
@@ -107,6 +110,7 @@ The most important properties are:
         ├── api.ts             Token/session storage and HTTP API client
         ├── api.token.test.ts  Token continuity and explicit-forget regression
         ├── peer/              Peer composer, state, API, and unit tests
+        ├── transfer/          Continue-in composer, controller, API, and unit tests
         ├── sessions/          Header session tabs and navigation helpers
         ├── updates/           Update UI, API model, state, and unit tests
         ├── workspaces/        Folder picker, model, DTOs, and unit tests
@@ -360,6 +364,80 @@ preflight, PTY startup, or process termination requires:
 Changes to the peer broker, helper, automation prompts, session purpose, or
 peer routes require `scripts/peer-review-regression.py` on both Windows and
 Linux in addition to the normal frontend, Rust, and package checks.
+
+## Transfer invariants
+
+A context transfer ("Continue in <agent>") moves one written Markdown handoff
+from an ordinary source session to an ordinary target session. It is a
+separately typed transaction (`server/src/transfer.rs`) that shares the peer
+broker's loopback listener, per-generation capabilities, artifact validation,
+and ordered automation-prompt queue, but never a peer thread, a dedicated
+reviewer, or peer Close.
+
+- The target is always an ordinary `Interactive` session: either a fresh one
+  reserved for the transfer or an existing running tab (including the
+  primary). It is published in the registry and user-owned from reservation
+  onward; a disconnected browser request never rolls back an exposed target,
+  and a failed start removes the entry only when the rollback confirmed
+  process termination. Otherwise the transfer enters `cleanup_pending` and
+  only an explicit cleanup with the exact terminal and generation retries it.
+- Registry participant claims (`participant_claims`) exclude lifecycle
+  mutation and peer provisioning on a terminal while it is a transfer source
+  (during automated preparation only) or a bound target, and exclude transfer
+  claims while peer provisioning is pending or a dedicated reviewer exists.
+  A terminal holds at most one transfer claim and never both kinds. Dedicated
+  peer reviewers are never transfer participants. Manual drafting from a
+  stopped or busy source takes no claim.
+- Automated preparation requires `sourceReady: true`, the observed running
+  source generation, and the exact `attemptId` on the helper submission. A
+  manual edit withdraws acceptance of the pending attempt; queued prompt bytes
+  are not recalled, and a late submission is rejected rather than merged. A
+  source exit during preparation returns the transfer to `preview` with the
+  draft intact.
+- Target requests carry a client-chosen `targetRequestId`. The same id with the
+  same parameters returns the saved outcome (or waits on the in-flight start);
+  different parameters conflict; a new id is admitted only after the previous
+  attempt settled. At most 8 attempts per transfer. The ledger of transfers
+  and attempts is bounded to 4,096 records per server generation and fails
+  closed; active transfers holding text are bounded to 256. Nothing is
+  evicted, so a delayed duplicate request can never create a second target.
+- Delivery is an explicit user action carrying `targetReady: true`, the
+  observed target `sessionId`, and the expected draft revision. The approved
+  revision is frozen; the prompt is enqueued synchronously inside the
+  coordinator's critical section, and a definite queue rejection leaves the
+  transfer in `target_bound` with the draft intact. After acceptance the
+  outcome is "unconfirmed" until an authenticated receipt or an observed
+  target generation end. There is no timer, no idle detector, and no
+  automatic resend.
+- The helper verbs `transfer-submit`, `transfer-receive`, and `transfer-ack`
+  use their own operation namespace; a transfer id is never interpreted as a
+  peer turn and no failure falls through to peer authorization. Role is
+  checked per transfer and exact generation: only the source generation may
+  submit, only the bound target generation may receive, acknowledge, or query
+  status. The helper writes and flushes the artifact before acknowledging, and
+  retries only the receipt-only acknowledgement a bounded number of times.
+  Acknowledgement retires the content grant; later receives are status-only.
+- A target that ends before `delivered` settles the attempt, releases its
+  claim, and returns the transfer to `preview` with the draft kept and
+  `delivery: target_ended`; the user chooses a new target and delivers again
+  explicitly. Abandon from `delivering`/`awaiting_receipt` is a discard that
+  withdraws acceptance of later helper calls. Artifact text is erased on every
+  terminal state; the ledger stores identities and outcomes only.
+- Lock order: transfer coordinator -> session registry -> session record. The
+  peer broker lock is never nested inside the coordinator; capability
+  authentication releases it before dispatch, and revocation reaches the
+  coordinator through an observer invoked outside the broker lock. Shutdown
+  disables transfer admission and fails non-terminal transfers before the
+  loopback listener is released.
+- Browser: the entry point is **Continue in…** in **Manage sessions**, not a
+  fifth general Menu action. The composer reuses the peer dialog shell, offers
+  manual entry from the start (also for stopped sources), selects the target
+  tab behind the dialog so the user can finish sign-in or folder trust, and
+  never describes the result as a resumed process.
+
+Changes to the transfer coordinator, registry claims, helper verbs, bridge
+dispatch, or transfer routes require `scripts/transfer-regression.py` **and**
+`scripts/peer-review-regression.py` on both Windows and Linux.
 
 ## Workspace invariants
 
@@ -624,6 +702,8 @@ Check:
 - WebSocket input produces PTY output;
 - `scripts/peer-review-regression.py` passes against the packaged executable
   on Windows and Linux when peer code is present or changed;
+- `scripts/transfer-regression.py` passes against the packaged executable on
+  Windows and Linux when transfer, registry-claim, or helper code changed;
 - a redistribution archive contains a target-specific generated
   `THIRD_PARTY_LICENSES` bundle whose lockfile hashes and package inventory
   match that build.
