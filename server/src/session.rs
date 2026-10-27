@@ -1061,7 +1061,7 @@ impl SessionManager {
             return;
         }
 
-        record.active.take();
+        let ended_process = record.active.take();
         record.exit_code = exit_code;
         let target = if matches!(
             record.machine.state(),
@@ -1081,6 +1081,10 @@ impl SessionManager {
         self.revoke_peer_generation(session_id);
 
         self.notify_event();
+        // ConPTY destruction can wait for its output pipe to drain. The reader
+        // needs the record lock to retain those final bytes, so never close the
+        // master while holding that lock (or before publishing the ended state).
+        drop(ended_process);
         if let Some(exit_code) = exit_code {
             tracing::info!(%session_id, exit_code, agent = self.inner.terminal_config.agent.label(), "agent process exited");
         } else {
@@ -1641,6 +1645,119 @@ mod tests {
                 Ok(())
             })
             .await
+            .unwrap();
+    }
+
+    #[test]
+    fn exit_releases_the_record_before_master_cleanup_drains_final_output() {
+        struct DrainingMaster {
+            inner: std::sync::Weak<SessionInner>,
+            generation: Uuid,
+            drained: Arc<AtomicBool>,
+        }
+        impl MasterPty for DrainingMaster {
+            fn resize(&self, _: portable_pty::PtySize) -> Result<()> {
+                Ok(())
+            }
+            fn get_size(&self) -> Result<portable_pty::PtySize> {
+                Ok(portable_pty::PtySize::default())
+            }
+            fn try_clone_reader(&self) -> Result<Box<dyn Read + Send>> {
+                Ok(Box::new(std::io::empty()))
+            }
+            fn take_writer(&self) -> Result<Box<dyn Write + Send>> {
+                Ok(Box::new(std::io::sink()))
+            }
+            #[cfg(unix)]
+            fn process_group_leader(&self) -> Option<libc::pid_t> {
+                None
+            }
+            #[cfg(unix)]
+            fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+                None
+            }
+            #[cfg(unix)]
+            fn tty_name(&self) -> Option<std::path::PathBuf> {
+                None
+            }
+        }
+        impl Drop for DrainingMaster {
+            fn drop(&mut self) {
+                let inner = self.inner.upgrade().unwrap();
+                assert!(
+                    inner.record.try_lock().is_ok(),
+                    "PTY close must not hold the record lock"
+                );
+                let manager = SessionManager { inner };
+                assert_eq!(manager.snapshot().status, Lifecycle::Exited);
+                manager.publish_output(self.generation, b"final during master close");
+                self.drained.store(true, Ordering::SeqCst);
+            }
+        }
+        let manager = test_session_manager();
+        let generation = Uuid::new_v4();
+        let drained = Arc::new(AtomicBool::new(false));
+        {
+            let mut record = lock(&manager.inner.record);
+            record.session_id = Some(generation);
+            record.machine.transition(Lifecycle::Starting).unwrap();
+            record.machine.transition(Lifecycle::Running).unwrap();
+            record.active = Some(ActiveProcess {
+                session_id: generation,
+                master: Box::new(DrainingMaster {
+                    inner: Arc::downgrade(&manager.inner),
+                    generation,
+                    drained: drained.clone(),
+                }),
+                input_sender: std::sync::mpsc::sync_channel(1).0,
+                termination_sender: std::sync::mpsc::sync_channel(1).0,
+            });
+        }
+        lock(&manager.inner.output).reset(generation);
+        manager.process_exited(generation, Some(0));
+        assert!(drained.load(Ordering::SeqCst));
+        assert_eq!(
+            manager.output_snapshot().chunks[0].data.as_ref(),
+            b"final during master close"
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_archive_deletion_does_not_wait_for_an_unrelated_session_record() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::sharing_store::Store::open(root.path().join("state"))
+            .await
+            .unwrap();
+        let generation = Uuid::new_v4();
+        let recorder = Recorder::new(
+            store.clone(),
+            Uuid::new_v4(),
+            "Retired".into(),
+            "Codex".into(),
+        );
+        recorder.begin(generation, 80, 24, false);
+        recorder.output(generation, b"saved history");
+        recorder.end(generation);
+        store.flush().await.unwrap();
+        let sessions = crate::registry::SessionRegistry::new(
+            test_session_manager().inner.terminal_config.clone(),
+        );
+        let primary = sessions.primary();
+        let sharing = crate::sharing::Sharing::new(Some(store), sessions);
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _record = lock(&primary.inner.record);
+            let _ = entered.send(());
+            wait.recv().unwrap();
+        });
+        ready.await.unwrap();
+        let deleted =
+            tokio::time::timeout(Duration::from_secs(1), sharing.delete_archive(generation)).await;
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        deleted
+            .expect("retired history must not inspect unrelated session snapshots")
             .unwrap();
     }
 

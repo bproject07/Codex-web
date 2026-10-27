@@ -372,7 +372,10 @@ def main():
             assert usage["proposals"] == usage["approvals"] == usage["invitations"] == 0
             assert api("/api/sharing/archives/"+generation)["events"]
             api(approve,"POST",decision,status=404)
+            print(json.dumps({"archiveDeleteBytes": len(raw), "archiveDeleteEvents": len(events)}), flush=True)
+            deletion_started = time.monotonic()
             api("/api/sharing/archives/" + generation, "DELETE", status=204)
+            print(json.dumps({"archiveDeleteMillis": round((time.monotonic()-deletion_started)*1000)}), flush=True)
             api("/api/sharing/archives/" + generation, status=404)
             print(json.dumps({"sharing": "passed", "nativePty": True, "exactlyOneApprovedWrite": True,
                 "guestIsolation": True, "revocation": True, "archiveAfterRestart": True, "browser": args.browser}))

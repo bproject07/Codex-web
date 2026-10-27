@@ -622,7 +622,18 @@ impl Sharing {
         self.store()?
             .run(move |db| {
                 // A live recorder must not recreate an archive after deletion.
-                if sessions.list().iter().any(|session| {
+                // Look up only the archive's terminal. An unrelated native PTY
+                // lifecycle operation must not hold retired history operations.
+                let row: Option<(String, bool)> = db
+                    .query_row(
+                        "SELECT terminal,ended FROM generations WHERE id=?1",
+                        [generation.to_string()],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                let (terminal, ended) = row.ok_or(Error("not_found"))?;
+                if sessions.get(parse_id(&terminal)?).is_some_and(|manager| {
+                    let session = manager.snapshot();
                     session.session_id == Some(generation)
                         && matches!(
                             session.status,
@@ -631,14 +642,7 @@ impl Sharing {
                 }) {
                     return Err(Error("recording_active"));
                 }
-                let ended: Option<bool> = db
-                    .query_row(
-                        "SELECT ended FROM generations WHERE id=?1",
-                        [generation.to_string()],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if ended != Some(true) {
+                if !ended {
                     return Err(Error("recording_active"));
                 }
                 db.execute(
