@@ -1112,7 +1112,9 @@ def main() -> int:
 
     token = secrets.token_urlsafe(32)
     with WorkspaceFixtureDirectory(prefix="codex-web-workspaces-") as temp:
-        temporary_root = Path(temp)
+        # Hosted Windows TEMP may use an 8.3 user directory alias. Match the
+        # canonical paths returned by the server and printed by the real PTY.
+        temporary_root = Path(temp).resolve()
         project = temporary_root / "default-project"
         selected = temporary_root / "projects" / "selected project"
         favorite_project = temporary_root / "projects" / "favorite project"
