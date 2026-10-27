@@ -1120,7 +1120,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.3.10",
+  "serverVersion": "0.4.0",
   "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,
