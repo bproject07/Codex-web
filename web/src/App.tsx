@@ -228,12 +228,25 @@ export function App() {
     ? `Session capacity reached (${sessions.length} of ${maxSessions}). Close a terminal tab before starting a new reviewer. Existing reviewer conversations remain available.`
     : null;
   const transferSourceSession = useMemo(
-    () =>
-      transferSourceId
-        ? (sessions.find((candidate) => candidate.terminalId === transferSourceId) ??
-          null)
-        : null,
-    [sessions, transferSourceId],
+    () => {
+      if (!transferSourceId) return null;
+      const launcher = sessions.find((candidate) => candidate.terminalId === transferSourceId);
+      const transfer = transferController.transfer;
+      if (!transfer) return launcher ?? null;
+      return sessions.find((candidate) => candidate.terminalId === transfer.sourceTerminalId)
+        ?? (launcher ? {
+          ...launcher,
+          terminalId: transfer.sourceTerminalId,
+          sessionId: transfer.sourceSessionId,
+          name: "Removed source terminal",
+          agent: null,
+          agentLabel: "Unavailable",
+          status: "exited" as const,
+          project: "Source folder unavailable; choose a target folder",
+          directoryId: "",
+        } : null);
+    },
+    [sessions, transferSourceId, transferController.transfer],
   );
   const transferComposerOpen = transferSourceSession !== null;
   const newTransferTargetDisabledReason = sessionCapacityReached
@@ -1368,7 +1381,6 @@ export function App() {
 
   const closeTransferComposer = () => {
     setTransferSourceId(null);
-    transferController.follow(null);
     if (window.matchMedia("(pointer: coarse)").matches) {
       suppressTerminalFocusOnceRef.current = true;
       return;
@@ -1377,6 +1389,17 @@ export function App() {
   };
 
   const openTransferComposer = (source: SessionSnapshot) => {
+    if (transferController.operation !== null) {
+      const pending = transferController.transfer;
+      if (pending?.sourceTerminalId === source.terminalId ||
+          pending?.attempt?.target.terminalId === source.terminalId) {
+        setSessionsOpen(false);
+        setTransferSourceId(source.terminalId);
+      } else {
+        setMessage("Wait for the current transfer operation to finish before opening another transfer.");
+      }
+      return;
+    }
     if (source.purpose.kind !== "interactive") {
       setMessage("A dedicated peer reviewer cannot be a transfer source.");
       return;
@@ -1389,6 +1412,7 @@ export function App() {
     setPeerComposerOpen(false);
     transferController.follow(null);
     setTransferSourceId(source.terminalId);
+    void transferController.recover(source.terminalId);
     void refreshAgentCatalog(true);
     void refreshSessions(selectedTerminalIdRef.current || undefined);
   };
@@ -2071,6 +2095,7 @@ export function App() {
 
       {transferSourceSession && (
         <TransferComposer
+          key={transferController.transfer?.transferId ?? transferSourceSession.terminalId}
           sourceSession={transferSourceSession}
           sessions={sessions}
           workspaceAdapter={workspaceAdapter}
@@ -2079,6 +2104,7 @@ export function App() {
           catalogError={agentCatalogError}
           newTargetDisabledReason={newTransferTargetDisabledReason}
           transfer={transferController.transfer}
+          relatedTransfers={transferController.relatedTransfers}
           draft={transferController.draft}
           operation={transferController.operation}
           error={transferController.error}
@@ -2090,9 +2116,13 @@ export function App() {
           onDeliver={handleTransferDeliver}
           onCleanup={handleTransferCleanup}
           onAbandon={handleTransferAbandon}
-          onSelectTerminal={selectTerminalBehindDialog}
+          onSelectTerminal={(terminalId) => {
+            selectTerminalBehindDialog(terminalId);
+            closeTransferComposer();
+          }}
           onClearError={transferController.clearError}
           onClose={closeTransferComposer}
+          onFollowTransfer={transferController.follow}
         />
       )}
 

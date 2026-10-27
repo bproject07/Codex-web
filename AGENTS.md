@@ -187,10 +187,11 @@ failures. Keep process containment enabled. Both probes are read-only, bounded,
 and strip the same server secrets and parent-session markers; help text must
 never be logged or returned to the browser. Discovery version probes remain
 exactly `codex --version`. Optional Claude and AGY dangerous-mode switches append only
-the fixed upstream `--dangerously-skip-permissions` argument. Kilo receives
-no fixed arguments and has no `codex-web` bypass switch: its upstream `--auto`
-option is deliberately not exposed, and its `allow`/`ask`/`deny` policy lives
-in Kilo's own configuration file. Unix and Windows
+the fixed upstream `--dangerously-skip-permissions` argument. Every Kilo
+profile appends the fixed upstream `--auto` argument, including the primary,
+new tabs, restarts, transfers, and dedicated reviewers. This auto-approves
+permissions except explicit `deny` rules in Kilo's own configuration. Version
+and discovery probes remain exactly `kilo --version`. Unix and Windows
 `cmd` launches keep fixed arguments distinct. The Windows PowerShell wrapper
 must encode each fixed argument as an independently single-quoted literal with
 embedded quotes escaped. Never accept executable arguments from the browser
@@ -434,6 +435,15 @@ reviewer, or peer Close.
   manual entry from the start (also for stopped sources), selects the target
   tab behind the dialog so the user can finish sign-in or folder trust, and
   never describes the result as a resumed process.
+- Hiding the composer preserves the transfer. Reopening from either participant
+  discovers active transfers from the server, including after a page reload.
+  Save and Deliver use the loaded draft revision and remain disabled until it
+  matches the metadata revision; stale draft responses cannot replace newer
+  state or restore content after completion.
+- Generation exit updates the session record before the revocation observer
+  runs outside that lock. Target-start completion rechecks the current
+  generation under the coordinator lock, and failed rollback records the actual
+  generation for exact-identity cleanup.
 
 Changes to the transfer coordinator, registry claims, helper verbs, bridge
 dispatch, or transfer routes require `scripts/transfer-regression.py` **and**

@@ -191,20 +191,22 @@ async fn choose_target(
         } => {
             // Resolve the directory the same way New terminal does: decode and
             // canonicalize again immediately before use; default to the source's.
-            let source_directory = match state
-                .transfers
-                .get(id)
-                .ok()
-                .and_then(|snapshot| state.sessions.get(snapshot.source_terminal_id))
-            {
-                Some(source) => source.snapshot().directory_id,
-                None => {
-                    return transfer_error_response(TransferError::from_code(
-                        TransferErrorCode::TransferNotFound,
-                    ));
-                }
+            let directory_id = match directory_id {
+                Some(directory_id) => directory_id,
+                None => match state
+                    .transfers
+                    .get(id)
+                    .ok()
+                    .and_then(|snapshot| state.sessions.get(snapshot.source_terminal_id))
+                {
+                    Some(source) => source.snapshot().directory_id,
+                    None => {
+                        return transfer_error_response(TransferError::from_code(
+                            TransferErrorCode::InvalidDirectory,
+                        ));
+                    }
+                },
             };
-            let directory_id = directory_id.unwrap_or(source_directory);
             let project_dir = match state.directories.resolve_id(&directory_id).await {
                 Ok(path) => path,
                 Err(error) => return directory_error_response(error),
@@ -247,10 +249,12 @@ async fn choose_target(
             let start_state = state.clone();
             let outcome = tokio::spawn(async move {
                 let result = start_state.sessions.start_transfer_target(session).await;
-                if let Ok(started) = &result {
+                let started = result.as_ref().ok().cloned();
+                let completed = start_state.transfers.complete_target_start(token, result);
+                if let Some(started) = started {
                     record_recent(&start_state, started.directory_id.as_str(), started.agent).await;
                 }
-                start_state.transfers.complete_target_start(token, result)
+                completed
             })
             .await;
             match outcome {

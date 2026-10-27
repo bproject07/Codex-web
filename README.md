@@ -499,6 +499,13 @@ and does not depend on the source agent being able to respond.
    kept and you can choose another target.
 4. Continue in the target tab. The source tab stays open until you close it.
 
+**Show target tab** hides the composer so you can use the terminal. Reopen
+**Continue in…** from either the source or target to recover the active
+transfer, including after a page reload. If several transfers involve that
+terminal, choose one from **Active transfers for this terminal**. Closing the
+dialog does not abandon a transfer. Save and Deliver wait until the displayed
+draft matches the latest revision.
+
 The handoff is treated by the target as transferred context, not verified
 fact; the prompt asks it to inspect the workspace first. The text lives in
 server memory only until the transfer finishes and is never logged. While a
@@ -828,9 +835,9 @@ Unix, the resolved executable is launched directly without a shell wrapper.
 Codex always receives fixed `--yolo`, plus `--no-daemon` only when its bounded
 `--help` probe confirms support. The two
 optional permission switches add the fixed upstream
-`--dangerously-skip-permissions` argument to Claude or AGY. Kilo is launched
-with no fixed arguments; its permission policy comes from Kilo's own
-configuration file. On Unix and Windows
+`--dangerously-skip-permissions` argument to Claude or AGY. Kilo always receives
+the fixed `--auto` argument, which auto-approves permissions except explicit
+`deny` rules in Kilo's configuration. On Unix and Windows
 `cmd` launches each remains a distinct process argument. The Windows
 PowerShell wrapper encodes each as a
 single-quoted literal with embedded quotes escaped. These arguments cannot be
@@ -884,11 +891,11 @@ They launch `claude --dangerously-skip-permissions` and
 `agy --dangerously-skip-permissions`, respectively. Both upstream CLIs warn
 that this bypasses their normal safety confirmations. The similar Claude flag
 `--allow-dangerously-skip-permissions` merely makes bypass mode available; it
-does not enable bypass mode at startup. Codex Web Terminal offers no
-equivalent switch for Kilo: Kilo's `--auto` option and `/auto-approve`
-command exist upstream, but they are not appended by this server. Configure
-Kilo's `allow` / `ask` / `deny` permissions in its own configuration file
-instead.
+does not enable bypass mode at startup. Kilo sessions always start with
+`--auto`, including the primary terminal, new tabs, restarts, transfer targets,
+and dedicated reviewers. This approves permission requests automatically while
+preserving explicit `deny` rules in Kilo's configuration. See the
+[upstream CLI reference](https://kilo.ai/docs/code-with-ai/platforms/cli-reference).
 
 ## Environment variables
 
@@ -1315,7 +1322,8 @@ user who starts it. Anyone with the authenticated URL can interact with the
 selected agent and potentially cause commands to run in any directory readable
 by that operating-system account. Codex sessions always use `--yolo`, so Codex
 approval prompts and sandboxing are disabled; Claude and AGY can be configured
-similarly, and Kilo's own configuration file decides its permission prompts.
+similarly. Kilo always receives `--auto`, which automatically approves requests
+except actions explicitly denied by its configuration.
 The same token authorizes filesystem-root discovery, directory
 browsing, manual absolute-path resolution, Favorites/Recent access, and PTY
 launch. `--project` is only the default working directory; it is not a sandbox
@@ -1655,8 +1663,8 @@ when available.
   turn waiting; terminal output is never parsed to infer completion.
 - Agent discovery is local and read-only. The browser cannot install, update,
   authenticate, or repair a CLI; it only shows vetted host-side instructions.
-- Kilo Code CLI is launched with no fixed arguments. Its interactive
-  `--auto` option is not exposed as a `codex-web` switch, and the Kilo
+- Kilo Code CLI is launched with fixed `--auto`; explicit `deny` rules still
+  apply. The Kilo
   transcript import (`/resume-claude`, `/resume-codex`) is a Kilo feature the
   user runs inside the Kilo tab; it is one-way and skips content Kilo cannot
   represent. The server never reads transcript files on an agent's behalf.

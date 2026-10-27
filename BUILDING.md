@@ -867,8 +867,9 @@ For an explicit dangerous-mode launch test, add
 `--claude-dangerously-skip-permissions` and
 `--agy-dangerously-skip-permissions`. These switches pass the fixed upstream
 `--dangerously-skip-permissions` argument directly to the respective process
-and must remain off for normal validation. Kilo has no such switch and must
-start with an empty fixed-argument list.
+and must remain off for normal validation. Kilo always starts with fixed
+`--auto`; verify it for primary, new, restarted, and peer sessions. Its
+discovery/preflight version probes must remain exactly `kilo --version`.
 
 For the Kilo profile specifically, confirm with the real CLI on each platform:
 the `--version` probe returns a strict semantic version inside the 3-second
@@ -882,7 +883,7 @@ managed Claude Code and Codex tabs in the same directory and import one of
 them. Record any deviation as a limitation in `README.md` and `OPERATIONS.md`
 rather than working around it in the launcher.
 
-Linux results recorded for Kilo Code CLI 7.8.18 with Claude Code 2.1.310 in a
+Historical v0.4.0 Linux results recorded for Kilo Code CLI 7.8.18 with Claude Code 2.1.310 in a
 Debian container (Node.js 22, non-root account, packaged release binary):
 
 - `kilo --version` prints the bare version and cold-starts in about 0.6 s;
@@ -902,7 +903,17 @@ Debian container (Node.js 22, non-root account, packaged release binary):
 - Kilo's `@cwt` helper calls and `/resume-claude` needed no fixed launch
   arguments; the permission policy came from `~/.config/kilo/kilo.jsonc`.
 
-Windows validation of the same matrix remains pending.
+That historical run predates the fixed `--auto` launch argument in v0.4.1.
+Windows validation of the same real-provider matrix remains pending.
+
+For v0.4.1, a separate Linux check with Kilo 7.8.18 and an isolated home
+directory verified TUI output through the packaged server's native PTY,
+`--auto` on primary, restarted, and new sessions, and process-tree cleanup
+after termination. The container had networking disabled and made no provider
+request. Synthetic peer coverage also checks `--auto` on dedicated reviewers.
+The transfer browser regression covers reopening from either participant,
+page reload, multiple active transfers, draft revision races, and late draft
+responses after abandonment on desktop and mobile viewports.
 
 Run this matrix on both Windows and Linux. Validate real native PTY startup for
 each installed agent, not only catalog JSON or mocked commands. If an upstream

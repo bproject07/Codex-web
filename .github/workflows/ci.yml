@@ -333,6 +333,24 @@ jobs:
           python3 -B ./scripts/mobile-resize-regression.py \
             --server ./dist-linux/codex-web --chrome /usr/bin/google-chrome --port 8817
 
+      - name: Validate Windows agent catalog and workspace picker
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+          python -B .\scripts\agent-catalog-regression.py --server .\dist\codex-web.exe --chrome $chrome --port 8820
+          if ($LASTEXITCODE -ne 0) { throw "Agent catalog regression failed" }
+          python -B .\scripts\workspace-picker-regression.py --server .\dist\codex-web.exe --chrome $chrome --port 8822
+          if ($LASTEXITCODE -ne 0) { throw "Workspace picker regression failed" }
+
+      - name: Validate Linux agent catalog and workspace picker
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B ./scripts/agent-catalog-regression.py --server ./dist-linux/codex-web --chrome /usr/bin/google-chrome --port 8820
+          python3 -B ./scripts/workspace-picker-regression.py --server ./dist-linux/codex-web --chrome /usr/bin/google-chrome --port 8822
+
   minimum-rust:
     name: Minimum Rust 1.88
     needs: changes

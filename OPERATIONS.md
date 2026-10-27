@@ -495,10 +495,12 @@ Use them only when the operating-system account, every selectable working
 directory, network, credentials, and reachable services are intentionally
 placed inside the agent's trust boundary. The switches are off by default.
 
-Kilo Code CLI has no corresponding `codex-web` switch and is launched with no
-fixed arguments. Kilo's upstream `--auto` option and `/auto-approve` command
-are never appended by this server; configure its `allow` / `ask` / `deny`
-rules in `~/.config/kilo/kilo.jsonc` on the server host instead.
+Every Kilo Code CLI session starts with the fixed upstream `--auto` argument,
+including the primary terminal, new tabs, restarts, transfer targets, and peer
+reviewers. Permission requests are approved automatically, except explicit
+`deny` rules in Kilo's configuration (such as `~/.config/kilo/kilo.jsonc`).
+This applies to fresh launches; already-running PTYs keep their original mode.
+See the [Kilo CLI reference](https://kilo.ai/docs/code-with-ai/platforms/cli-reference).
 
 ## Windows command resolution
 
@@ -866,9 +868,9 @@ connected-client count; each running entry also owns a full agent process.
 The Codex card always warns that approvals are disabled because the server
 launches Codex with `--yolo`. Claude and AGY cards show the same warning when
 their dangerous-mode switch is active. Such agents may edit files and run
-commands without asking for confirmation. The Kilo card never shows that
-warning because the server passes Kilo no fixed arguments; Kilo's own
-configuration decides whether a tool action prompts.
+commands without asking for confirmation. The Kilo card also shows the
+warning because managed sessions start with `--auto`; explicit `deny` rules
+in Kilo's own configuration still apply.
 
 ### Continuing a Claude Code or Codex conversation in Kilo
 
@@ -922,12 +924,19 @@ longer able to answer.
    sends the target one prompt asking it to retrieve the handoff through the
    local bridge and continue the work. *Delivery unconfirmed* stays visible
    until the target's agent confirms the receipt; nothing is resent. **Show
-   target tab** switches to the target without closing the composer.
+   target tab** selects the target and hides the composer so you can interact
+   with it. Reopen **Continue in…** from either participant to return to the
+   same transfer; this also works after a page reload. Multiple active
+   transfers are listed in **Active transfers for this terminal**.
 4. On *Delivered*, press **Go to <target>**. The source tab stays open and
    can be removed later like any other tab.
 
 Recoverable situations:
 
+- **The dialog was closed or the page reloaded** — reopen **Continue in…**
+  from the source or target. Closing the dialog never abandons the transfer.
+- **The draft changed elsewhere** — Save and Deliver wait for the matching
+  content to load; a metadata revision alone never approves unseen text.
 - **The target ended before it confirmed** — the handoff draft is kept and
   the composer returns to the target choice; pick a target and deliver again.
 - **The new tab could not start** — the draft is kept; choose again. If its
@@ -1120,7 +1129,7 @@ Healthy output has:
 ```json
 {
   "status": "ok",
-  "serverVersion": "0.4.0",
+  "serverVersion": "0.4.1",
   "serverRestartSupported": true,
   "codexInstalled": true,
   "sessionRunning": true,

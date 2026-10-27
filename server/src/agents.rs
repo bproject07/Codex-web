@@ -231,9 +231,8 @@ fn dangerously_skip_permissions(config: &Config, agent: AgentKind) -> bool {
         AgentKind::Codex => true,
         AgentKind::Claude => config.claude_dangerously_skip_permissions,
         AgentKind::Agy => config.agy_dangerously_skip_permissions,
-        // Kilo exposes a TUI `--auto` switch, but its runtime semantics are
-        // not yet verified natively; no fixed bypass argument is offered.
-        AgentKind::Kilo => false,
+        // Upstream --auto approves prompts while preserving explicit deny rules.
+        AgentKind::Kilo => true,
     }
 }
 
@@ -244,7 +243,7 @@ fn agent_arguments(config: &Config, agent: AgentKind) -> Vec<String> {
             .then(|| "--dangerously-skip-permissions".to_owned())
             .into_iter()
             .collect(),
-        AgentKind::Kilo => Vec::new(),
+        AgentKind::Kilo => vec!["--auto".to_owned()],
     }
 }
 
@@ -402,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn kilo_profile_uses_fixed_defaults_without_bypass_arguments() {
+    fn kilo_profile_uses_the_fixed_auto_approval_argument() {
         let profiles = build_agent_profiles(&config(AgentKind::Codex));
         let kilo = profiles
             .additional
@@ -411,7 +410,7 @@ mod tests {
             .expect("Kilo profile");
 
         assert_eq!(kilo.command, "kilo");
-        assert!(kilo.arguments.is_empty());
+        assert_eq!(kilo.arguments, ["--auto"]);
         let catalog = profiles
             .catalog
             .profiles
@@ -419,7 +418,7 @@ mod tests {
             .find(|profile| profile.terminal.agent == AgentKind::Kilo)
             .expect("Kilo catalog profile");
         assert!(!catalog.explicit_override);
-        assert!(!catalog.dangerously_skip_permissions);
+        assert!(catalog.dangerously_skip_permissions);
         assert_eq!(agent_order(AgentKind::Kilo), 3);
     }
 
@@ -430,7 +429,8 @@ mod tests {
         let profiles = build_agent_profiles(&primary);
         assert_eq!(profiles.primary.command, "trusted-kilo-wrapper");
         assert_eq!(profiles.new_session.command, "trusted-kilo-wrapper");
-        assert!(profiles.primary.arguments.is_empty());
+        assert_eq!(profiles.primary.arguments, ["--auto"]);
+        assert_eq!(profiles.new_session.arguments, ["--auto"]);
         assert_eq!(profiles.additional.len(), 3);
 
         let mut explicit = config(AgentKind::Codex);
@@ -440,6 +440,7 @@ mod tests {
         assert_eq!(profiles.additional.len(), 1);
         assert_eq!(profiles.additional[0].agent, AgentKind::Kilo);
         assert_eq!(profiles.additional[0].command, "kilo-custom");
+        assert_eq!(profiles.additional[0].arguments, ["--auto"]);
     }
 
     #[test]
@@ -551,7 +552,11 @@ mod tests {
             profiles
                 .additional
                 .iter()
-                .all(|profile| profile.arguments.is_empty())
+                .all(|profile| if profile.agent == AgentKind::Kilo {
+                    profile.arguments == ["--auto"]
+                } else {
+                    profile.arguments.is_empty()
+                })
         );
     }
 

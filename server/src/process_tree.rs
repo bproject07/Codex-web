@@ -139,8 +139,20 @@ pub fn run_bounded(
         let _ = child.wait();
         bail!("failed to capture bounded process output");
     };
-    let stdout_receiver = spawn_bounded_output_reader(stdout, options.stdout_limit);
-    let stderr_receiver = spawn_bounded_output_reader(stderr, options.stderr_limit);
+    let readers = (|| {
+        Ok::<_, anyhow::Error>((
+            spawn_bounded_output_reader(stdout, options.stdout_limit)?,
+            spawn_bounded_output_reader(stderr, options.stderr_limit)?,
+        ))
+    })();
+    let (stdout_receiver, stderr_receiver) = match readers {
+        Ok(readers) => readers,
+        Err(error) => {
+            process_owner.terminate(&mut child);
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
 
     let deadline = Instant::now() + options.timeout;
     let status = loop {
@@ -240,12 +252,15 @@ fn read_bounded_output(mut reader: impl Read, limit: usize) -> io::Result<Captur
 fn spawn_bounded_output_reader(
     reader: impl Read + Send + 'static,
     limit: usize,
-) -> Receiver<io::Result<CapturedOutput>> {
+) -> Result<Receiver<io::Result<CapturedOutput>>> {
     let (sender, receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let _ = sender.send(read_bounded_output(reader, limit));
-    });
-    receiver
+    thread::Builder::new()
+        .name("bounded-process-output".to_owned())
+        .spawn(move || {
+            let _ = sender.send(read_bounded_output(reader, limit));
+        })
+        .context("failed to start bounded process output reader")?;
+    Ok(receiver)
 }
 
 fn receive_bounded_output(

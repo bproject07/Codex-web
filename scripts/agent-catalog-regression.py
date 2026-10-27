@@ -159,6 +159,7 @@ def write_ready_command(path: Path, output: str, label: str) -> None:
             f"  echo {output}\r\n"
             "  exit /b 0\r\n"
             ")\r\n"
+            'echo %* > "%~f0.args"\r\n'
             f"echo disposable {label} fixture ready\r\n"
             "ping 127.0.0.1 -t >nul\r\n",
             encoding="utf-8",
@@ -171,6 +172,7 @@ def write_ready_command(path: Path, output: str, label: str) -> None:
         f"  printf '%s\\n' '{output}'\n"
         "  exit 0\n"
         "fi\n"
+        'printf "%s\\n" "$@" > "$0.args"\n'
         f"printf '%s\\n' 'disposable {label} fixture ready'\n"
         "while :; do sleep 60; done\n",
         encoding="utf-8",
@@ -260,8 +262,8 @@ def validate_catalog(
     assert by_kind["claude"].get("dangerouslySkipPermissions") is True, by_kind[
         "claude"
     ]
-    # Kilo has no fixed bypass argument in this release.
-    assert by_kind["kilo"].get("dangerouslySkipPermissions") is False, by_kind["kilo"]
+    # Managed Kilo sessions always use upstream --auto; probes stay --version.
+    assert by_kind["kilo"].get("dangerouslySkipPermissions") is True, by_kind["kilo"]
     kilo_install = by_kind["kilo"].get("install")
     assert isinstance(kilo_install, dict), by_kind["kilo"]
     assert kilo_install.get("command") == "npm install -g @kilocode/cli", kilo_install
@@ -876,6 +878,21 @@ def main() -> int:
                     assert created_kilo["agent"] == "kilo", created_kilo
                     assert created_kilo["status"] == "running", created_kilo
                     assert created_kilo["name"].startswith("Kilo "), created_kilo
+                    kilo_args = Path(str(missing_kilo) + ".args")
+                    deadline = time.monotonic() + 10
+                    while not kilo_args.exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    assert kilo_args.read_text(encoding="utf-8").strip() == "--auto"
+                    request_json(
+                        args.port, token, f"/api/sessions/{created_kilo['terminalId']}/restart",
+                        method="POST",
+                    )
+                    restarted_kilo = next(
+                        item for item in request_json(args.port, token, "/api/sessions")
+                        if item["terminalId"] == created_kilo["terminalId"]
+                    )
+                    assert restarted_kilo["status"] == "running"
+                    assert restarted_kilo["sessionId"] != created_kilo["sessionId"]
                     request_json(
                         args.port,
                         token,

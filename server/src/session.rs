@@ -64,7 +64,11 @@ impl Lifecycle {
             (Self::Idle, Self::Starting | Self::Terminated)
                 | (
                     Self::Starting,
-                    Self::Running | Self::Failed | Self::Exited | Self::Terminating
+                    Self::Running
+                        | Self::Failed
+                        | Self::Exited
+                        | Self::Terminating
+                        | Self::Terminated
                 )
                 | (
                     Self::Running,
@@ -914,9 +918,10 @@ impl SessionManager {
     }
 
     fn process_exited(&self, session_id: Uuid, exit_code: Option<u32>) {
-        self.revoke_peer_generation(session_id);
         let mut record = lock(&self.inner.record);
         if record.session_id != Some(session_id) {
+            drop(record);
+            self.revoke_peer_generation(session_id);
             return;
         }
 
@@ -932,6 +937,12 @@ impl SessionManager {
         };
         let _ = record.machine.transition(target);
         drop(record);
+
+        // Publish the ended generation before notifying transfer admission.
+        // The observer takes the coordinator/registry locks, so it must run
+        // outside the record lock. A concurrent claim now either sees Exited
+        // or is observed and released by this revocation.
+        self.revoke_peer_generation(session_id);
 
         self.notify_event();
         if let Some(exit_code) = exit_code {
@@ -1352,6 +1363,64 @@ mod tests {
         let mut machine = SessionStateMachine::new();
         assert!(machine.transition(Lifecycle::Running).is_err());
         assert_eq!(machine.state(), Lifecycle::Idle);
+    }
+
+    #[test]
+    fn aborted_start_without_an_active_child_can_be_cleaned_up() {
+        let manager = test_session_manager();
+        {
+            let mut record = lock(&manager.inner.record);
+            record.session_id = Some(Uuid::new_v4());
+            record
+                .machine
+                .transition(Lifecycle::Starting)
+                .expect("start");
+        }
+        manager
+            .terminate_blocking()
+            .expect("cleanup interrupted startup");
+        assert_eq!(manager.snapshot().status, Lifecycle::Terminated);
+    }
+
+    #[test]
+    fn exit_is_visible_before_the_revocation_observer_runs() {
+        let broker = PeerBroker::new(
+            "127.0.0.1:43123".parse().expect("loopback"),
+            std::path::PathBuf::from("codex-web"),
+        );
+        let manager = SessionManager::new_managed_with_peer(
+            test_session_manager().inner.terminal_config.clone(),
+            Uuid::new_v4(),
+            "Synthetic".to_owned(),
+            true,
+            SessionPurpose::Interactive,
+            Some(broker.clone()),
+        );
+        let generation = Uuid::new_v4();
+        {
+            let mut record = lock(&manager.inner.record);
+            record.session_id = Some(generation);
+            record
+                .machine
+                .transition(Lifecycle::Starting)
+                .expect("start");
+            record
+                .machine
+                .transition(Lifecycle::Running)
+                .expect("running");
+        }
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_by_callback = observed.clone();
+        let observed_manager = manager.clone();
+        broker.set_revocation_observer(Arc::new(move |_, session_id| {
+            assert_eq!(session_id, generation);
+            assert_eq!(observed_manager.snapshot().status, Lifecycle::Exited);
+            observed_by_callback.store(true, Ordering::SeqCst);
+        }));
+        manager.process_exited(generation, Some(0));
+        assert!(observed.load(Ordering::SeqCst));
+        // Release the test observer's manager reference.
+        broker.set_revocation_observer(Arc::new(|_, _| {}));
     }
 
     #[test]

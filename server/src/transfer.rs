@@ -901,8 +901,20 @@ impl TransferCoordinator {
             return Ok(transfer.snapshot());
         };
         let abandon = attempt.abandon_after_start;
+        // Starting owns a registry claim, but the child may already have
+        // exited while the caller was awaiting startup or workspace storage.
+        // Read its current generation under the coordinator lock. Exit marks
+        // the session record first, then notifies this coordinator, so an exit
+        // after this read will settle the Bound attempt below.
+        let result = result.map(|started| {
+            self.inner
+                .sessions
+                .get(token.terminal_id)
+                .map(|session| session.snapshot())
+                .filter(|current| current.session_id == started.session_id)
+        });
         match result {
-            Ok(snapshot) if snapshot.status == Lifecycle::Running => {
+            Ok(Some(snapshot)) if snapshot.status == Lifecycle::Running => {
                 attempt.target.session_id = snapshot.session_id;
                 attempt.target.name = snapshot.name;
                 attempt.target.project = snapshot.project;
@@ -927,11 +939,17 @@ impl TransferCoordinator {
                     transfer.enter_terminal(TransferState::Abandoned, None);
                 } else {
                     transfer.state = TransferState::Preview;
+                    transfer.delivery = Some(TransferDelivery::TargetEnded);
                     transfer.error = Some(TransferErrorCode::TargetEnded);
                     transfer.touch();
                 }
             }
             Err(RegistryError::StartRollbackFailed(_)) => {
+                // Reservation has no generation yet. A failed startup has
+                // assigned one; cleanup must name that exact retained child.
+                if let Some(session) = self.inner.sessions.get(token.terminal_id) {
+                    attempt.target = target_snapshot(TargetMode::New, &session.snapshot());
+                }
                 attempt.outcome = AttemptOutcome::CleanupPending;
                 let _ = attempt.completion.send_replace(true);
                 transfer.state = TransferState::CleanupPending;
@@ -1579,6 +1597,171 @@ mod tests {
         peers
             .authenticate_capability(&capability)
             .expect("authenticate fixture capability")
+    }
+
+    #[tokio::test]
+    async fn exit_before_start_completion_settles_the_attempt_and_preserves_the_draft() {
+        let fixture = fixture().await;
+        let source = fixture.sessions.primary().snapshot();
+        let id = Uuid::new_v4();
+        fixture
+            .transfers
+            .create(
+                id,
+                source.terminal_id,
+                source.session_id,
+                TransferMode::Manual,
+                false,
+                "Continue.".to_owned(),
+            )
+            .expect("create");
+        fixture
+            .transfers
+            .edit_draft(id, 0, "# Keep this draft".to_owned())
+            .expect("draft");
+        let TargetAdmission::Start { session, token, .. } = fixture
+            .transfers
+            .begin_target(
+                id,
+                Uuid::new_v4(),
+                TargetRequest::New {
+                    agent: AgentKind::Codex,
+                    project_dir: fixture.project_dir.clone(),
+                    directory_id: "synthetic".to_owned(),
+                },
+            )
+            .expect("reserve")
+        else {
+            panic!("new target")
+        };
+        let started = fixture
+            .sessions
+            .start_transfer_target(session.clone())
+            .await
+            .expect("start");
+        assert_eq!(started.status, Lifecycle::Running);
+        // Deterministically reproduce an exit while the route holds its old
+        // Running snapshot, before the coordinator has bound the generation.
+        session.terminate().await.expect("exit before commit");
+        let after = fixture
+            .transfers
+            .complete_target_start(token, Ok(started))
+            .expect("commit");
+        assert_eq!(after.state, TransferState::Preview);
+        assert_eq!(after.delivery, Some(TransferDelivery::TargetEnded));
+        assert_eq!(
+            after.attempt.expect("attempt").outcome,
+            AttemptOutcome::TargetEnded
+        );
+        assert_eq!(
+            fixture.transfers.draft(id).expect("draft").1.as_deref(),
+            Some("# Keep this draft")
+        );
+        assert!(
+            fixture
+                .sessions
+                .transfer_claim(token.terminal_id())
+                .is_none()
+        );
+        fixture
+            .sessions
+            .delete(token.terminal_id())
+            .await
+            .expect("removable target");
+        fixture.transfers.begin_shutdown();
+        fixture.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_pending_carries_the_started_generation_and_retries_failed_termination() {
+        let fixture = fixture().await;
+        let source = fixture.sessions.primary().snapshot();
+        let id = Uuid::new_v4();
+        fixture
+            .transfers
+            .create(
+                id,
+                source.terminal_id,
+                source.session_id,
+                TransferMode::Manual,
+                false,
+                "Continue.".to_owned(),
+            )
+            .expect("create");
+        fixture
+            .transfers
+            .edit_draft(id, 0, "# Retained draft".to_owned())
+            .expect("draft");
+        let TargetAdmission::Start { session, token, .. } = fixture
+            .transfers
+            .begin_target(
+                id,
+                Uuid::new_v4(),
+                TargetRequest::New {
+                    agent: AgentKind::Codex,
+                    project_dir: fixture.project_dir.clone(),
+                    directory_id: "synthetic".to_owned(),
+                },
+            )
+            .expect("reserve")
+        else {
+            panic!("new target")
+        };
+        let started = fixture
+            .sessions
+            .start_transfer_target(session.clone())
+            .await
+            .expect("start");
+        let pending = fixture
+            .transfers
+            .complete_target_start(
+                token,
+                Err(RegistryError::StartRollbackFailed(anyhow::anyhow!(
+                    "synthetic rollback failure"
+                ))),
+            )
+            .expect("pending cleanup");
+        assert_eq!(
+            pending.attempt.expect("attempt").target.session_id,
+            started.session_id
+        );
+        assert!(
+            fixture
+                .transfers
+                .begin_cleanup(id, token.terminal_id(), None)
+                .is_err()
+        );
+        let ticket = fixture
+            .transfers
+            .begin_cleanup(id, token.terminal_id(), started.session_id)
+            .expect("ticket");
+        session.fail_next_termination_for_test();
+        let result = fixture
+            .sessions
+            .cleanup_transfer_target(ticket.terminal_id, id, ticket.session_id)
+            .await;
+        assert!(fixture.transfers.complete_cleanup(ticket, result).is_err());
+        assert!(fixture.sessions.get(ticket.terminal_id).is_some());
+        let ticket = fixture
+            .transfers
+            .begin_cleanup(id, token.terminal_id(), started.session_id)
+            .expect("retry ticket");
+        let result = fixture
+            .sessions
+            .cleanup_transfer_target(ticket.terminal_id, id, ticket.session_id)
+            .await;
+        let after = fixture
+            .transfers
+            .complete_cleanup(ticket, result)
+            .expect("cleanup retry");
+        assert_eq!(after.state, TransferState::Preview);
+        assert!(fixture.sessions.get(ticket.terminal_id).is_none());
+        assert_eq!(
+            fixture.transfers.draft(id).expect("draft").1.as_deref(),
+            Some("# Retained draft")
+        );
+        fixture.transfers.begin_shutdown();
+        fixture.sessions.shutdown().await;
     }
 
     #[tokio::test]

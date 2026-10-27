@@ -822,6 +822,7 @@ write_event(
         "process": os.getpid(),
         "sessionId": SESSION_ID,
         "standaloneCodex": sys.argv[1:] == ["--yolo", "--no-daemon"],
+        "autoApproveKilo": sys.argv[1:] == ["--auto"],
     },
 )
 for prompt in input_prompts():
@@ -1200,6 +1201,7 @@ def exercise_unread_discard(
         stdout_log=stdout_log, stderr_log=stderr_log, token=token,
     )
     reviewer_fixture = track_owned_process(owned_processes, int(ready["process"]), "discard reviewer agent")
+    assert ready["autoApproveKilo"] is True, ready
     run_turn(
         port=port, token=token, process=process, events=events,
         thread_id=thread_id, source=source, reviewer=reviewer, sequence=1,

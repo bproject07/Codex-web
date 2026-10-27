@@ -1029,7 +1029,7 @@ mod command_tests {
     }
 
     #[test]
-    fn kilo_launch_has_no_fixed_arguments_and_resolves_the_plain_executable() {
+    fn kilo_launch_passes_auto_but_version_probes_remain_plain() {
         let directory = tempfile::tempdir().expect("temporary directory");
         // Preflight re-canonicalizes the project directory; a Windows temp
         // path may be an 8.3 short name, so start from the canonical form.
@@ -1038,7 +1038,7 @@ mod command_tests {
         let config = TerminalConfig {
             project_dir: project_dir.clone(),
             command: command_path.to_string_lossy().into_owned(),
-            arguments: Vec::new(),
+            arguments: vec!["--auto".to_owned()],
             agent: AgentKind::Kilo,
             shell: ShellKind::Powershell,
         };
@@ -1066,7 +1066,7 @@ mod command_tests {
             .collect::<Vec<_>>();
         assert!(!argv.iter().any(|value| value == "--no-daemon"));
         assert!(!argv.iter().any(|value| value == "--yolo"));
-        assert!(!argv.iter().any(|value| value == "--auto"));
+        assert!(argv.iter().any(|value| value == "--auto"));
         assert!(
             !argv
                 .iter()
@@ -1077,7 +1077,7 @@ mod command_tests {
     #[cfg(windows)]
     fn write_kilo_fixture(directory: &Path) -> PathBuf {
         let path = directory.join("kilo.cmd");
-        std::fs::write(&path, "@echo off\r\necho 1.2.3\r\nexit /b 0\r\n")
+        std::fs::write(&path, "@echo off\r\nif not \"%~1\"==\"--version\" exit /b 1\r\nif not \"%~2\"==\"\" exit /b 1\r\necho 1.2.3\r\nexit /b 0\r\n")
             .expect("write Kilo fixture");
         path
     }
@@ -1087,7 +1087,11 @@ mod command_tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let path = directory.join("kilo");
-        std::fs::write(&path, "#!/bin/sh\necho '1.2.3'\n").expect("write Kilo fixture");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 1\necho '1.2.3'\n",
+        )
+        .expect("write Kilo fixture");
         let mut permissions = std::fs::metadata(&path)
             .expect("fixture metadata")
             .permissions();

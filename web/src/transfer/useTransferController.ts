@@ -7,6 +7,7 @@ import {
   deliverTransfer,
   getTransfer,
   getTransferDraft,
+  listTransfers,
   putTransferDraft,
 } from "./api";
 import {
@@ -23,6 +24,7 @@ const ACTIVE_POLL_MS = 1_200;
 const IDLE_POLL_MS = 5_000;
 
 export type TransferOperation =
+  | "recover"
   | "create"
   | "draft"
   | "target"
@@ -33,12 +35,14 @@ export type TransferOperation =
 export interface TransferController {
   /** The transfer this controller follows, or null before creation. */
   transfer: TransferSnapshot | null;
+  relatedTransfers: TransferSnapshot[];
   /** Server draft as last read; revision-keyed so a newer draft resets edits. */
   draft: TransferDraft | null;
   operation: TransferOperation | null;
   error: string | null;
   /** Start following an existing transfer (e.g. reopened composer). */
   follow: (transferId: string | null) => void;
+  recover: (terminalId: string) => Promise<void>;
   create: (input: CreateTransferInput) => Promise<TransferSnapshot>;
   saveDraft: (expectedRevision: number, content: string) => Promise<TransferSnapshot>;
   chooseTarget: (input: ChooseTargetInput) => Promise<TransferSnapshot>;
@@ -57,6 +61,7 @@ export interface TransferController {
 export function useTransferController(token: string): TransferController {
   const [transferId, setTransferId] = useState<string | null>(null);
   const [transfer, setTransfer] = useState<TransferSnapshot | null>(null);
+  const [relatedTransfers, setRelatedTransfers] = useState<TransferSnapshot[]>([]);
   const [draft, setDraft] = useState<TransferDraft | null>(null);
   const [operation, setOperation] = useState<TransferOperation | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -64,6 +69,7 @@ export function useTransferController(token: string): TransferController {
   const draftRef = useRef<TransferDraft | null>(null);
   const operationRef = useRef<TransferOperation | null>(null);
   const requestEpochRef = useRef(0);
+  const recoveryEpochRef = useRef(0);
   const errorOriginRef = useRef<"read" | "operation" | null>(null);
   const wakePollRef = useRef<() => void>(() => undefined);
 
@@ -79,6 +85,10 @@ export function useTransferController(token: string): TransferController {
     }
     transferRef.current = next;
     setTransfer(next);
+    setRelatedTransfers((current) => {
+      const others = current.filter((item) => item.transferId !== next.transferId);
+      return isTransferActive(next.state) ? [next, ...others] : others;
+    });
     if (!isTransferActive(next.state)) {
       draftRef.current = null;
       setDraft(null);
@@ -104,15 +114,33 @@ export function useTransferController(token: string): TransferController {
   );
 
   const readDraftIfChanged = useCallback(
-    async (snapshot: TransferSnapshot, signal?: AbortSignal) => {
+    async (snapshot: TransferSnapshot, epoch: number, signal?: AbortSignal) => {
       if (!isTransferActive(snapshot.state)) return;
       if (draftRef.current?.draftRevision === snapshot.draftRevision) return;
       const next = await getTransferDraft(token, snapshot.transferId, signal);
+      const current = transferRef.current;
+      if (
+        signal?.aborted ||
+        epoch !== requestEpochRef.current ||
+        current?.transferId !== snapshot.transferId ||
+        !isTransferActive(current.state) ||
+        next.draftRevision !== current.draftRevision ||
+        (draftRef.current?.draftRevision ?? -1) > next.draftRevision
+      ) return;
       draftRef.current = next;
       setDraft(next);
     },
     [token],
   );
+
+  useEffect(() => {
+    follow(null);
+    setRelatedTransfers([]);
+    return () => {
+      recoveryEpochRef.current += 1;
+      requestEpochRef.current += 1;
+    };
+  }, [follow, token]);
 
   const refresh = useCallback(async () => {
     if (!token || !transferId || operationRef.current) return;
@@ -121,7 +149,7 @@ export function useTransferController(token: string): TransferController {
       const next = await getTransfer(token, transferId);
       if (epoch !== requestEpochRef.current) return;
       applySnapshot(next);
-      await readDraftIfChanged(next);
+      await readDraftIfChanged(next, epoch);
       if (errorOriginRef.current === "read") clearError();
     } catch (caught) {
       if (epoch === requestEpochRef.current && errorOriginRef.current !== "operation") {
@@ -167,7 +195,7 @@ export function useTransferController(token: string): TransferController {
           !operationRef.current
         ) {
           applySnapshot(next);
-          await readDraftIfChanged(next, requestController.signal);
+          await readDraftIfChanged(next, epoch, requestController.signal);
           if (errorOriginRef.current === "read") clearError();
         }
       } catch (caught) {
@@ -231,7 +259,7 @@ export function useTransferController(token: string): TransferController {
           }
           applySnapshot(next);
           try {
-            await readDraftIfChanged(next);
+            await readDraftIfChanged(next, epoch);
           } catch {
             // The snapshot already landed; the next poll re-reads the draft.
           }
@@ -254,12 +282,53 @@ export function useTransferController(token: string): TransferController {
     [applySnapshot, clearError, readDraftIfChanged],
   );
 
+  const recover = useCallback(async (terminalId: string) => {
+    if (operationRef.current) return;
+    const recoveryEpoch = ++recoveryEpochRef.current;
+    requestEpochRef.current += 1;
+    operationRef.current = "recover";
+    setOperation("recover");
+    clearError();
+    try {
+      const [outgoing, incoming] = await Promise.all([
+        listTransfers(token, { source: terminalId }),
+        listTransfers(token, { target: terminalId }),
+      ]);
+      if (recoveryEpoch !== recoveryEpochRef.current) return;
+      const active = [...new Map([...outgoing, ...incoming]
+        .filter((item) => isTransferActive(item.state))
+        .map((item) => [item.transferId, item])).values()]
+        .sort((a, b) => b.createdAt - a.createdAt);
+      setRelatedTransfers(active);
+      const current = transferRef.current;
+      const selected = active.find((item) => item.transferId === current?.transferId)
+        ?? active[0] ?? null;
+      draftRef.current = null;
+      setDraft(null);
+      transferRef.current = selected;
+      setTransfer(selected);
+      setTransferId(selected?.transferId ?? null);
+      if (selected) await readDraftIfChanged(selected, requestEpochRef.current);
+    } catch (caught) {
+      if (recoveryEpoch === recoveryEpochRef.current) {
+        errorOriginRef.current = "operation";
+        setError(transferErrorMessage(caught));
+      }
+    } finally {
+      operationRef.current = null;
+      setOperation(null);
+      wakePollRef.current();
+    }
+  }, [clearError, readDraftIfChanged, token]);
+
   return {
     transfer,
+    relatedTransfers,
     draft,
-    operation,
+    operation: operation ?? (transferId && !transfer ? "recover" : null),
     error,
     follow,
+    recover,
     refresh,
     clearError,
     create: (input) => mutate("create", () => createTransfer(token, input)),

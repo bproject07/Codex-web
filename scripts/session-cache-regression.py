@@ -8,6 +8,7 @@ host terminal content, or attaches to an existing server.
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -790,6 +791,203 @@ class SyntheticPeerWorkflow(SyntheticPeers):
         super().http(route)
 
 
+class SyntheticTransfers(SyntheticPeerWorkflow):
+    def __init__(self, page: Page) -> None:
+        super().__init__(page)
+        self.transfers: dict[str, dict[str, Any]] = {}
+        self.drafts: dict[str, str | None] = {}
+        self.transfer_creations = 0
+        self.target_creations = 0
+        self.deliveries: list[dict[str, Any]] = []
+        self.hold_drafts = False
+        self.held_drafts: list[tuple[Route, dict[str, Any]]] = []
+
+    def http(self, route: Route) -> None:
+        url = urlsplit(route.request.url)
+        path, method = url.path, route.request.method
+        if path == "/api/transfers":
+            if method == "GET":
+                query = parse_qs(url.query)
+                matches = [item for item in self.transfers.values()
+                           if (not query.get("source") or item["sourceTerminalId"] == query["source"][0])
+                           and (not query.get("target") or (item.get("attempt") or {}).get("target", {}).get("terminalId") == query["target"][0])]
+                route.fulfill(json=matches)
+                return
+            body = route.request.post_data_json
+            self.transfer_creations += 1
+            item = {
+                "transferId": body["transferId"], "revision": 1,
+                "state": "preview", "mode": body["mode"],
+                "sourceTerminalId": body["sourceTerminalId"], "sourceSessionId": body["sourceSessionId"],
+                "draftRevision": 0, "attemptsUsed": 0,
+                "createdAt": self.transfer_creations, "updatedAt": self.transfer_creations,
+            }
+            self.transfers[item["transferId"]] = item
+            self.drafts[item["transferId"]] = None
+            route.fulfill(status=201, json=item)
+            return
+        if path.startswith("/api/transfers/"):
+            parts = path.split("/")
+            transfer_id = parts[3]
+            item = self.transfers[transfer_id]
+            action = parts[4] if len(parts) > 4 else None
+            body = route.request.post_data_json if method != "GET" else None
+            if action == "draft":
+                if method == "GET":
+                    draft = {"draftRevision": item["draftRevision"], "content": self.drafts[transfer_id]}
+                    if self.hold_drafts:
+                        self.held_drafts.append((route, deepcopy(draft)))
+                    else:
+                        route.fulfill(json=draft)
+                    return
+                assert body["expectedRevision"] == item["draftRevision"], body
+                item["draftRevision"] += 1
+                self.drafts[transfer_id] = body["content"]
+            elif action == "target":
+                self.target_creations += 1
+                target = {**session(2), "agent": "claude", "name": "Claude target"}
+                self.sessions.append(target)
+                item["state"] = "target_bound"
+                item["attemptsUsed"] = 1
+                item["attempt"] = {
+                    "targetRequestId": body["targetRequestId"], "number": 1, "outcome": "bound",
+                    "target": {"mode": "new", **{key: target[key] for key in
+                               ("terminalId", "sessionId", "agent", "name", "project")}},
+                }
+            elif action == "deliver":
+                assert body["targetReady"] is True
+                assert body["expectedRevision"] == item["draftRevision"], body
+                self.deliveries.append(body)
+                item["state"] = "delivered"
+                item["attempt"]["outcome"] = "delivered"
+                self.drafts[transfer_id] = None
+            elif action == "abandon":
+                item["state"] = "abandoned"
+                self.drafts[transfer_id] = None
+            if method != "GET":
+                item["revision"] += 1
+            route.fulfill(json=item)
+            return
+        super().http(route)
+
+
+def open_transfer(page: Page, terminal_id: str) -> None:
+    disclosure = page.locator(".mobile-header-toggle")
+    if disclosure.is_visible() and disclosure.get_attribute("aria-expanded") == "false":
+        disclosure.click()
+    page.locator(".header-menu-trigger").click()
+    page.get_by_role("menuitem", name="Manage sessions", exact=False).click()
+    page.locator(f'[data-session-continue="{terminal_id}"]').click()
+    page.get_by_role("dialog", name="Continue this work in another agent").wait_for()
+
+
+def run_transfer_ui(browser: Browser, url: str, mobile: bool) -> None:
+    context = browser.new_context(
+        viewport={"width": 390 if mobile else 1280, "height": 740},
+        is_mobile=mobile, has_touch=mobile,
+    )
+    peers: SyntheticTransfers | None = None
+    try:
+        page = context.new_page()
+        failures: list[str] = []
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        peers = SyntheticTransfers(page)
+        page.goto(url)
+        select(page, 0)
+        open_transfer(page, session(0)["terminalId"])
+        page.get_by_text("Write it myself", exact=True).click()
+        assert page.get_by_role("radio", name="Write it myself", exact=False).is_checked()
+        page.get_by_role("button", name="Write the handoff", exact=True).click()
+        handoff = page.get_by_label("Handoff", exact=True)
+        handoff.fill("# Approved synthetic handoff")
+        save = page.get_by_role("button", name="Save handoff", exact=True)
+        wait_until(page, lambda: save.is_enabled())
+        save.click()
+        start = page.get_by_role("button", name="Start the new tab", exact=True)
+        wait_until(page, lambda: start.is_enabled())
+        start.click()
+        show = page.get_by_role("button", name="Show target tab", exact=True)
+        wait_until(page, lambda: show.is_enabled())
+        assert peers.target_creations == 1
+        transfer_id = next(iter(peers.transfers))
+
+        # Showing the target dismisses the modal so login/trust can be handled.
+        show.click()
+        page.locator(".transfer-composer").wait_for(state="detached")
+        page.locator(f'{ACTIVE_PANE}[data-terminal-id="{session(2)["terminalId"]}"]').wait_for()
+        # Recover from either participant, without creating another transfer/tab.
+        open_transfer(page, session(2)["terminalId"])
+        wait_until(page, lambda: handoff.input_value() == "# Approved synthetic handoff")
+        assert peers.transfer_creations == 1 and peers.target_creations == 1
+        page.get_by_role("button", name="Close transfer composer", exact=True).click()
+        peers.detach_close_handlers()
+        page.reload()
+        open_transfer(page, session(0)["terminalId"])
+        wait_until(page, lambda: handoff.input_value() == "# Approved synthetic handoff")
+
+        # More than one active transfer remains selectable after recovery.
+        page.get_by_label("Active transfers for this terminal", exact=True).select_option("")
+        page.get_by_text("Write it myself", exact=True).click()
+        page.get_by_role("button", name="Write the handoff", exact=True).click()
+        handoff.fill("# Second saved transfer")
+        wait_until(page, lambda: save.is_enabled())
+        save.click()
+        wait_until(page, lambda: page.get_by_role("button", name="Start the new tab", exact=True).is_enabled())
+        second_id = next(key for key in peers.transfers if key != transfer_id)
+        page.get_by_label("Active transfers for this terminal", exact=True).select_option(transfer_id)
+        wait_until(page, lambda: handoff.input_value() == "# Approved synthetic handoff")
+        assert peers.transfer_creations == 2 and peers.target_creations == 1
+
+        # Metadata revision 2 must not approve or overwrite revision 1 while
+        # the independently fetched content is still in flight.
+        peers.hold_drafts = True
+        item = peers.transfers[transfer_id]
+        item["draftRevision"] = 2
+        item["revision"] += 1
+        peers.drafts[transfer_id] = "# Concurrent revision two"
+        wait_until(page, lambda: len(peers.held_drafts) > 0)
+        deliver = page.get_by_role("button", name="Deliver", exact=True)
+        assert deliver.is_disabled(), "unseen revision must not be deliverable"
+        handoff.fill("# Local edit against the old revision")
+        assert save.is_disabled(), "unseen revision must not authorize an overwrite"
+        assert not peers.deliveries
+        peers.hold_drafts = False
+        for route, draft in peers.held_drafts:
+            route.fulfill(json=draft)
+        peers.held_drafts.clear()
+        wait_until(page, lambda: handoff.input_value() == "# Concurrent revision two")
+        wait_until(page, lambda: deliver.is_enabled())
+        deliver.click()
+        page.get_by_text("Delivered", exact=True).wait_for()
+        assert peers.deliveries[0]["expectedRevision"] == 2
+
+        page.get_by_label("Active transfers for this terminal", exact=True).select_option(second_id)
+        wait_until(page, lambda: handoff.input_value() == "# Second saved transfer")
+
+        # A late draft response must not restore erased terminal-state content.
+        peers.hold_drafts = True
+        item = peers.transfers[second_id]
+        item["draftRevision"] = 2
+        item["revision"] += 1
+        peers.drafts[second_id] = "# Stale in-flight content"
+        wait_until(page, lambda: len(peers.held_drafts) > 0)
+        page.on("dialog", lambda dialog: dialog.accept())
+        page.get_by_role("button", name="Abandon", exact=True).click()
+        page.get_by_text("Abandoned", exact=True).wait_for()
+        peers.hold_drafts = False
+        for route, draft in peers.held_drafts:
+            route.fulfill(json=draft)
+        peers.held_drafts.clear()
+        page.wait_for_timeout(150)
+        assert handoff.count() == 0, "late artifact must stay erased after abandonment"
+        assert len(peers.deliveries) == 1
+        assert not failures, failures
+    finally:
+        if peers is not None:
+            peers.detach_close_handlers()
+        context.close()
+
+
 def run_peer_ui(browser: Browser, url: str, mobile: bool) -> None:
     context = browser.new_context(
         viewport={"width": 390 if mobile else 1280, "height": 740},
@@ -1283,10 +1481,12 @@ def main() -> int:
                 run_mobile(browser, url)
                 run_peer_ui(browser, url, mobile=False)
                 run_peer_ui(browser, url, mobile=True)
+                run_transfer_ui(browser, url, mobile=False)
+                run_transfer_ui(browser, url, mobile=True)
                 run_mobile_layout(browser, url)
             finally:
                 browser.close()
-        print(json.dumps({"desktop": "passed", "attachRecovery": "passed", "mobile": "passed", "peerUi": "passed", "mobileLayout": "passed", "transport": "synthetic"}))
+        print(json.dumps({"desktop": "passed", "attachRecovery": "passed", "mobile": "passed", "peerUi": "passed", "transferUi": "passed", "mobileLayout": "passed", "transport": "synthetic"}))
     finally:
         server.shutdown()
         server.server_close()

@@ -53,6 +53,7 @@ export interface TransferComposerProps {
   catalogError: string | null;
   newTargetDisabledReason: string | null;
   transfer: TransferSnapshot | null;
+  relatedTransfers?: TransferSnapshot[];
   draft: TransferDraft | null;
   operation: TransferOperation | null;
   error: string | null;
@@ -65,6 +66,7 @@ export interface TransferComposerProps {
   onSelectTerminal: (terminalId: string) => void;
   onClearError: () => void;
   onClose: () => void;
+  onFollowTransfer?: (transferId: string | null) => void;
 }
 
 type TargetChoice =
@@ -81,6 +83,7 @@ export function TransferComposer(props: TransferComposerProps) {
     catalogError,
     newTargetDisabledReason,
     transfer,
+    relatedTransfers = [],
     draft,
     operation,
     error,
@@ -93,6 +96,7 @@ export function TransferComposer(props: TransferComposerProps) {
     onSelectTerminal,
     onClearError,
     onClose,
+    onFollowTransfer,
   } = props;
 
   const dialogRef = useRef<HTMLElement>(null);
@@ -186,6 +190,9 @@ export function TransferComposer(props: TransferComposerProps) {
 
   const draftDirty =
     draft !== null && handoffDraft !== (draft.content ?? "");
+  const draftReady = draft !== null && transfer !== null &&
+    draft.draftRevision === transfer.draftRevision &&
+    draftKey === `${transfer.transferId}:${draft.draftRevision}`;
 
   const requestClose = () => {
     if (draftDirty && !window.confirm("Discard your unsaved edits to the handoff?")) {
@@ -216,7 +223,7 @@ export function TransferComposer(props: TransferComposerProps) {
   };
 
   const saveDraft = async () => {
-    if (!transfer) return;
+    if (!transfer || !draftReady || !draft) return;
     setFormError(null);
     if (!handoffDraft.trim()) {
       setFormError("The handoff must not be empty.");
@@ -228,7 +235,7 @@ export function TransferComposer(props: TransferComposerProps) {
     }
     setSubmitting(true);
     try {
-      await onSaveDraft(transfer.draftRevision, handoffDraft);
+      await onSaveDraft(draft.draftRevision, handoffDraft);
     } catch {
       // Surfaced by the controller.
     } finally {
@@ -237,7 +244,7 @@ export function TransferComposer(props: TransferComposerProps) {
   };
 
   const chooseTarget = async () => {
-    if (!transfer || !targetChoice) return;
+    if (!transfer || !targetChoice || !draftReady) return;
     setFormError(null);
     if (draftDirty) {
       setFormError("Save the handoff before choosing a target.");
@@ -274,7 +281,7 @@ export function TransferComposer(props: TransferComposerProps) {
 
   const deliver = async () => {
     const target = transfer?.attempt?.target;
-    if (!transfer || !target?.sessionId) return;
+    if (!transfer || !target?.sessionId || !draftReady || !draft) return;
     setFormError(null);
     if (draftDirty) {
       setFormError("Save the handoff before delivering it.");
@@ -282,7 +289,7 @@ export function TransferComposer(props: TransferComposerProps) {
     }
     setSubmitting(true);
     try {
-      await onDeliver(transfer.draftRevision, target.sessionId);
+      await onDeliver(draft.draftRevision, target.sessionId);
     } catch {
       // Surfaced by the controller.
     } finally {
@@ -367,7 +374,7 @@ export function TransferComposer(props: TransferComposerProps) {
       >
         <WorkspacePicker
           adapter={workspaceAdapter}
-          initialDirectoryId={targetDirectory.id}
+          initialDirectoryId={targetDirectory.id || null}
           title="Choose target folder"
           description="Start the new terminal in this server folder."
           chooseLabel="Use for target"
@@ -449,6 +456,29 @@ export function TransferComposer(props: TransferComposerProps) {
         </details>
 
         <div className="peer-composer__body">
+          {relatedTransfers.length > 0 && onFollowTransfer && (
+            <section className="transfer-target" aria-label="Active transfers">
+              <label htmlFor="active-transfer">Active transfers for this terminal</label>
+              <select
+                id="active-transfer"
+                value={transfer?.transferId ?? ""}
+                disabled={pending}
+                onChange={(event) => {
+                  if (draftDirty && !window.confirm("Discard your unsaved edits to the handoff?")) return;
+                  setHandoffDraft("");
+                  setDraftKey(null);
+                  onFollowTransfer(event.target.value || null);
+                }}
+              >
+                <option value="">Start another transfer</option>
+                {relatedTransfers.map((item) => (
+                  <option key={item.transferId} value={item.transferId}>
+                    {item.attempt?.target.name ?? "No target selected"} · {transferStateLabel(item.state)} · {item.transferId.slice(0, 8)}
+                  </option>
+                ))}
+              </select>
+            </section>
+          )}
           {visibleError && (
             <div className="peer-composer__error" role="alert">
               {visibleError}
@@ -584,7 +614,7 @@ export function TransferComposer(props: TransferComposerProps) {
                 <button
                   type="button"
                   className={draftDirty ? "peer-primary-action" : undefined}
-                  disabled={pending || !draftDirty}
+                  disabled={pending || !draftReady || !draftDirty}
                   onClick={saveDraft}
                 >
                   {pending && operation === "draft"
@@ -682,10 +712,12 @@ export function TransferComposer(props: TransferComposerProps) {
                   className="peer-primary-action"
                   disabled={
                     pending ||
+                    !draftReady ||
                     !targetChoice ||
                     draftDirty ||
                     !handoffDraft.trim() ||
-                    (targetChoice.kind === "new" && newTargetDisabledReason !== null)
+                    (targetChoice.kind === "new" &&
+                      (newTargetDisabledReason !== null || !targetDirectory.id))
                   }
                   onClick={chooseTarget}
                 >
@@ -754,7 +786,7 @@ export function TransferComposer(props: TransferComposerProps) {
                   type="button"
                   className="peer-primary-action"
                   data-transfer-deliver="true"
-                  disabled={pending || draftDirty || !target.sessionId}
+                  disabled={pending || !draftReady || draftDirty || !target.sessionId}
                   onClick={deliver}
                 >
                   {pending && operation === "deliver" ? "Delivering…" : "Deliver"}
