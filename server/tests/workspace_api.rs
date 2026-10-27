@@ -729,6 +729,7 @@ async fn test_router_with_options(
     let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move { while restart_rx.recv().await.is_some() {} });
     let state = AppState {
+        sharing: codex_web_terminal::sharing::Sharing::new(None, sessions.clone()),
         config,
         auth: AuthState::new(TOKEN.to_owned()),
         sessions: sessions.clone(),

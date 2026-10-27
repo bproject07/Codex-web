@@ -380,6 +380,62 @@ impl SessionRegistry {
         self.start_reserved_session(session).await
     }
 
+    pub async fn create_recorded_in(
+        &self,
+        requested_agent: Option<AgentKind>,
+        project_dir: Option<PathBuf>,
+        store: crate::sharing_store::Store,
+    ) -> Result<SessionSnapshot, RegistryError> {
+        let session = self.reserve_session_in(requested_agent, project_dir)?;
+        let snapshot = session.snapshot();
+        session.enable_recording(crate::sharing_store::Recorder::new(
+            store,
+            snapshot.terminal_id,
+            snapshot.name,
+            snapshot.agent.label().to_owned(),
+        ));
+        self.start_reserved_session(session).await
+    }
+
+    pub(crate) fn enqueue_shared_prompt(
+        &self,
+        terminal_id: Uuid,
+        generation: Uuid,
+        text: &str,
+        receipt: tokio::sync::oneshot::Sender<crate::session::WriteReceipt>,
+    ) -> crate::sharing_store::Result<()> {
+        use crate::sharing_store::Error;
+        let state = lock(&self.inner.state);
+        if state.lifecycle_mutations.contains_key(&terminal_id)
+            || state
+                .participant_claims
+                .get(&terminal_id)
+                .is_some_and(ParticipantClaims::is_busy)
+        {
+            return Err(Error("terminal_busy"));
+        }
+        if state.sessions.values().any(|session| {
+            matches!(session.purpose(),
+            SessionPurpose::Peer { parent_terminal_id, .. } if *parent_terminal_id == terminal_id)
+        }) {
+            return Err(Error("terminal_busy"));
+        }
+        let session = state.sessions.get(&terminal_id).ok_or(Error("not_found"))?;
+        if !matches!(session.purpose(), SessionPurpose::Interactive) {
+            return Err(Error("ordinary_sessions_only"));
+        }
+        let snapshot = session.snapshot();
+        if snapshot.session_id != Some(generation) {
+            return Err(Error("generation_changed"));
+        }
+        if snapshot.status != crate::session::Lifecycle::Running {
+            return Err(Error("not_running"));
+        }
+        session
+            .write_approved_prompt(generation, text, receipt)
+            .map_err(|_| Error("queue_rejected"))
+    }
+
     pub async fn restore_in(
         &self,
         request_id: Uuid,
@@ -798,9 +854,15 @@ impl SessionRegistry {
         }
 
         let sessions = self.managers();
+        let mut shutdowns = tokio::task::JoinSet::new();
         for session in sessions {
-            session.shutdown().await;
+            shutdowns.spawn(async move {
+                session.shutdown().await;
+            });
         }
+        // Each reader has one bounded drain; all drains run concurrently so
+        // shutdown does not accumulate a five-second delay per session.
+        while shutdowns.join_next().await.is_some() {}
     }
 
     pub fn codex_installed(&self) -> bool {

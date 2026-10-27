@@ -614,9 +614,111 @@ The latest valid resize wins, so desktop and mobile clients with different
 viewport sizes can trigger redraw or scroll changes for each other.
 
 Share the authenticated URL only when full read/write terminal access is
-intended. Read-only links, expiring share links, per-session grants, and
-revocation without rotating the server token are future work described in
-[TODO.md](TODO.md).
+intended. Use **Manage sessions → Share / history** for scoped guest access.
+
+### Controlled session sharing
+
+Choose an ordinary terminal in **Manage sessions**, then **Share / history**.
+Enter the server address reachable by guests, including its port (for example
+an existing LAN or Tailscale IP address), choose **View only** or **View and
+propose instructions**, and create an individual invitation. The link is
+`http[s]://address:port/share#invite=...`; the secret stays out of HTTP request
+URLs. Use HTTPS or a trusted encrypted network: a random token does not
+encrypt plain HTTP traffic. Sharing does not open firewall ports or restart
+the server.
+
+Each invitation is single-use and valid for 15 minutes. A guest enters a name
+and waits for owner admission before seeing terminal content. The server fixes
+that name to the guest identity, reserves it for that managed terminal even
+after revocation, and rejects renaming. The name is self-declared, not proof of
+identity. The browser keeps its separate guest credential in session storage;
+closing that browser session or losing storage requires a fresh invitation.
+Opening a fresh invitation in the same browser tab can renew the existing
+identity and its fixed name; this atomically revokes the previous grant and
+closes its sockets. Owner admission is required again. Losing the old
+credential does not let another visitor claim that reserved name.
+Use a separate invitation for each person. Limits are eight active grants per
+terminal, 32 per server, two live connections per grant, and 12 hours per grant.
+Restarting the terminal or server ends guest access.
+
+The owner sees whether an admitted guest's live view is visible, in the
+background, stale, or disconnected. This reports browser presence, not proof
+that someone read the content. Guests cannot send terminal keystrokes or
+resizes, use terminal protocol replies, list other sessions, browse folders,
+or operate lifecycle, peer, transfer, or updater APIs. The owner controls the
+shared terminal dimensions.
+
+A guest with proposal permission can submit one pending proposal at a time,
+up to 16 KiB of UTF-8 text and six proposals per minute. Names allow up to
+32 Unicode characters. Both limits are shown in the browser. The owner sees its author and full
+original text, may edit the text, and rejects or approves it. Approval requires
+confirming that the selected agent is at an empty prompt. The exact reviewed
+single-line text is written and flushed, followed by the normal provider
+settle interval and a separate Enter write. No author prefix is injected.
+Multiline drafts remain reviewable but must be explicitly edited before
+automatic delivery; line breaks are never silently flattened.
+
+Approval intent is committed to SQLite before queue admission. A repeated
+request cannot send the same approval twice. Peer/transfer/lifecycle claims or
+a changed PTY generation reject admission. **Written to terminal** confirms
+the PTY writes and flushes, not that the agent executed or completed a task.
+**Delivery uncertain** requires inspecting the terminal; there is no automatic
+resend. Pending proposals expire after 15 minutes or become invalid when their
+generation ends or grant is revoked. A rejected queue admission leaves edited
+draft text private to the owner. Delivery receipts wait through a full storage
+queue; retries persist only the outcome and never resend terminal input.
+
+### Recorded terminal history
+
+Creating a sharing invitation starts recording that terminal. For output from
+the beginning, enable **Record terminal history** when launching a new
+terminal. Enabling it on an existing terminal imports only the retained tail
+and marks the recording incomplete. Recordings preserve raw ANSI bytes and
+resize events. **Recorded history** plays them in a separate read-only xterm
+view, with next-part, play-to-end, pause and rewind controls; it is not a
+provider chat export. The live attachment initially replays at most 4 MiB;
+older recorded output is loaded separately without replacing the live view.
+
+The owner can open saved generations after a server restart, including those
+whose terminal tabs no longer exist. Guests can read only their granted
+generation while access remains valid. Revoking access preserves the owner's
+recordings and proposal history. Recording continues across terminal restarts
+and without guests until **Stop recording** is selected. Stopping recording
+keeps live guest access and saved history. Re-enabling recording resumes the
+same generation's sequence without importing output from the private pause;
+the archive remains marked incomplete. A new invitation enables recording
+again. The owner can delete a finished recording from
+the history view; deletion does not release reserved guest names or approval
+identities.
+
+Sharing state is stored in `sharing.sqlite3` in the configured `--state-dir`,
+alongside private SQLite WAL/SHM files and an exclusive sharing lock. Only
+secret hashes are stored. Proposal text and terminal output are sensitive
+plaintext on disk, so protect the state directory and backups as terminal
+data. Unix permissions are `0700` for the directory and `0600` for files;
+Windows validates the directory and database/sidecar ACLs, allowing only the
+current account, Administrators and SYSTEM (plus inheritable CREATOR OWNER).
+Broad access, null DACLs and reparse points disable sharing; existing ACLs are
+never silently changed. Use a private state directory owned by the service
+account. Concurrent servers must use distinct state directories.
+
+Capture never blocks the PTY on disk I/O. It uses a bounded queue and marks
+recordings incomplete after dropped bytes, storage failures, or limits:
+256 MiB per generation, 2 GiB total raw output, 4,096 saved generations,
+256 recorded generations per managed terminal in one server run,
+and a 3 GiB SQLite page ceiling. The WAL checkpoints automatically and has a
+64 MiB retained-size target. Deleted pages are reused rather than necessarily
+shrinking the database file. Invitation, proposal and approval-attempt ledgers
+are separately capped at 16,384 records; exhausting a ledger refuses new
+records instead of evicting duplicate-request protection. **Sharing storage
+limits** shows counters and offers explicit cleanup of guest identities and
+proposal audit for retired terminals (deleted tabs or previous server runs).
+Cleanup preserves recordings and all live terminal identities; pending write
+receipts also block cleanup of their terminal. Retire a non-primary tab before
+cleaning its ledger; the primary becomes retired after server restart.
+Archive pages batch at most 1,024 events and 512 KiB of raw output.
+Guest admission and
+pending proposals never resume automatically after server restart.
 
 ## Browser interface
 
@@ -1085,7 +1187,7 @@ entry. **Forget token** removes the token from the current browser tab.
 Closing the browser or losing connectivity does not terminate managed PTYs.
 The server retains up to 16 MiB and 16,384 chunks of raw PTY output per session.
 Many small PTY reads can reach the chunk limit before the byte limit. A newly attached
-browser receives at most the newest 2 MiB and then:
+browser receives at most the newest 4 MiB and then:
 
 1. receives the current sanitized session snapshot;
 2. resets the xterm screen;

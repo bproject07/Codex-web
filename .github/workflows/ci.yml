@@ -324,6 +324,14 @@ jobs:
           python -B .\scripts\mobile-resize-regression.py --server .\dist\codex-web.exe --chrome $chrome --port 8816
           if ($LASTEXITCODE -ne 0) { throw "Mobile resize regression failed" }
 
+      - name: Validate Windows session sharing and archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:CWT_CHROMIUM_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+          python -B .\scripts\sharing-regression.py --server .\dist\codex-web.exe --port 8827 --browser
+          if ($LASTEXITCODE -ne 0) { throw "Session sharing regression failed" }
+
       - name: Validate Linux mobile resize
         if: runner.os == 'Linux'
         shell: bash
@@ -342,6 +350,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Agent catalog regression failed" }
           python -B .\scripts\workspace-picker-regression.py --server .\dist\codex-web.exe --chrome $chrome --port 8822
           if ($LASTEXITCODE -ne 0) { throw "Workspace picker regression failed" }
+
+      - name: Validate Linux session sharing and archive
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          CWT_CHROMIUM_PATH=/usr/bin/google-chrome python3 -B ./scripts/sharing-regression.py --server ./dist-linux/codex-web --port 8827 --browser
 
       - name: Validate Linux agent catalog and workspace picker
         if: runner.os == 'Linux'

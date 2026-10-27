@@ -461,6 +461,7 @@ export async function createSession(
   directoryId?: string | null,
   restoreRequestId?: string,
   signal?: AbortSignal,
+  recordHistory = false,
 ): Promise<SessionSnapshot> {
   try {
     const session = await apiRequest<SessionSnapshot>("/api/sessions", token, {
@@ -471,6 +472,7 @@ export async function createSession(
         agent,
         ...(directoryId ? { directoryId } : {}),
         ...(restoreRequestId ? { restoreRequestId } : {}),
+        ...(recordHistory ? { recordHistory: true } : {}),
       }),
     });
     return normalizeSessionSnapshot(session, session.terminalId);

@@ -36,6 +36,7 @@ import {
 } from "./api";
 import { agentClassName, agentLabel, sessionAgentLabel } from "./agents";
 import { AgentPicker } from "./AgentPicker";
+import { SharingPanel, SharingIndicator } from "./sharing/SharingPanel";
 import type { TerminalViewHandle } from "./terminal/TerminalView";
 import { TerminalDeck } from "./terminal/TerminalDeck";
 import { MobileToolbar } from "./terminal/MobileToolbar";
@@ -121,6 +122,8 @@ export function App() {
     loadMobileHeaderCollapsed,
   );
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [sharingSession, setSharingSession] = useState<SessionSnapshot | null>(null);
+  const [recordNewSession, setRecordNewSession] = useState(false);
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [launchDirectory, setLaunchDirectory] =
     useState<WorkspaceDirectory | null>(null);
@@ -585,6 +588,7 @@ export function App() {
       settingsOpen ||
       headerMenuOpen ||
       sessionsOpen ||
+      sharingSession !== null ||
       workspacePickerOpen ||
       agentPickerOpen ||
       peerComposerOpen ||
@@ -604,6 +608,7 @@ export function App() {
     confirmRequest,
     selectedTerminalId,
     sessionsOpen,
+    sharingSession,
     settingsOpen,
     headerMenuOpen,
     workspacePickerOpen,
@@ -637,6 +642,7 @@ export function App() {
             settingsOpen ||
             headerMenuOpen ||
             sessionsOpen ||
+            sharingSession !== null ||
             workspacePickerOpen ||
             agentPickerOpen ||
             peerComposerOpen ||
@@ -688,6 +694,7 @@ export function App() {
     confirmRequest,
     selectedTerminalId,
     sessionsOpen,
+    sharingSession,
     settingsOpen,
     headerMenuOpen,
     workspacePickerOpen,
@@ -1593,7 +1600,7 @@ export function App() {
     sessionsRequestEpochRef.current += 1;
     setSessionsLoading(false);
     try {
-      const created = await createSession(token, agent, directory.id);
+      const created = await createSession(token, agent, directory.id, undefined, undefined, recordNewSession);
       setSessions((current) => [
         ...current.filter(
           (candidate) => candidate.terminalId !== created.terminalId,
@@ -1982,6 +1989,9 @@ export function App() {
         </div>
       </header>
 
+      {session?.purpose.kind === "interactive" && <SharingIndicator token={token}
+        terminalId={session.terminalId} onOpen={() => setSharingSession(session)} />}
+
       <div className="visually-hidden" role="status" aria-live="polite">
         <span key={announcement.nonce}>{announcement.text}</span>
       </div>
@@ -2052,6 +2062,8 @@ export function App() {
           error={agentCatalogError}
           creatingAgent={creatingAgent}
           workspacePath={launchDirectory?.path}
+          recordHistory={recordNewSession}
+          onRecordHistoryChange={setRecordNewSession}
           onChangeWorkspace={() => {
             setAgentPickerOpen(false);
             setWorkspacePickerOpen(true);
@@ -2140,6 +2152,11 @@ export function App() {
             disabled={busy}
             onChoose={chooseLaunchDirectory}
             onStart={handleWorkspaceStart}
+            launchOptions={<label className="share-check launch-recording">
+              <input type="checkbox" checked={recordNewSession} disabled={busy}
+                onChange={(event) => setRecordNewSession(event.target.checked)} />
+              Record terminal history on this server
+            </label>}
             onCancel={closeWorkspacePicker}
           />
         </div>
@@ -2187,6 +2204,7 @@ export function App() {
             setSettingsOpen(false);
             setSessionsOpen(false);
             setPeerComposerOpen(false);
+            setSharingSession(null);
             setWorkspacePickerOpen(false);
             setAgentPickerOpen(false);
             setLaunchDirectory(null);
@@ -2212,6 +2230,9 @@ export function App() {
           onAttach={attachSession}
           onRemove={(target) => void handleCloseSessionTab(target)}
           onContinue={openTransferComposer}
+          onShare={(target) => {
+            attachSession(target); setSessionsOpen(false); setSharingSession(target);
+          }}
           onRefresh={() => void refreshSessions()}
           onClose={closeSessions}
         />
@@ -2223,6 +2244,11 @@ export function App() {
           onSettle={settleConfirmation}
         />
       )}
+      {sharingSession && <SharingPanel token={token} terminalId={sharingSession.terminalId}
+        label={sharingSession.name} onClose={() => {
+          suppressTerminalFocusOnceRef.current = true;
+          setSharingSession(null);
+        }} />}
     </main>
   );
 }
@@ -2422,6 +2448,7 @@ interface SessionsPanelProps {
   onRemove: (session: SessionSnapshot) => void;
   /** Opens the "Continue in…" transfer composer with this tab as the source. */
   onContinue: (session: SessionSnapshot) => void;
+  onShare: (session: SessionSnapshot) => void;
   onRefresh: () => void;
   onClose: () => void;
 }
@@ -2434,6 +2461,7 @@ function SessionsPanel({
   onAttach,
   onRemove,
   onContinue,
+  onShare,
   onRefresh,
   onClose,
 }: SessionsPanelProps) {
@@ -2533,6 +2561,10 @@ function SessionsPanel({
                 </div>
 
                 <div className="session-card-actions">
+                  {candidate.purpose.kind === "interactive" && <button
+                    type="button" disabled={busy} onClick={() => onShare(candidate)}>
+                    Share / history…
+                  </button>}
                   <button
                     type="button"
                     disabled={busy || attached}

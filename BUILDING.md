@@ -1350,6 +1350,25 @@ information before committing.
 
 ## Troubleshooting build failures
 
+The scoped sharing regression uses an isolated server, synthetic native PTYs
+and an optional Playwright browser. It never attaches to a live server:
+
+    python -B scripts/sharing-regression.py --server dist/codex-web.exe --port 8827 --browser
+    python3 -B scripts/sharing-regression.py --server dist-linux/codex-web --port 8827 --browser
+
+Set CWT_CHROMIUM_PATH to the existing Chrome/Chromium executable for that
+platform. This covers guest admission and immutable names, scoped APIs,
+read-only WebSockets, partial ACK after a full 4 MiB replay, exact idempotent
+approval delivery, revocation, final PTY drain, archived history across restart,
+and the mobile guest page. It also checks private owner drafts after refused
+admission, active credential rotation, paused recording across PTY restarts,
+and retired-ledger cleanup. Rust tests exercise metadata queue saturation,
+capture sequence continuity, late reader completion and byte-bounded archive
+pages; Windows additionally rejects a deliberately broad database ACL.
+CI and release packages run the regression on Windows and Linux. SQLite is built
+from the bundled dependency source with the normal native C toolchain;
+a separate SQLite installation is not needed.
+
 ### `npm ci` rejects the lockfile
 
 `web/package.json` and `web/package-lock.json` disagree. Do not bypass this in

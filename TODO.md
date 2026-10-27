@@ -14,29 +14,16 @@ a promise of compatibility or a release schedule.
   reliable idle definition for every PTY and peer thread. Never silently
   terminate active work.
 
-## Controlled session sharing
+## Further sharing improvements
 
-Add an explicit way to share access without disclosing the server-wide owner
-token.
+Scoped invitations, read-only guest terminals, owner-approved proposals and
+SQLite recordings are implemented; see [OPERATIONS.md](OPERATIONS.md#controlled-session-sharing).
 
-A safe design should provide:
-
-- a separate cryptographically random share token;
-- a grant limited to one selected managed session;
-- explicit `read-only` or `read-write` permission;
-- an expiry time and immediate server-side revocation;
-- no ability to list, create, restart, terminate, or delete other sessions;
-- a visible owner indicator showing active guests and their permission;
-- audit events containing only lifecycle metadata, never terminal content,
-  keystrokes, Codex credentials, or raw tokens;
-- rate limiting and the existing strict Origin validation;
-- clear behavior when the owner restarts or removes the shared session.
-
-The current authenticated URL is not a sharing link. It grants full read/write
-control over all sessions managed by the server. Until scoped grants exist,
-share it only with someone who is trusted with the same terminal authority as
-the owner.
-
-All clients attached to one PTY also share its dimensions. A sharing design
-must account for competing mobile and desktop resize events, for example by
-letting the owner control the PTY size while read-only guests render locally.
+- Validate exact multiline prompt delivery against each real provider TUI
+  before enabling it. Multiline proposals can be reviewed, but automatic
+  delivery currently requires an explicitly edited single line.
+- Optional authenticated accounts could verify a guest's identity across
+  devices. A locked display name and bearer credential do not verify a person.
+- A searchable conversation export would require an explicit provider-specific
+  source. Raw terminal recordings preserve ANSI output and geometry, not a
+  reconstructed provider chat.

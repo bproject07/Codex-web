@@ -42,6 +42,33 @@ filesystem reach of the server account. Run the service under a dedicated,
 least-privileged account when broader access is not intended.
 Session-create and workspace JSON request bodies are capped at 256 KiB.
 
+## Guest sharing boundary
+
+Individual invitations and guest credentials contain separate 256-bit secrets,
+stored only as hashes. Admission pins access to one ordinary terminal and PTY
+generation. Guest tokens cannot use owner, filesystem, lifecycle, peer,
+transfer or update APIs. Guest WebSockets accept presence, ping and output
+acknowledgements only; terminal input and resizing remain owner operations.
+Locked display names are self-declared and do not authenticate a person.
+
+Owner approval of a proposal authorizes the exact reviewed text to run under
+the selected agent's existing permissions. Readiness is explicitly confirmed
+by the owner. Durable approval identity prevents automatic duplicate delivery;
+an ambiguous write remains uncertain and is never resent automatically.
+
+Opt-in recordings and proposal text are plaintext in the private
+`sharing.sqlite3` database, including its WAL/SHM sidecars. They may contain
+anything printed by the agent. Protect this state directory and its backups
+as terminal data; never attach them to public reports. Revocation ends guest
+access without deleting the owner's archive. A full capture queue, storage
+failure or retention limit marks history incomplete without blocking the PTY.
+Stop recording ends further capture until it is explicitly enabled again;
+the paused interval is never backfilled. Windows rejects state ACLs granting
+access beyond the service account, Administrators and SYSTEM. Owner edits
+are private until queue admission; failed admission does not publish them.
+See [OPERATIONS.md](OPERATIONS.md#controlled-session-sharing) for limits and
+transport requirements.
+
 ## Peer helper boundary
 
 The supervised `@cwt` workflow creates a fresh dedicated reviewer PTY under

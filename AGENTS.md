@@ -366,6 +366,47 @@ Changes to the peer broker, helper, automation prompts, session purpose, or
 peer routes require `scripts/peer-review-regression.py` on both Windows and
 Linux in addition to the normal frontend, Rust, and package checks.
 
+## Human sharing and recording invariants
+
+- Guest credentials are separate from owner and private peer capabilities.
+  Each single-use invitation and admitted grant is pinned to one ordinary
+  terminal and PTY generation. Never let guest credentials reach owner APIs.
+- Names are server-fixed to a guest identity and remain reserved after
+  revocation. Presence describes browser visibility/connection, never proof
+  of reading or authenticated human identity.
+- Guest WebSockets accept only authentication, bounded ACK, ping and presence.
+  No guest input, resizes, terminal replies, lifecycle or folder operations.
+  Revocation must cancel an in-flight output write as well as an idle socket.
+- Proposals are bounded, expiring and revision-bound. The SQLite actor owns
+  admitted decisions after HTTP cancellation. Commit approval intent before
+  registry admission; perform no disk I/O under registry/session locks.
+  Registry admission checks generation, lifecycle, peer and transfer claims.
+  Exact text and Enter are one ordered queue item with separate flushes.
+  A missing or ambiguous receipt is uncertain, never automatically resent.
+  Receipt persistence waits through metadata queue saturation and owns retries
+  independently of the HTTP request. Never retry PTY admission for a receipt.
+  Pending owner edits must not appear in guest proposal responses.
+- SQLite holds explicit opt-in terminal recordings and proposal text outside
+  tracing. Secrets are hashed. An exclusive store lease and private files,
+  including WAL/SHM, are required. Storage errors must not block raw PTY I/O.
+  Full queues, quota exhaustion, failed captures and late recording start are
+  visible as incomplete history.
+- Archive events preserve raw bytes and geometry per generation. Final reader
+  drain, not process exit, ends the recording. Shutdown waits for readers and
+  an ordered capture barrier. Old generation bytes never enter the new live
+  buffer. Server restart revokes grants and never replays approval intents.
+  Explicit Stop recording persists across terminal restarts. Re-enable retains
+  sequence identity and never backfills the paused interval. Reader completion
+  is tracked separately from process exit. Drain sessions concurrently.
+- Guests can page only their current granted archive. Owner archives survive
+  restart and revocation. Deleting a finished recording cannot erase approval
+  identities or release a guest's reserved name.
+  Only explicit retired-terminal cleanup may remove those ledgers, after the
+  terminal is absent from the registry and no delivery receipt remains pending.
+  Renewing a grant revokes its predecessor without changing the guest's name.
+- Changes require `scripts/sharing-regression.py --browser` on Windows and
+  Linux, alongside peer, transfer, output-flow and normal Rust/frontend checks.
+
 ## Transfer invariants
 
 A context transfer ("Continue in <agent>") moves one written Markdown handoff
@@ -493,7 +534,7 @@ dispatch, or transfer routes require `scripts/transfer-regression.py` **and**
   Concurrent server instances must use distinct state directories.
 
 The server retains up to 16 MiB and 16,384 chunks of raw output per session.
-A newly attached browser receives at most the newest 2 MiB. WebSocket replay ordering and
+A newly attached browser receives at most the newest 4 MiB. WebSocket replay ordering and
 sequence checks exist to prevent replay/live gaps. Preserve those properties
 when changing batching or reconnect behavior.
 

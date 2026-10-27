@@ -50,6 +50,7 @@ export interface WorkspacePickerProps {
   description?: string;
   chooseLabel?: string;
   disabled?: boolean;
+  launchOptions?: ReactNode;
 }
 
 export interface WorkspacePickerTransition {
@@ -74,6 +75,7 @@ export function WorkspacePicker({
   description = "Browse folders on the server where the terminal will run.",
   chooseLabel = "Use folder",
   disabled = false,
+  launchOptions,
 }: WorkspacePickerProps) {
   const titleId = useId();
   const descriptionId = useId();
@@ -488,6 +490,7 @@ export function WorkspacePicker({
           </button>
         )}
       </header>
+      {launchOptions}
 
       <div
         className="workspace-picker__tabs"

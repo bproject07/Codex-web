@@ -185,6 +185,16 @@ async fn run(
                 config.state_dir.display()
             )
         })?;
+    let sharing_store =
+        match codex_web_terminal::sharing_store::Store::open(config.state_dir.clone()).await {
+            Ok(store) => Some(store),
+            Err(error) => {
+                tracing::error!(code = error.0, "session sharing storage is unavailable");
+                None
+            }
+        };
+    let sharing =
+        codex_web_terminal::sharing::Sharing::new(sharing_store.clone(), sessions.clone());
     let (update_tx, mut update_rx) = mpsc::channel(1);
     let (restart_tx, mut restart_rx) = mpsc::channel(1);
     let updates = UpdateManager::new(config.state_dir.clone(), config.update_policy, update_tx)?;
@@ -236,6 +246,7 @@ async fn run(
         config: Arc::new(config.clone()),
         auth: AuthState::new(token.clone()),
         sessions: sessions.clone(),
+        sharing: sharing.clone(),
         peers: peers.clone(),
         transfers: transfers.clone(),
         agents: agent_catalog,
@@ -282,6 +293,7 @@ async fn run(
     .await;
 
     tracing::info!("shutdown requested");
+    sharing.close();
     coordinated_shutdown(
         &public_shutdown,
         &peers,
@@ -290,6 +302,11 @@ async fn run(
         &peer_shutdown,
     )
     .await;
+
+    sharing.drain_receipts().await;
+    if let Some(store) = sharing_store {
+        let _ = store.flush().await;
+    }
 
     match stop_cause {
         StopCause::Signal(signal) => {

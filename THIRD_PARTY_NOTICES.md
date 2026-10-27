@@ -40,7 +40,7 @@ has been explicitly reviewed by the generator.
 The compiled server links Rust dependencies recorded in `server/Cargo.lock`.
 An audit of the locked graph found license choices under MIT, Apache-2.0,
 BSD-2-Clause, BSD-3-Clause, Unicode-3.0, BSL-1.0, CC0-1.0, MIT-0, the
-Unlicense, and Apache-2.0 with the LLVM exception. Every locked crate declares
+Unlicense, Zlib, and Apache-2.0 with the LLVM exception. Every locked crate declares
 license metadata; no GPL-only, AGPL, SSPL, proprietary, non-commercial, or
 unknown dependency was found.
 
@@ -48,6 +48,11 @@ The compiled executable also links the Rust standard library. Release bundles
 therefore include the exact
 `share/doc/rust/COPYRIGHT-library.html` supplied by the recorded Rust
 toolchain, including the standard library's third-party notices.
+
+Optional session recording uses rusqlite and the SQLite amalgamation bundled
+by libsqlite3-sys. The wrapper's MIT notice is included in the generated
+inventory. The foldhash dependency uses the Zlib license; its full notice is
+collected from the locked crate alongside the other Rust dependency notices.
 
 Some dependencies carry additional attribution material that must remain with
 redistributed binaries, including:

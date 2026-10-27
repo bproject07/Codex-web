@@ -1,0 +1,51 @@
+.sharing-panel {
+  width: min(1000px, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+  margin: auto;
+  padding: 22px;
+  color: var(--color-text);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-panel);
+}
+.sharing-panel::backdrop { background: #0009; }
+.share-heading, .share-guest {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+}
+.share-heading h1, .share-heading h2 { margin: 0; font-size: 1.3rem; }
+.share-heading { margin-bottom: 16px; }
+.share-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; margin: 12px 0; }
+.sharing-panel button, .guest-app button { min-height: 44px; }
+.sharing-panel label, .guest-app label { display: grid; gap: 8px; }
+.sharing-panel input:not([type=checkbox]), .sharing-panel textarea, .sharing-panel select,
+.guest-app input, .guest-app textarea, .guest-app select {
+  color: var(--color-text); background: var(--color-bg);
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 10px;
+  width: 100%; min-width: 0; font: inherit;
+}
+.sharing-panel textarea, .guest-app textarea { resize: vertical; min-height: 90px; }
+.share-link { margin: 16px 0; }
+.share-link input { font-family: monospace; }
+.share-check, .sharing-panel .share-check { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+.share-check input { width: 18px; height: 18px; flex: none; }
+.launch-recording { padding: 8px 16px; }
+.share-guest, .share-proposal { padding: 16px; margin: 12px 0; border: 1px solid var(--color-border-muted); border-radius: var(--radius-md); background: var(--color-card); }
+.share-guest small { display: block; color: var(--color-text-muted); margin-top: 6px; }
+.share-proposal pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.5; }
+.share-proposal details { margin: 10px 0; }
+.share-error { color: var(--color-warn); overflow-wrap: anywhere; }
+.share-archive { margin-top: 16px; }
+.share-terminal-scroll { overflow: auto; max-width: 100%; background: #10151d; padding: 8px; }
+.share-terminal-scroll .xterm { width: max-content; }
+.share-connection { padding: 8px; color: var(--color-text-muted); }
+.guest-app { height: 100dvh; overflow: auto; padding: 20px; background: var(--color-bg); }
+.share-join { max-width: 540px; margin: 10vh auto; }
+.sharing-indicator { align-self: flex-start; margin: 4px 12px; min-height: 32px; }
+@media (max-width: 600px) {
+  .sharing-panel, .guest-app { padding: 12px; }
+  .share-heading, .share-guest { align-items: flex-start; flex-wrap: wrap; }
+  .share-proposal { padding: 12px; }
+  .share-actions > label { flex: 1 1 100%; }
+}

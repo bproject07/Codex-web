@@ -21,9 +21,34 @@ pub enum ClientControl {
     Restart,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GuestControl {
+    Ping {},
+    OutputAck { bytes: u32 },
+    Presence { visible: bool },
+}
+
+pub fn parse_guest_control(text: &str) -> Result<GuestControl> {
+    if text.len() > MAX_CONTROL_MESSAGE_SIZE {
+        bail!("control message is too large");
+    }
+    serde_json::from_str(text).map_err(|_| anyhow::anyhow!("invalid guest control message"))
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerControl {
+    SharedSession {
+        #[serde(rename = "sessionId")]
+        session_id: Uuid,
+        agent: String,
+        status: crate::session::Lifecycle,
+        cols: u16,
+        rows: u16,
+        #[serde(rename = "archiveIncomplete")]
+        archive_incomplete: bool,
+    },
     Session {
         session: SessionSnapshot,
     },
@@ -74,6 +99,25 @@ pub fn validate_resize(cols: u16, rows: u16) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_controls_never_authorize_terminal_mutation() {
+        for text in [
+            r#"{"type":"resize","cols":80,"rows":24}"#,
+            r#"{"type":"restart"}"#,
+            r#"{"type":"ping","input":"secret"}"#,
+            r#"{"type":"output_ack","bytes":-1}"#,
+            r#"{"type":"presence","visible":"true"}"#,
+            "null",
+        ] {
+            assert!(parse_guest_control(text).is_err());
+        }
+        assert_eq!(
+            parse_guest_control(r#"{"type":"presence","visible":true}"#).unwrap(),
+            GuestControl::Presence { visible: true }
+        );
+        assert!(parse_guest_control(&" ".repeat(MAX_CONTROL_MESSAGE_SIZE + 1)).is_err());
+    }
 
     #[test]
     fn parses_resize_control_message() {

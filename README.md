@@ -19,6 +19,14 @@ are interpreted by xterm.js from the original PTY byte stream.
 The project is an independent wrapper. It does not download, vendor, modify,
 or silently install or update any agent CLI.
 
+Selected terminals can be shared through **Manage sessions → Share / history**.
+Individual guests enter a fixed name and await owner admission. They can view
+the terminal and its saved history; proposal permission lets them submit text
+for the owner to edit, reject, or approve. Only approval sends the reviewed text
+to the selected PTY. The link uses a separate expiring, revocable credential.
+See [controlled session sharing](OPERATIONS.md#controlled-session-sharing) for
+setup, presence, limits, exact single-line delivery and SQLite history.
+
 > [!IMPORTANT]
 > This is an independent, unofficial community project. It is not affiliated
 > with, sponsored by, or endorsed by OpenAI, Anthropic, Google, or Kilo Code.
@@ -123,7 +131,7 @@ session's bounded terminal output buffer before it resumes live output.
 - One raw terminal output buffer per session, bounded to 16 MiB and 16,384 chunks
 - Final PTY output remains readable when process exit precedes the last read;
   restarted sessions reject output from the previous generation
-- Up to the newest 2 MiB replayed to each newly attached client
+- Up to the newest 4 MiB replayed to each newly attached client
 - Initial PTY size of 120 columns by 35 rows
 - Validated browser resize range: 20–500 columns and 5–300 rows
 - Windows 10/11 and x86_64 Linux are tested platforms
@@ -990,11 +998,15 @@ screenshots and issue reports.
 
 ## HTTP API
 
-All HTTP `/api` endpoints require:
+Owner HTTP `/api` endpoints require:
 
 ```http
 Authorization: Bearer YOUR_TOKEN
 ```
+
+The separately scoped `/api/share/*` routes use a guest bearer credential.
+`POST /api/share/redeem` accepts the invitation secret in its bounded JSON body.
+Guest credentials never authorize the owner endpoints below.
 
 Endpoints:
 
@@ -1013,8 +1025,20 @@ Endpoints:
 | `PUT` | `/api/workspaces/favorites` | Create or update a Favorite by directory ID |
 | `DELETE` | `/api/workspaces/favorites/{favoriteId}` | Remove one Favorite record |
 | `GET` | `/api/sessions` | List sanitized metadata for all managed sessions |
-| `POST` | `/api/sessions` | Create a terminal; optional body fields are `agent` and `directoryId` only |
+| `POST` | `/api/sessions` | Create a terminal; optional `agent`, `directoryId`, `recordHistory`, or the separate `restoreRequestId` restore mode |
 | `GET` | `/api/sessions/{terminalId}` | Get one managed session |
+| `GET`, `DELETE` | `/api/sessions/{terminalId}/sharing` | Owner sharing status or revoke all guest access |
+| `GET` | `/api/sessions/{terminalId}/sharing/status` | Lightweight availability and guest/proposal counters |
+| `POST`, `DELETE` | `/api/sessions/{terminalId}/sharing/record` | Enable or stop recording without changing guest access |
+| `POST` | `/api/sharing/prune-retired` | Explicitly remove retired-terminal sharing identities and proposal audit, retaining recordings |
+| `POST` | `/api/sessions/{terminalId}/sharing/invitations` | Create a one-person invitation for `view` or `propose` |
+| `POST` | `/api/sessions/{terminalId}/sharing/guests/{grantId}/admit` | Admit a named guest |
+| `DELETE` | `/api/sessions/{terminalId}/sharing/guests/{grantId}` | Revoke one guest grant |
+| `POST` | `/api/sessions/{terminalId}/sharing/proposals/{proposalId}/approve` | Freeze reviewed text and admit an idempotent, generation-bound PTY write |
+| `POST` | `/api/sessions/{terminalId}/sharing/proposals/{proposalId}/reject` | Reject a pending revision |
+| `GET` | `/api/sharing/archives` | Owner's recorded generations, including previous server runs |
+| `GET`, `DELETE` | `/api/sharing/archives/{generation}` | Page raw events with `?after=sequence` or delete a finished recording |
+| `GET` | `/api/sharing/archives/{generation}/proposals` | Saved original and reviewed proposals for that generation |
 | `POST` | `/api/sessions/{terminalId}/restart` | Terminate and recreate one agent PTY |
 | `POST` | `/api/sessions/{terminalId}/terminate` | Terminate one agent PTY without removing its entry |
 | `DELETE` | `/api/sessions/{terminalId}` | Terminate and remove a non-primary session |
@@ -1351,7 +1375,7 @@ Security measures in this application:
 - 64 KiB WebSocket message limit
 - 4 KiB JSON control-message limit
 - 16 MiB retained output-buffer limit per session
-- 2 MiB maximum initial replay per browser attachment
+- 4 MiB maximum initial replay per browser attachment
 - same-origin-only Content Security Policy connections, disabled browser
   permissions, frame denial, no-referrer policy, and MIME sniffing protection
 - structured tracing excludes token, keys, input, and terminal output
@@ -1703,7 +1727,7 @@ when available.
   network for remote transport.
 - Replay stores raw PTY output, not a server-side terminal screen model. If
   more than 16 MiB has been retained, the oldest bytes are discarded. A new
-  attachment receives only the newest 2 MiB, so a reconnect may reconstruct an
+  attachment receives only the newest 4 MiB, so a reconnect may reconstruct an
   imperfect screen when required ANSI state is older. A Codex redraw or
   restart repairs it.
 - Restarting the Rust server terminates all managed PTY sessions. A normal

@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     io::{ErrorKind, Read, Write},
     sync::{
         Arc, Mutex,
@@ -25,6 +25,7 @@ use crate::{
     filesystem::encode_directory_id,
     peer::{PeerBroker, SessionPurpose},
     protocol::validate_resize,
+    sharing_store::Recorder,
     terminal::{self, TerminalConfig},
 };
 
@@ -32,7 +33,8 @@ pub const OUTPUT_BUFFER_LIMIT: usize = 16 * 1024 * 1024;
 const MAX_OUTPUT_CHUNKS: usize = 16_384;
 pub const MAX_CONNECTED_CLIENTS: usize = 4;
 pub const MAX_AUTOMATION_PROMPT_SIZE: usize = 16 * 1024;
-pub const OUTPUT_REPLAY_LIMIT: usize = 2 * 1024 * 1024;
+pub const OUTPUT_REPLAY_LIMIT: usize = 4 * 1024 * 1024;
+pub const OUTPUT_READ_CHUNK: usize = 16 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 256;
 const EVENT_BROADCAST_CAPACITY: usize = 64;
 const MAX_PUBLIC_ERROR_LENGTH: usize = 512;
@@ -131,6 +133,10 @@ pub struct SessionSnapshot {
     pub project: String,
     pub directory_id: String,
     pub last_error: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+    pub recording: bool,
+    pub archive_incomplete: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +324,8 @@ struct SessionInner {
     operation: Mutex<()>,
     record: Mutex<SessionRecord>,
     output: Mutex<BoundedOutputBuffer>,
+    recorder: Mutex<Option<Recorder>>,
+    readers: Mutex<HashSet<Uuid>>,
     output_sender: watch::Sender<u64>,
     event_sender: broadcast::Sender<()>,
     client_slots: Arc<Semaphore>,
@@ -336,6 +344,8 @@ struct SessionRecord {
     exit_code: Option<u32>,
     last_error: Option<String>,
     active: Option<ActiveProcess>,
+    cols: u16,
+    rows: u16,
 }
 
 struct ActiveProcess {
@@ -345,13 +355,25 @@ struct ActiveProcess {
     termination_sender: SyncSender<TerminationRequest>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum PtyInput {
     Raw(Vec<u8>),
     AutomationPrompt {
         prompt: Vec<u8>,
         policy: AutomationPromptPolicy,
     },
+    ApprovedPrompt {
+        prompt: Vec<u8>,
+        policy: AutomationPromptPolicy,
+        receipt: tokio::sync::oneshot::Sender<WriteReceipt>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteReceipt {
+    Written,
+    NotWritten,
+    Uncertain,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -419,8 +441,12 @@ impl SessionManager {
                     exit_code: None,
                     last_error: None,
                     active: None,
+                    cols: terminal::INITIAL_COLS,
+                    rows: terminal::INITIAL_ROWS,
                 }),
                 output: Mutex::new(BoundedOutputBuffer::new(OUTPUT_BUFFER_LIMIT)),
+                recorder: Mutex::new(None),
+                readers: Mutex::new(HashSet::new()),
                 output_sender,
                 event_sender,
                 client_slots: Arc::new(Semaphore::new(MAX_CONNECTED_CLIENTS)),
@@ -473,7 +499,18 @@ impl SessionManager {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
         self.inner.shutdown_signal.cancel();
         self.revoke_current_peer_generation();
-        self.terminate().await
+        let result = self.terminate().await;
+        // Exit notification can precede the reader's final PTY bytes.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !lock(&self.inner.readers).is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if let Some(recorder) = lock(&self.inner.recorder).as_ref() {
+            for generation in lock(&self.inner.readers).iter() {
+                recorder.mark_incomplete(*generation);
+            }
+        }
+        result
     }
 
     pub async fn shutdown(&self) {
@@ -509,6 +546,60 @@ impl SessionManager {
         )
     }
 
+    pub fn write_approved_prompt(
+        &self,
+        expected_session_id: Uuid,
+        prompt: &str,
+        receipt: tokio::sync::oneshot::Sender<WriteReceipt>,
+    ) -> Result<()> {
+        self.queue_input_for_active_session(
+            PtyInput::ApprovedPrompt {
+                prompt: encode_automation_prompt(prompt)?,
+                policy: automation_prompt_policy(self.inner.terminal_config.agent),
+                receipt,
+            },
+            Some(expected_session_id),
+        )
+    }
+
+    pub fn enable_recording(&self, recorder: Recorder) {
+        let record = lock(&self.inner.record);
+        let output = lock(&self.inner.output);
+        let mut current = lock(&self.inner.recorder);
+        if let Some(existing) = current.as_ref() {
+            if existing.enabled() {
+                return;
+            }
+            existing.resume();
+            if let Some(generation) = record.session_id {
+                // Retain sequence numbers; never backfill the private pause.
+                existing.begin(generation, record.cols, record.rows, true);
+                existing.geometry(generation, record.cols, record.rows);
+                if !lock(&self.inner.readers).contains(&generation) {
+                    existing.end(generation);
+                }
+            }
+            return;
+        }
+        if let Some(generation) = record.session_id {
+            recorder.begin(generation, record.cols, record.rows, true);
+            for chunk in output.snapshot().chunks {
+                recorder.output(generation, &chunk.data);
+            }
+            if !lock(&self.inner.readers).contains(&generation) {
+                recorder.end(generation);
+            }
+        }
+        *current = Some(recorder);
+    }
+
+    pub fn pause_recording(&self) {
+        if let Some(recorder) = lock(&self.inner.recorder).as_ref() {
+            recorder.pause();
+        }
+        self.notify_event();
+    }
+
     fn queue_input_for_active_session(
         &self,
         input: PtyInput,
@@ -537,7 +628,7 @@ impl SessionManager {
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         validate_resize(cols, rows)?;
-        let record = lock(&self.inner.record);
+        let mut record = lock(&self.inner.record);
         let Some(active) = record.active.as_ref() else {
             bail!(
                 "{} is not running",
@@ -553,12 +644,33 @@ impl SessionManager {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .context("failed to resize the PTY")
+            .context("failed to resize the PTY")?;
+        record.cols = cols;
+        record.rows = rows;
+        let _output = lock(&self.inner.output);
+        if let (Some(generation), Some(recorder)) =
+            (record.session_id, lock(&self.inner.recorder).as_ref())
+        {
+            recorder.geometry(generation, cols, rows);
+        }
+        drop(_output);
+        drop(record);
+        self.notify_event();
+        Ok(())
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
         let record = lock(&self.inner.record);
         let connected_clients = self.connected_clients();
+        let (recording, archive_incomplete) = {
+            let recorder = lock(&self.inner.recorder);
+            (
+                recorder.as_ref().is_some_and(Recorder::enabled),
+                recorder
+                    .as_ref()
+                    .is_some_and(|recorder| recorder.incomplete(record.session_id)),
+            )
+        };
         SessionSnapshot {
             terminal_id: self.inner.terminal_id,
             name: self.inner.name.clone(),
@@ -581,6 +693,10 @@ impl SessionManager {
                 .into_owned(),
             directory_id: encode_directory_id(&self.inner.terminal_config.project_dir),
             last_error: record.last_error.clone(),
+            cols: record.cols,
+            rows: record.rows,
+            recording,
+            archive_incomplete,
         }
     }
 
@@ -682,12 +798,25 @@ impl SessionManager {
             let mut record = lock(&self.inner.record);
             record.machine.transition(Lifecycle::Starting)?;
             record.session_id = Some(session_id);
+            // Register before exposing this generation. EOF is independent of
+            // the waiter clearing active, and startup failure removes this lease.
+            lock(&self.inner.readers).insert(session_id);
             record.started_at = Some(unix_time_millis());
             record.pid = None;
             record.exit_code = None;
             record.last_error = None;
+            record.cols = terminal::INITIAL_COLS;
+            record.rows = terminal::INITIAL_ROWS;
+            lock(&self.inner.output).reset(session_id);
+            if let Some(recorder) = lock(&self.inner.recorder).as_ref() {
+                recorder.begin(
+                    session_id,
+                    terminal::INITIAL_COLS,
+                    terminal::INITIAL_ROWS,
+                    false,
+                );
+            }
         }
-        lock(&self.inner.output).reset(session_id);
         self.notify_event();
 
         let peer_activation = match self.inner.peer_broker.as_ref() {
@@ -853,6 +982,11 @@ impl SessionManager {
             record.last_error = Some(public_error(error));
         }
         drop(record);
+        if let Some(recorder) = lock(&self.inner.recorder).as_ref() {
+            recorder.mark_incomplete(session_id);
+            recorder.end(session_id);
+        }
+        lock(&self.inner.readers).remove(&session_id);
         self.notify_event();
         tracing::error!(%error, %session_id, agent = self.inner.terminal_config.agent.label(), "failed to start agent PTY session");
     }
@@ -908,12 +1042,14 @@ impl SessionManager {
                         | Lifecycle::Terminated
                 )
         };
-        if !is_current {
-            return;
-        }
-
-        if let Some(chunk) = lock(&self.inner.output).append(session_id, data) {
+        let mut output = lock(&self.inner.output);
+        if is_current && let Some(chunk) = output.append(session_id, data) {
             self.inner.output_sender.send_replace(chunk.sequence);
+        }
+        // The archive owns each generation separately, including its final drained
+        // bytes after restart. Such bytes must never enter the new live buffer.
+        if let Some(recorder) = lock(&self.inner.recorder).as_ref() {
+            recorder.output(session_id, data);
         }
     }
 
@@ -1022,6 +1158,11 @@ fn writer_loop(
                 "PTY input write failed"
             );
             manager.record_stream_error(session_id, "The PTY input stream failed.");
+            for pending in receiver.try_iter() {
+                if let PtyInput::ApprovedPrompt { receipt, .. } = pending {
+                    let _ = receipt.send(WriteReceipt::NotWritten);
+                }
+            }
             break;
         }
     }
@@ -1044,6 +1185,25 @@ fn write_pty_input_with_sleep(
             sleep(policy.settle_delay);
             writer.write_all(policy.submit_key)?;
             writer.flush()
+        }
+        PtyInput::ApprovedPrompt {
+            prompt,
+            policy,
+            receipt,
+        } => {
+            let result = (|| {
+                writer.write_all(&prompt)?;
+                writer.flush()?;
+                sleep(policy.settle_delay);
+                writer.write_all(policy.submit_key)?;
+                writer.flush()
+            })();
+            let _ = receipt.send(if result.is_ok() {
+                WriteReceipt::Written
+            } else {
+                WriteReceipt::Uncertain
+            });
+            result
         }
     }
 }
@@ -1076,7 +1236,7 @@ fn encode_automation_prompt(prompt: &str) -> Result<Vec<u8>> {
 }
 
 fn reader_loop(manager: SessionManager, session_id: Uuid, mut reader: Box<dyn Read + Send>) {
-    let mut buffer = [0_u8; 16 * 1024];
+    let mut buffer = [0_u8; OUTPUT_READ_CHUNK];
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
@@ -1093,6 +1253,13 @@ fn reader_loop(manager: SessionManager, session_id: Uuid, mut reader: Box<dyn Re
                 break;
             }
         }
+    }
+    {
+        let recorder = lock(&manager.inner.recorder);
+        if let Some(recorder) = recorder.as_ref() {
+            recorder.end(session_id);
+        }
+        lock(&manager.inner.readers).remove(&session_id);
     }
 }
 
@@ -1423,6 +1590,60 @@ mod tests {
         broker.set_revocation_observer(Arc::new(|_, _| {}));
     }
 
+    #[tokio::test]
+    async fn recording_enabled_after_reader_eof_is_ended_before_waiter_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::sharing_store::Store::open(root.path().join("state"))
+            .await
+            .unwrap();
+        let manager = test_session_manager();
+        let generation = Uuid::new_v4();
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                cols: 80,
+                rows: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        {
+            let mut record = lock(&manager.inner.record);
+            record.session_id = Some(generation);
+            record.machine.transition(Lifecycle::Starting).unwrap();
+            record.machine.transition(Lifecycle::Running).unwrap();
+            record.active = Some(ActiveProcess {
+                session_id: generation,
+                master: pair.master,
+                input_sender: std::sync::mpsc::sync_channel(1).0,
+                termination_sender: std::sync::mpsc::sync_channel(1).0,
+            });
+            lock(&manager.inner.output).reset(generation);
+            lock(&manager.inner.readers).insert(generation);
+        }
+        reader_loop(
+            manager.clone(),
+            generation,
+            Box::new(std::io::Cursor::new(b"final")),
+        );
+        assert_eq!(manager.snapshot().status, Lifecycle::Running);
+        manager.enable_recording(Recorder::new(
+            store.clone(),
+            Uuid::new_v4(),
+            "Fixture".into(),
+            "Codex".into(),
+        ));
+        store.flush().await.unwrap();
+        store
+            .run(|db| {
+                let archive = crate::sharing_store::generations(db, None)?;
+                assert!(archive[0].ended && archive[0].incomplete);
+                assert_eq!(archive[0].bytes, 5);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn final_pty_bytes_survive_exit_but_never_enter_a_restarted_generation() {
         for terminated in [false, true] {
@@ -1574,6 +1795,49 @@ mod tests {
             assert!(policy.settle_delay >= Duration::from_millis(120));
             assert_eq!(policy.submit_key, b"\r");
         }
+    }
+
+    #[tokio::test]
+    async fn approved_prompt_receipt_requires_text_and_enter_flush() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut writer = RecordingWriter::default();
+        write_pty_input_with_sleep(
+            &mut writer,
+            PtyInput::ApprovedPrompt {
+                prompt: b"exact text".to_vec(),
+                policy: automation_prompt_policy(AgentKind::Codex),
+                receipt: sender,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(receiver.await.unwrap(), WriteReceipt::Written);
+        assert_eq!(writer.writes, vec![b"exact text".to_vec(), b"\r".to_vec()]);
+        assert_eq!(writer.flush_count, 2);
+
+        struct FailingFlush;
+        impl Write for FailingFlush {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        assert!(
+            write_pty_input_with_sleep(
+                &mut FailingFlush,
+                PtyInput::ApprovedPrompt {
+                    prompt: b"possibly written".to_vec(),
+                    policy: automation_prompt_policy(AgentKind::Codex),
+                    receipt: sender,
+                },
+                |_| panic!("must not submit after a failed flush")
+            )
+            .is_err()
+        );
+        assert_eq!(receiver.await.unwrap(), WriteReceipt::Uncertain);
     }
 
     #[test]

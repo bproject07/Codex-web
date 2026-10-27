@@ -42,6 +42,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub auth: AuthState,
     pub sessions: SessionRegistry,
+    pub sharing: crate::sharing::Sharing,
     pub peers: PeerBroker,
     pub transfers: TransferCoordinator,
     pub agents: AgentCatalog,
@@ -82,6 +83,8 @@ struct CreateSessionRequest {
     agent: Option<AgentKind>,
     directory_id: Option<String>,
     restore_request_id: Option<Uuid>,
+    #[serde(default)]
+    record_history: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -165,6 +168,7 @@ pub fn build_router(state: AppState, static_directory: Option<PathBuf>) -> Route
         .route("/api/sessions/{id}/terminate", post(terminate_session))
         .merge(peer_routes::protected_router())
         .merge(transfer_routes::protected_router())
+        .merge(crate::sharing_routes::owner_router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_http_auth,
@@ -172,6 +176,7 @@ pub fn build_router(state: AppState, static_directory: Option<PathBuf>) -> Route
 
     let router = Router::new()
         .merge(protected_api)
+        .merge(crate::sharing_routes::guest_router())
         .route("/ws", get(websocket::upgrade))
         .with_state(state);
 
@@ -439,6 +444,9 @@ async fn create_session(State(state): State<AppState>, body: Bytes) -> Response 
         }
     };
     let requested_agent = request.agent;
+    if request.record_history && request.restore_request_id.is_some() {
+        return crate::sharing_store::Error("invalid_body").into_response();
+    }
     let selected_project = match request.directory_id.as_deref() {
         Some(directory_id) => match state.directories.resolve_id(directory_id).await {
             Ok(path) => Some(path),
@@ -454,6 +462,16 @@ async fn create_session(State(state): State<AppState>, body: Bytes) -> Response 
             state
                 .sessions
                 .restore_in(request_id, requested_agent, selected_project)
+                .await
+        }
+        None if request.record_history => {
+            let store = match state.sharing.store() {
+                Ok(store) => store,
+                Err(error) => return error.into_response(),
+            };
+            state
+                .sessions
+                .create_recorded_in(requested_agent, selected_project, store)
                 .await
         }
         None => {

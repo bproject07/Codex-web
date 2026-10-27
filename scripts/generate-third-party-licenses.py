@@ -48,6 +48,7 @@ REVIEWED_LICENSE_EXPRESSIONS = frozenset(
         "MPL-2.0",
         "Unicode-3.0",
         "Unlicense OR MIT",
+        "Zlib",
         "Zlib OR Apache-2.0 OR MIT",
     }
 )

@@ -13,6 +13,8 @@ interface AgentPickerProps {
   error: string | null;
   creatingAgent: AgentKind | null;
   workspacePath?: string;
+  recordHistory?: boolean;
+  onRecordHistoryChange?: (enabled: boolean) => void;
   onChangeWorkspace?: () => void;
   onSelect: (agent: AgentKind) => void;
   onRefresh: () => void;
@@ -42,6 +44,8 @@ export function AgentPicker({
   error,
   creatingAgent,
   workspacePath,
+  recordHistory,
+  onRecordHistoryChange,
   onChangeWorkspace,
   onSelect,
   onRefresh,
@@ -224,6 +228,11 @@ export function AgentPicker({
           </div>
         </div>
         <div className="agent-picker-body">
+          {onRecordHistoryChange && <label className="share-check launch-recording">
+            <input type="checkbox" checked={recordHistory ?? false} disabled={creating}
+              onChange={(event) => onRecordHistoryChange(event.target.checked)} />
+            Record terminal history on this server
+          </label>}
           <div className="agent-picker-context">
             <p id="agent-picker-description" className="agent-picker-description">
               Choose a CLI installed on {serverSummary}. The agent runs there,

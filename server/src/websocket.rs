@@ -17,16 +17,19 @@ use uuid::Uuid;
 use crate::{
     auth::{AuthDecision, AuthState, origin_is_allowed},
     protocol::{
-        ClientControl, MAX_INPUT_MESSAGE_SIZE, MAX_WEBSOCKET_MESSAGE_SIZE, ServerControl,
-        parse_control_message,
+        ClientControl, GuestControl, MAX_INPUT_MESSAGE_SIZE, MAX_WEBSOCKET_MESSAGE_SIZE,
+        ServerControl, parse_control_message, parse_guest_control,
     },
     registry::SessionRegistry,
     routes::AppState,
-    session::{OUTPUT_REPLAY_LIMIT, OutputChunk, SessionManager},
+    session::{OUTPUT_READ_CHUNK, OUTPUT_REPLAY_LIMIT, OutputChunk, SessionManager},
+    sharing::{Guest, GuestConnection},
 };
 
 const OUTPUT_WEBSOCKET_BATCH_SIZE: usize = 32 * 1024;
-const OUTPUT_WINDOW: usize = 2 * OUTPUT_REPLAY_LIMIT;
+const OUTPUT_WINDOW: usize = 4 * 1024 * 1024;
+const LIVE_DELTA_MAX: usize = 1024 * 1024;
+const _: () = assert!(OUTPUT_REPLAY_LIMIT <= OUTPUT_WINDOW);
 
 struct OutputFlow {
     enabled: bool,
@@ -35,7 +38,7 @@ struct OutputFlow {
 
 impl OutputFlow {
     fn can_send(&self) -> bool {
-        !self.enabled || self.outstanding <= OUTPUT_WINDOW - OUTPUT_REPLAY_LIMIT
+        !self.enabled || self.outstanding <= OUTPUT_WINDOW - OUTPUT_READ_CHUNK
     }
 
     fn sent(&mut self, bytes: usize) {
@@ -111,7 +114,9 @@ pub async fn upgrade(
                 session,
                 peer,
                 terminal_id,
-                client_permit,
+                Access::Owner {
+                    _permit: client_permit,
+                },
                 query.flow_control == Some(1),
             )
         })
@@ -143,7 +148,35 @@ async fn handle_socket(
     session: SessionManager,
     peer: SocketAddr,
     terminal_id: Uuid,
-    _client_permit: OwnedSemaphorePermit,
+    access: Access,
+    flow_control: bool,
+) {
+    // Also cancel a slow replay/write, rather than waiting for its whole batch.
+    let cancellation = access.cancellation();
+    let lifetime = match &access {
+        Access::Guest(guest, _) => std::time::Duration::from_millis(
+            guest
+                .expires_at
+                .saturating_sub(crate::sharing_store::now())
+                .max(0) as u64,
+        ),
+        Access::Owner { .. } => std::time::Duration::from_secs(365 * 24 * 3600),
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {}
+        _ = tokio::time::sleep(lifetime), if access.generation().is_some() => {}
+        _ = handle_socket_inner(socket, state, session, peer, terminal_id, access, flow_control) => {}
+    }
+}
+
+async fn handle_socket_inner(
+    socket: WebSocket,
+    state: AppState,
+    session: SessionManager,
+    peer: SocketAddr,
+    terminal_id: Uuid,
+    access: Access,
     flow_control: bool,
 ) {
     tracing::info!(client = %peer.ip(), %terminal_id, "terminal client connected");
@@ -160,6 +193,10 @@ async fn handle_socket(
         outstanding: 0,
     };
     let mut output_pending = true;
+    let mut replay_required = false;
+    let pin = access.generation();
+    let revoke = access.cancellation();
+    let mut expiry_tick = tokio::time::interval(std::time::Duration::from_secs(1));
 
     if flow.enabled
         && send_control(
@@ -171,37 +208,41 @@ async fn handle_socket(
         .await
         .is_err()
     {
-        drop(_client_permit);
+        drop(access);
         session.notify_client_count_changed();
         return;
     }
 
-    if send_control(
-        &mut sender,
-        ServerControl::Session {
-            session: session.snapshot(),
-        },
-    )
-    .await
-    .is_err()
+    if send_metadata(&mut sender, &session, &access).await.is_err()
         || send_replay(
             &session,
             &mut sender,
             &mut current_session_id,
             &mut last_sequence,
             &mut flow,
+            pin,
         )
         .await
         .is_err()
     {
         tracing::info!(client = %peer.ip(), %terminal_id, "terminal client disconnected during setup");
-        drop(_client_permit);
+        drop(access);
         session.notify_client_count_changed();
         return;
     }
 
     loop {
         tokio::select! {
+            _ = revoke.cancelled() => {
+                let _ = send_message(&mut sender, Message::Close(None)).await;
+                break;
+            }
+            _ = expiry_tick.tick(), if pin.is_some() => {
+                if access.expired() || session.snapshot().session_id != pin {
+                    let _ = send_message(&mut sender, Message::Close(None)).await;
+                    break;
+                }
+            }
             _ = state.shutdown.cancelled() => {
                 let _ = send_message(&mut sender, Message::Close(None)).await;
                 break;
@@ -213,16 +254,23 @@ async fn handle_socket(
             incoming = receiver.next() => {
                 match incoming {
                     Some(Ok(message)) => {
-                        if !handle_client_message(
+                        let keep = if let Access::Guest(_, connection) = &access {
+                            connection.touch(None);
+                            handle_guest_message(message, connection, &mut sender, &mut flow).await
+                        } else { handle_client_message(
                             message,
                             &state.sessions,
                             terminal_id,
                             &session,
                             &mut sender,
                             &mut flow,
-                        ).await {
+                        ).await };
+                        if !keep {
                             break;
                         }
+                        // Credit acknowledgements must wake a finite pending delta
+                        // even when the PTY has produced no further output.
+                        output_pending = true;
                     }
                     Some(Err(error)) => {
                         tracing::warn!(client = %peer.ip(), %error, "WebSocket receive error");
@@ -237,13 +285,17 @@ async fn handle_socket(
                 }
                 output_pending = true;
             }
-            _ = std::future::ready(()), if output_pending && flow.can_send() => {
+            _ = std::future::ready(()), if output_pending &&
+                ((!replay_required && flow.can_send()) ||
+                 (replay_required && (!flow.enabled || flow.outstanding == 0))) => {
                 match send_pending_output(
                     &session,
                     &mut sender,
                     &mut current_session_id,
                     &mut last_sequence,
                     &mut flow,
+                    &mut replay_required,
+                    pin,
                 ).await {
                     Ok(pending) => output_pending = pending,
                     Err(_) => break,
@@ -256,10 +308,7 @@ async fn handle_socket(
                         if snapshot.session_id != current_session_id {
                             output_pending = true;
                         }
-                        if send_control(
-                            &mut sender,
-                            ServerControl::Session { session: snapshot },
-                        )
+                        if send_metadata(&mut sender, &session, &access)
                         .await
                         .is_err()
                         {
@@ -274,9 +323,103 @@ async fn handle_socket(
 
     drop(receiver);
     drop(sender);
-    drop(_client_permit);
+    drop(access);
     session.notify_client_count_changed();
     tracing::info!(client = %peer.ip(), %terminal_id, "terminal client disconnected");
+}
+
+enum Access {
+    Owner { _permit: OwnedSemaphorePermit },
+    Guest(Guest, GuestConnection),
+}
+impl Access {
+    fn generation(&self) -> Option<Uuid> {
+        match self {
+            Self::Owner { .. } => None,
+            Self::Guest(guest, _) => Some(guest.session_id),
+        }
+    }
+    fn cancellation(&self) -> tokio_util::sync::CancellationToken {
+        match self {
+            Self::Owner { .. } => tokio_util::sync::CancellationToken::new(),
+            Self::Guest(_, connection) => connection.cancel.clone(),
+        }
+    }
+    fn expired(&self) -> bool {
+        matches!(self, Self::Guest(guest,_) if guest.expires_at <= crate::sharing_store::now())
+    }
+}
+
+pub async fn serve_guest(
+    socket: WebSocket,
+    state: AppState,
+    peer: SocketAddr,
+    guest: Guest,
+    connection: GuestConnection,
+) {
+    let Some(session) = state.sessions.get(guest.terminal_id) else {
+        return;
+    };
+    let terminal_id = guest.terminal_id;
+    handle_socket(
+        socket,
+        state,
+        session,
+        peer,
+        terminal_id,
+        Access::Guest(guest, connection),
+        true,
+    )
+    .await;
+}
+
+async fn send_metadata(
+    sender: &mut SplitSink<WebSocket, Message>,
+    session: &SessionManager,
+    access: &Access,
+) -> Result<(), axum::Error> {
+    let snapshot = session.snapshot();
+    if let Access::Guest(guest, _) = access {
+        if snapshot.session_id != Some(guest.session_id) || access.expired() {
+            return Err(websocket_timeout_error());
+        }
+        send_control(
+            sender,
+            ServerControl::SharedSession {
+                session_id: guest.session_id,
+                agent: snapshot.agent.label().to_owned(),
+                status: snapshot.status,
+                cols: snapshot.cols,
+                rows: snapshot.rows,
+                archive_incomplete: snapshot.archive_incomplete,
+            },
+        )
+        .await
+    } else {
+        send_control(sender, ServerControl::Session { session: snapshot }).await
+    }
+}
+
+async fn handle_guest_message(
+    message: Message,
+    connection: &GuestConnection,
+    sender: &mut SplitSink<WebSocket, Message>,
+    flow: &mut OutputFlow,
+) -> bool {
+    match message {
+        Message::Text(text) if text.len() <= 4096 => match parse_guest_control(&text) {
+            Ok(GuestControl::Ping {}) => send_control(sender, ServerControl::Pong).await.is_ok(),
+            Ok(GuestControl::OutputAck { bytes }) => flow.acknowledge(bytes),
+            Ok(GuestControl::Presence { visible }) => {
+                connection.touch(Some(visible));
+                true
+            }
+            Err(_) => false,
+        },
+        Message::Ping(data) => send_message(sender, Message::Pong(data)).await.is_ok(),
+        Message::Pong(_) => true,
+        _ => false,
+    }
 }
 
 fn resolve_session(
@@ -366,13 +509,38 @@ async fn send_pending_output(
     current_session_id: &mut Option<Uuid>,
     last_sequence: &mut u64,
     flow: &mut OutputFlow,
+    replay_required: &mut bool,
+    pin: Option<Uuid>,
 ) -> Result<bool, axum::Error> {
-    let Some(delta) =
-        session.output_since_limited(*current_session_id, *last_sequence, OUTPUT_REPLAY_LIMIT)
-    else {
-        send_replay(session, sender, current_session_id, last_sequence, flow).await?;
+    if *replay_required {
+        send_replay(
+            session,
+            sender,
+            current_session_id,
+            last_sequence,
+            flow,
+            pin,
+        )
+        .await?;
+        *replay_required = false;
+        return Ok(true);
+    }
+    let budget = if flow.enabled {
+        OUTPUT_WINDOW.saturating_sub(flow.outstanding)
+    } else {
+        LIVE_DELTA_MAX
+    };
+    let Some(delta) = session.output_since_limited(
+        *current_session_id,
+        *last_sequence,
+        budget.min(LIVE_DELTA_MAX),
+    ) else {
+        *replay_required = true;
         return Ok(true);
     };
+    if pin.is_some() && delta.session_id != pin {
+        return Err(websocket_timeout_error());
+    }
 
     let bytes = delta.chunks.iter().map(|chunk| chunk.data.len()).sum();
     send_output_batches(sender, delta.chunks).await?;
@@ -388,8 +556,12 @@ async fn send_replay(
     current_session_id: &mut Option<Uuid>,
     last_sequence: &mut u64,
     flow: &mut OutputFlow,
+    pin: Option<Uuid>,
 ) -> Result<(), axum::Error> {
     let snapshot = session.output_snapshot();
+    if pin.is_some() && snapshot.session_id != pin {
+        return Err(websocket_timeout_error());
+    }
     send_control(
         sender,
         ServerControl::ReplayStart {
@@ -505,14 +677,12 @@ mod tests {
             outstanding: 0,
         };
         flow.sent(OUTPUT_REPLAY_LIMIT);
-        assert!(flow.can_send());
-        flow.sent(OUTPUT_REPLAY_LIMIT);
         assert!(!flow.can_send());
         assert!(!flow.acknowledge(0));
         assert!(!flow.acknowledge((OUTPUT_WINDOW + 1) as u32));
-        assert!(flow.acknowledge(OUTPUT_REPLAY_LIMIT as u32));
+        assert!(flow.acknowledge(OUTPUT_READ_CHUNK as u32));
         assert!(flow.can_send());
-        assert!(flow.acknowledge(OUTPUT_REPLAY_LIMIT as u32));
+        assert!(flow.acknowledge((OUTPUT_REPLAY_LIMIT - OUTPUT_READ_CHUNK) as u32));
         assert!(!flow.acknowledge(1));
     }
     use crate::{
