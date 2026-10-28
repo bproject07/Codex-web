@@ -1031,6 +1031,12 @@ Endpoints:
 | `GET` | `/api/sessions/{terminalId}/sharing/status` | Lightweight availability and guest/proposal counters |
 | `POST`, `DELETE` | `/api/sessions/{terminalId}/sharing/record` | Enable or stop recording without changing guest access |
 | `POST` | `/api/sharing/prune-retired` | Explicitly remove retired-terminal sharing identities and proposal audit, retaining recordings |
+| `GET` | `/api/sharing/storage` | Storage availability, actionable errors, physical file sizes, reusable space and retention policy |
+| `POST` | `/api/sharing/storage/repair` | Explicit Windows ACL repair for the server-configured application data location; requires `confirm: true` |
+| `POST` | `/api/sharing/storage/cleanup/preview` | Preview eligible finished recordings by `olderThanDays` and optional generation UUIDs |
+| `POST` | `/api/sharing/storage/cleanup` | Queue bounded durable deletion of the exact preview fingerprint and filter |
+| `POST` | `/api/sharing/storage/compact` | Reclaim physical disk space with recordings paused and no pending receipts; requires `confirm: true` |
+| `POST` | `/api/sharing/storage/policy` | Save explicit opt-in completion-age/raw-byte-budget cleanup policy |
 | `POST` | `/api/sessions/{terminalId}/sharing/invitations` | Create a one-person invitation for `view` or `propose` |
 | `POST` | `/api/sessions/{terminalId}/sharing/guests/{grantId}/admit` | Admit a named guest |
 | `DELETE` | `/api/sessions/{terminalId}/sharing/guests/{grantId}` | Revoke one guest grant |

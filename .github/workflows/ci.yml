@@ -331,6 +331,8 @@ jobs:
           $env:CWT_CHROMIUM_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
           python -B .\scripts\sharing-regression.py --server .\dist\codex-web.exe --port 8827 --browser
           if ($LASTEXITCODE -ne 0) { throw "Session sharing regression failed" }
+          python -B .\scripts\sharing-storage-regression.py --server .\dist\codex-web.exe --browser --report storage-metrics.json
+          if ($LASTEXITCODE -ne 0) { throw "Sharing storage efficiency regression failed" }
 
       - name: Validate Linux mobile resize
         if: runner.os == 'Linux'
@@ -356,6 +358,16 @@ jobs:
         shell: bash
         run: |
           CWT_CHROMIUM_PATH=/usr/bin/google-chrome python3 -B ./scripts/sharing-regression.py --server ./dist-linux/codex-web --port 8827 --browser
+          CWT_CHROMIUM_PATH=/usr/bin/google-chrome python3 -B ./scripts/sharing-storage-regression.py --server ./dist-linux/codex-web --browser --report storage-metrics.json
+
+      - name: Save storage efficiency measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: storage-efficiency-${{ matrix.name }}
+          path: storage-metrics.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Validate Linux agent catalog and workspace picker
         if: runner.os == 'Linux'

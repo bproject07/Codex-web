@@ -696,12 +696,21 @@ alongside private SQLite WAL/SHM files and an exclusive sharing lock. Only
 secret hashes are stored. Proposal text and terminal output are sensitive
 plaintext on disk, so protect the state directory and backups as terminal
 data. Unix permissions are `0700` for the directory and `0600` for files;
-Windows validates the directory and database/sidecar ACLs, allowing only the
+Windows creates a new state directory with a protected ACL rather than inheriting
+unrelated account grants. It validates the directory and database/sidecar ACLs, allowing only the
 current account, Administrators and SYSTEM (plus inheritable CREATOR OWNER
 and OWNER RIGHTS when the object's owner is trusted).
 Broad access, null DACLs and reparse points disable sharing; existing ACLs are
-never silently changed. Use a private state directory owned by the service
-account. Concurrent servers must use distinct state directories.
+never silently changed. **Share / history → Storage** explains the specific
+failure. For Windows permission failures, **Repair sharing permissions** offers
+an explicit, owner-only repair of the configured application state directory
+and the fixed sharing database, WAL, SHM and lock files. It preserves file
+contents and restricts access to the server account, Administrators and SYSTEM.
+Repair refuses untrusted owners, reparse points and a sharing lease held by
+another server. It cannot accept a browser-supplied path or command. Successful
+repair opens sharing immediately; the live terminals do not need a restart.
+Use a private state directory owned by the service account. Concurrent servers
+must use distinct state directories.
 
 Capture never blocks the PTY on disk I/O. It uses a bounded queue and marks
 recordings incomplete after dropped bytes, storage failures, or limits:
@@ -709,7 +718,45 @@ recordings incomplete after dropped bytes, storage failures, or limits:
 256 recorded generations per managed terminal in one server run,
 and a 3 GiB SQLite page ceiling. The WAL checkpoints automatically and has a
 64 MiB retained-size target. Deleted pages are reused rather than necessarily
-shrinking the database file. Invitation, proposal and approval-attempt ledgers
+shrinking the database file. **Storage** reports the database, WAL and shared-memory
+total, raw recorded output, reusable database pages and available disk space.
+**Preview cleanup** selects finished recordings by age and optional recording
+selection. Confirmation is bound to the reviewed set and byte counts; changed
+candidates require another preview. Accepted cleanup is stored in SQLite and
+continues after browser disconnect or server restart. Recordings being deleted
+disappear from playback immediately. Each cleanup transaction removes at most
+256 events (4 MiB of raw output), yielding between transactions to capture and
+metadata work. Active generations and pending delivery receipts are protected.
+Deleting an archive preserves guest names and proposal/approval identities.
+
+**Reclaim disk space** physically shrinks storage and reports before/after bytes
+and elapsed time. First choose **Stop recording** for every terminal with
+recording enabled, including stopped terminals. The terminals themselves may
+continue running. During compaction new recording and ordinary sharing requests
+are refused; receipt processing remains owned by the storage worker. Pending
+delivery receipts and queued archive deletion block compaction. The operation
+continues even if the initiating browser disconnects.
+
+New databases use incremental auto-vacuum. Bounded background steps recover free
+pages after cleanup; explicit compaction also truncates the WAL. Upgrading a
+schema-1 database preserves history and keeps automatic cleanup disabled. Its
+first explicit compaction converts it to incremental vacuum; this may require
+twice the database size plus a 64 MiB margin in free disk space. The application
+checks space before converting. Schema 2 adds cleanup requests, policy and
+completion timestamps; older releases refuse sharing with this newer schema.
+
+**Automatic cleanup** is disabled by default. Saving an enabled policy explicitly
+confirms permanent deletion now and on future server runs. The policy accepts
+1–3,650 days from recording completion and 16–2,048 MiB of raw recorded output.
+The worker checks every minute and after a policy change, removing eligible
+finished recordings oldest first until both constraints are satisfied. Active
+recordings count toward the budget but are never automatically deleted, so they
+can keep usage above that budget. Database overhead and WAL are additional.
+Migrated finished recordings receive the upgrade time as their completion time,
+avoiding immediate age-based deletion when their original completion is unknown.
+The policy does not delete guest identities or proposal audit.
+
+Invitation, proposal and approval-attempt ledgers
 are separately capped at 16,384 records; exhausting a ledger refuses new
 records instead of evicting duplicate-request protection. **Sharing storage
 limits** shows counters and offers explicit cleanup of guest identities and

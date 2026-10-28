@@ -224,6 +224,27 @@ impl Drop for LifecycleMutationGuard {
 }
 
 impl SessionRegistry {
+    pub(crate) fn sharing_generation_probe(&self) -> crate::sharing_storage::ProtectionProbe {
+        let weak = Arc::downgrade(&self.inner);
+        Arc::new(move |terminal, generation| {
+            let (Ok(terminal), Ok(generation)) =
+                (Uuid::parse_str(terminal), Uuid::parse_str(generation))
+            else {
+                return true;
+            };
+            let Some(inner) = weak.upgrade() else {
+                return false;
+            };
+            let session = {
+                let Ok(state) = inner.state.try_lock() else {
+                    return true;
+                };
+                state.sessions.get(&terminal).cloned()
+            };
+            session.is_some_and(|session| session.protects_recording(generation))
+        })
+    }
+
     pub fn new(terminal_config: TerminalConfig) -> Self {
         Self::with_new_session_config(terminal_config.clone(), terminal_config)
     }
@@ -386,14 +407,22 @@ impl SessionRegistry {
         project_dir: Option<PathBuf>,
         store: crate::sharing_store::Store,
     ) -> Result<SessionSnapshot, RegistryError> {
+        let _admission = store
+            .recording_permit()
+            .map_err(|error| RegistryError::OperationFailed(error.into()))?;
         let session = self.reserve_session_in(requested_agent, project_dir)?;
         let snapshot = session.snapshot();
-        session.enable_recording(crate::sharing_store::Recorder::new(
-            store,
-            snapshot.terminal_id,
-            snapshot.name,
-            snapshot.agent.label().to_owned(),
-        ));
+        session
+            .enable_recording(
+                crate::sharing_store::Recorder::try_new(
+                    store,
+                    snapshot.terminal_id,
+                    snapshot.name,
+                    snapshot.agent.label().to_owned(),
+                )
+                .map_err(|error| RegistryError::OperationFailed(error.into()))?,
+            )
+            .map_err(|error| RegistryError::OperationFailed(error.into()))?;
         self.start_reserved_session(session).await
     }
 

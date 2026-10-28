@@ -42,9 +42,15 @@ pub struct Approval {
 
 #[derive(Clone)]
 pub struct Sharing {
-    store: Option<Store>,
+    storage: Arc<Mutex<SharingStorage>>,
     sessions: SessionRegistry,
     runtime: Arc<Runtime>,
+}
+struct SharingStorage {
+    store: Option<Store>,
+    error: Option<Error>,
+    directory: Option<std::path::PathBuf>,
+    repairing: bool,
 }
 struct Runtime {
     guests: Arc<Semaphore>,
@@ -100,8 +106,16 @@ pub struct Guest {
 
 impl Sharing {
     pub fn new(store: Option<Store>, sessions: SessionRegistry) -> Self {
+        if let Some(store) = &store {
+            store.bind_registry(&sessions);
+        }
         Self {
-            store,
+            storage: Arc::new(Mutex::new(SharingStorage {
+                store,
+                error: None,
+                directory: None,
+                repairing: false,
+            })),
             sessions,
             runtime: Arc::new(Runtime {
                 guests: Arc::new(Semaphore::new(64)),
@@ -117,7 +131,98 @@ impl Sharing {
         if self.runtime.closed.is_cancelled() {
             return Err(Error("sharing_closed"));
         }
-        self.store.clone().ok_or(Error("storage_unavailable"))
+        let storage = lock(&self.storage);
+        storage
+            .store
+            .clone()
+            .ok_or(storage.error.unwrap_or(Error("storage_unavailable")))
+    }
+
+    pub fn configure_storage(&self, directory: std::path::PathBuf, error: Option<Error>) {
+        let mut storage = lock(&self.storage);
+        storage.directory = Some(directory);
+        storage.error = error;
+    }
+
+    pub async fn storage_status(&self) -> Result<Value> {
+        let (store, error, repairing) = {
+            let storage = lock(&self.storage);
+            (storage.store.clone(), storage.error, storage.repairing)
+        };
+        let Some(store) = store else {
+            let code = error.unwrap_or(Error("storage_unavailable")).0;
+            return Ok(json!({"available":false,"code":code,"repairing":repairing,
+                "canRepair":cfg!(windows) && matches!(code,"unsafe_state_directory"|"unsafe_state_file")}));
+        };
+        let mut value = store.storage_usage().await?;
+        value["available"] = true.into();
+        Ok(value)
+    }
+
+    pub async fn repair_storage(&self) -> Result<()> {
+        if self.runtime.closed.is_cancelled() {
+            return Err(Error("sharing_closed"));
+        }
+        let directory = {
+            let mut storage = lock(&self.storage);
+            if storage.store.is_some() || storage.repairing {
+                return Err(Error("storage_busy"));
+            }
+            if !cfg!(windows)
+                || !storage
+                    .error
+                    .is_some_and(|e| matches!(e.0, "unsafe_state_directory" | "unsafe_state_file"))
+            {
+                return Err(Error("repair_unavailable"));
+            }
+            let directory = storage
+                .directory
+                .clone()
+                .ok_or(Error("repair_unavailable"))?;
+            storage.repairing = true;
+            directory
+        };
+        let sharing = self.clone();
+        tokio::spawn(async move {
+            let path = directory.clone();
+            let repaired = tokio::task::spawn_blocking(move || {
+                crate::sharing_store::repair_storage_permissions(&path)
+            })
+            .await
+            .map_err(|_| Error("storage_unavailable"))
+            .and_then(|result| result);
+            let opened = match repaired {
+                Ok(()) => Store::open(directory).await,
+                Err(error) => Err(error),
+            };
+            let mut storage = lock(&sharing.storage);
+            storage.repairing = false;
+            match opened {
+                Ok(store) => {
+                    if sharing.runtime.closed.is_cancelled() {
+                        return Err(Error("sharing_closed"));
+                    }
+                    store.bind_registry(&sharing.sessions);
+                    storage.store = Some(store);
+                    storage.error = None;
+                    Ok(())
+                }
+                Err(error) => {
+                    storage.error = Some(error);
+                    Err(error)
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error("storage_unavailable"))?
+    }
+
+    pub async fn flush_storage(&self) -> Result<()> {
+        let store = lock(&self.storage).store.clone();
+        if let Some(store) = store {
+            store.flush().await?;
+        }
+        Ok(())
     }
     pub fn check_attempt(&self, address: std::net::IpAddr) -> Result<()> {
         let mut failures = lock(&self.runtime.failures);
@@ -166,12 +271,12 @@ impl Sharing {
     pub fn record(&self, terminal: Uuid) -> Result<()> {
         let session = self.session(terminal)?;
         let snapshot = session.snapshot();
-        session.enable_recording(Recorder::new(
+        session.enable_recording(Recorder::try_new(
             self.store()?,
             terminal,
             snapshot.name,
             snapshot.agent.label().to_owned(),
-        ));
+        )?)?;
         Ok(())
     }
     pub fn stop_recording(&self, terminal: Uuid) -> Result<()> {
@@ -181,7 +286,7 @@ impl Sharing {
 
     pub async fn indicator(&self, terminal: Uuid) -> Result<Value> {
         let snapshot = self.session(terminal)?.snapshot();
-        let Some(store) = self.store.clone() else {
+        let Some(store) = lock(&self.storage).store.clone() else {
             return Ok(json!({"available":false}));
         };
         store.run(move |db| {
@@ -645,11 +750,9 @@ impl Sharing {
                 if !ended {
                     return Err(Error("recording_active"));
                 }
-                db.execute(
-                    "DELETE FROM generations WHERE id=?1",
-                    [generation.to_string()],
-                )?;
-                // SQLite reuses freed pages; the physical file need not shrink.
+                let pending:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM proposals WHERE generation=?1 AND state IN ('approving','queued'))",[generation.to_string()],|r|r.get(0))?;
+                if pending {return Err(Error("delivery_pending"));}
+                db.execute("INSERT OR IGNORE INTO archive_cleanup(generation) VALUES(?1)",[generation.to_string()])?;
                 Ok(())
             })
             .await

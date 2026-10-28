@@ -22,7 +22,7 @@ pub const ARCHIVE_GENERATION_LIMIT: u64 = 256 * 1024 * 1024;
 const ARCHIVE_TOTAL_LIMIT: i64 = 2 * 1024 * 1024 * 1024;
 const CAPTURE_QUEUE: usize = 16_384;
 const CAPTURE_BYTES: usize = 16 * 1024 * 1024;
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Error(pub &'static str);
@@ -63,6 +63,29 @@ pub struct Store {
     gaps: Arc<Mutex<HashMap<Uuid, Arc<AtomicBool>>>>,
     queued_bytes: Arc<AtomicUsize>,
     wake: SyncSender<()>,
+    pub(crate) directory: Arc<PathBuf>,
+    pub(crate) admission: Arc<Mutex<StorageAdmission>>,
+    protection: Arc<Mutex<Option<crate::sharing_storage::ProtectionProbe>>>,
+}
+
+#[derive(Default)]
+pub(crate) struct StorageAdmission {
+    pub recordings: usize,
+    pub maintenance: bool,
+}
+
+pub struct RecordingPermit(Arc<Mutex<StorageAdmission>>);
+impl Drop for RecordingPermit {
+    fn drop(&mut self) {
+        lock(&self.0).recordings -= 1;
+    }
+}
+
+struct MaintenancePermit(Arc<Mutex<StorageAdmission>>);
+impl Drop for MaintenancePermit {
+    fn drop(&mut self) {
+        lock(&self.0).maintenance = false;
+    }
 }
 
 impl Store {
@@ -97,6 +120,9 @@ impl Store {
         if version > SCHEMA_VERSION {
             return Err(Error("sharing_schema_too_new"));
         }
+        if version == 0 {
+            connection.pragma_update(None, "auto_vacuum", 2)?;
+        }
         connection.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
              PRAGMA journal_size_limit=67108864; PRAGMA wal_autocheckpoint=1000;",
@@ -110,6 +136,13 @@ impl Store {
         if version == 0 {
             let tx = connection.transaction()?;
             tx.execute_batch(SCHEMA)?;
+            tx.pragma_update(None, "user_version", 1)?;
+            tx.commit()?;
+        }
+        if version < 2 {
+            let tx = connection.transaction()?;
+            tx.execute_batch(crate::sharing_storage::MIGRATION)?;
+            tx.execute("UPDATE generations SET ended_at=?1 WHERE ended=1", [now()])?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
         }
@@ -120,9 +153,13 @@ impl Store {
              UPDATE proposals SET state='invalidated', reason='server_restart' WHERE state='pending';
              UPDATE proposals SET state='uncertain', reason='server_restart' WHERE state IN ('approving','queued');
              UPDATE approval_attempts SET outcome='uncertain' WHERE outcome='intent';
-             UPDATE generations SET ended=1,incomplete=1 WHERE ended=0;"
+             UPDATE generations SET ended=1,incomplete=1,ended_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE ended=0;"
         )?;
         let (commands, command_rx) = mpsc::sync_channel::<Job>(128);
+        connection
+            .execute_batch("CREATE TEMP TABLE live_recording_generations(id TEXT PRIMARY KEY);")?;
+        let protection = Arc::new(Mutex::new(None));
+        let worker_protection = protection.clone();
         let (captures, capture_rx) = mpsc::sync_channel::<CaptureMessage>(CAPTURE_QUEUE);
         let (wake, wake_rx) = mpsc::sync_channel::<()>(1);
         let healthy = Arc::new(AtomicBool::new(true));
@@ -135,6 +172,7 @@ impl Store {
             .name("sharing-db".into())
             .spawn(move || {
                 let _lease = lease;
+                let mut last_retention = std::time::Instant::now() - Duration::from_secs(60);
                 loop {
                     let had_job = match command_rx.try_recv() {
                         Ok(job) => {
@@ -144,6 +182,32 @@ impl Store {
                         Err(mpsc::TryRecvError::Disconnected) => break,
                         Err(mpsc::TryRecvError::Empty) => false,
                     };
+                    let protected = crate::sharing_storage::refresh_protection(
+                        &mut connection,
+                        lock(&worker_protection).clone(),
+                    )
+                    .is_ok();
+                    if !protected {
+                        health.store(false, Ordering::Release);
+                    }
+                    if protected && last_retention.elapsed() >= Duration::from_secs(60) {
+                        if crate::sharing_storage::retention(&mut connection).is_err() {
+                            health.store(false, Ordering::Release);
+                        }
+                        last_retention = std::time::Instant::now();
+                    }
+                    let cleanup = if protected {
+                        crate::sharing_storage::cleanup_step(&mut connection)
+                    } else {
+                        Err(Error("storage_unavailable"))
+                    };
+                    if cleanup.is_err() {
+                        health.store(false, Ordering::Release);
+                    }
+                    let compact = crate::sharing_storage::compact_step(&connection);
+                    if compact.is_err() {
+                        health.store(false, Ordering::Release);
+                    }
                     // A dropped final capture has no later event to carry its gap flag.
                     // Keep bounded out-of-band flags until SQLite acknowledges them.
                     let pending_gaps: Vec<_> = lock(&known_gaps)
@@ -171,8 +235,11 @@ impl Store {
                     if batch.is_empty() {
                         // Producers coalesce wakeups. Recheck both queues after
                         // consuming a wake, so a send racing this wait is safe.
-                        if !had_job && wake_rx.recv().is_err() {
-                            break;
+                        if !had_job && !cleanup.unwrap_or(false) {
+                            match wake_rx.recv_timeout(Duration::from_secs(1)) {
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            }
                         }
                         continue;
                     }
@@ -229,6 +296,9 @@ impl Store {
             gaps,
             queued_bytes,
             wake,
+            directory: Arc::new(directory.to_path_buf()),
+            admission: Arc::new(Mutex::new(StorageAdmission::default())),
+            protection,
         })
     }
 
@@ -238,12 +308,21 @@ impl Store {
         operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let (sender, receiver) = oneshot::channel();
-        self.commands
-            .try_send(Box::new(move |db| {
-                let result = operation(db);
-                let _ = sender.send(result);
-            }))
-            .map_err(|_| Error("storage_busy"))?;
+        let protection = self.protection.clone();
+        {
+            let admission = lock(&self.admission);
+            if admission.maintenance {
+                return Err(Error("storage_maintenance"));
+            }
+            self.commands
+                .try_send(Box::new(move |db| {
+                    let result =
+                        crate::sharing_storage::refresh_protection(db, lock(&protection).clone())
+                            .and_then(|_| operation(db));
+                    let _ = sender.send(result);
+                }))
+                .map_err(|_| Error("storage_busy"))?;
+        }
         self.notify();
         receiver.await.map_err(|_| Error("storage_unavailable"))?
     }
@@ -257,10 +336,14 @@ impl Store {
         let (sender, receiver) = oneshot::channel();
         let commands = self.commands.clone();
         let wake = self.wake.clone();
+        let protection = self.protection.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             commands
                 .send(Box::new(move |db| {
-                    let _ = sender.send(operation(db));
+                    let result =
+                        crate::sharing_storage::refresh_protection(db, lock(&protection).clone())
+                            .and_then(|_| operation(db));
+                    let _ = sender.send(result);
                 }))
                 .map_err(|_| Error("storage_unavailable"))?;
             let _ = wake.try_send(());
@@ -283,6 +366,77 @@ impl Store {
         self.healthy.load(Ordering::Acquire)
     }
 
+    pub fn recording_permit(&self) -> Result<RecordingPermit> {
+        let mut admission = lock(&self.admission);
+        if admission.maintenance {
+            return Err(Error("storage_maintenance"));
+        }
+        admission.recordings += 1;
+        Ok(RecordingPermit(self.admission.clone()))
+    }
+
+    pub fn bind_registry(&self, registry: &crate::registry::SessionRegistry) {
+        *lock(&self.protection) = Some(registry.sharing_generation_probe());
+    }
+
+    pub async fn storage_usage(&self) -> Result<serde_json::Value> {
+        let directory = self.directory.clone();
+        let (recordings, maintenance) = {
+            let admission = lock(&self.admission);
+            (admission.recordings, admission.maintenance)
+        };
+        self.run_critical(move |db| {
+            let mut value = serde_json::to_value(crate::sharing_storage::usage(db, &directory)?)
+                .map_err(|_| Error("storage_unavailable"))?;
+            value["recordingEnabledCount"] = recordings.into();
+            value["maintenance"] = maintenance.into();
+            Ok(value)
+        })
+        .await
+    }
+
+    pub async fn compact(&self) -> Result<serde_json::Value> {
+        let permit = {
+            let mut admission = lock(&self.admission);
+            if admission.maintenance {
+                return Err(Error("storage_maintenance"));
+            }
+            if admission.recordings != 0 {
+                return Err(Error("recording_enabled"));
+            }
+            admission.maintenance = true;
+            MaintenancePermit(self.admission.clone())
+        };
+        let store = self.clone();
+        // Maintenance is cancellation-owned. Browser disconnects cannot release
+        // admission while a database operation is still running.
+        tokio::spawn(async move {
+            store.flush().await?;
+            let directory = store.directory.clone();
+            store.run_critical(move |db| {
+                let _permit = permit;
+                let pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM proposals WHERE state IN ('approving','queued'))",[],|r|r.get(0))?;
+                if pending { return Err(Error("delivery_pending")); }
+                let queued: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM archive_cleanup)",[],|r|r.get(0))?;
+                if queued { return Err(Error("cleanup_pending")); }
+                let before = crate::sharing_storage::usage(db, &directory)?;
+                let started = std::time::Instant::now();
+                if !before.incremental_compaction {
+                    let required = before.database_bytes.saturating_mul(2).saturating_add(64 * 1024 * 1024);
+                    if before.free_disk_bytes < required { return Err(Error("insufficient_disk_space")); }
+                    db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; VACUUM;")?;
+                } else {
+                    db.execute_batch("PRAGMA incremental_vacuum;")?;
+                }
+                let (busy,_,_):(i64,i64,i64) = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+                if busy != 0 { return Err(Error("storage_busy")); }
+                let after = crate::sharing_storage::usage(db, &directory)?;
+                Ok(serde_json::json!({"beforeBytes":before.disk_bytes,"afterBytes":after.disk_bytes,
+                    "reclaimedBytes":before.disk_bytes.saturating_sub(after.disk_bytes),"elapsedMs":started.elapsed().as_millis()}))
+            }).await
+        }).await.map_err(|_|Error("storage_unavailable"))?
+    }
+
     pub async fn flush(&self) -> Result<()> {
         // Ordered with capture itself, not the independent metadata queue.
         let (sender, receiver) = oneshot::channel();
@@ -298,6 +452,19 @@ impl Store {
         .await
         .map_err(|_| Error("storage_unavailable"))??;
         receiver.await.map_err(|_| Error("storage_unavailable"))?
+    }
+}
+
+pub fn repair_storage_permissions(directory: &Path) -> Result<()> {
+    crate::workspaces::prepare_state_directory_sync(directory)
+        .map_err(|_| Error("unsafe_state_directory"))?;
+    #[cfg(windows)]
+    {
+        crate::windows_private_storage::repair(directory)
+    }
+    #[cfg(not(windows))]
+    {
+        Err(Error("repair_unavailable"))
     }
 }
 
@@ -490,6 +657,7 @@ struct RecorderInner {
     generations: Mutex<HashMap<Uuid, CaptureState>>,
     capacity_exceeded: AtomicBool,
     enabled: AtomicBool,
+    permit: Mutex<Option<RecordingPermit>>,
 }
 struct CaptureState {
     sequence: i64,
@@ -515,8 +683,13 @@ struct Capture {
     incomplete: Arc<AtomicBool>,
 }
 impl Recorder {
+    #[cfg(test)]
     pub fn new(store: Store, terminal: Uuid, label: String, agent: String) -> Self {
-        Self {
+        Self::try_new(store, terminal, label, agent).expect("recording admitted")
+    }
+    pub fn try_new(store: Store, terminal: Uuid, label: String, agent: String) -> Result<Self> {
+        let permit = store.recording_permit()?;
+        Ok(Self {
             inner: Arc::new(RecorderInner {
                 store,
                 terminal,
@@ -525,8 +698,9 @@ impl Recorder {
                 generations: Mutex::new(HashMap::new()),
                 capacity_exceeded: AtomicBool::new(false),
                 enabled: AtomicBool::new(true),
+                permit: Mutex::new(Some(permit)),
             }),
-        }
+        })
     }
     pub fn begin(&self, generation: Uuid, cols: u16, rows: u16, partial: bool) {
         if !self.enabled() {
@@ -556,10 +730,10 @@ impl Recorder {
         self.capture_locked(&mut states, generation, "start", Bytes::new(), cols, rows);
     }
     pub fn output(&self, generation: Uuid, data: &[u8]) {
+        let mut states = lock(&self.inner.generations);
         if !self.enabled() {
             return;
         }
-        let mut states = lock(&self.inner.generations);
         for part in data.chunks(16 * 1024) {
             self.capture_locked(
                 &mut states,
@@ -572,17 +746,11 @@ impl Recorder {
         }
     }
     pub fn geometry(&self, generation: Uuid, cols: u16, rows: u16) {
+        let mut states = lock(&self.inner.generations);
         if !self.enabled() {
             return;
         }
-        self.capture_locked(
-            &mut lock(&self.inner.generations),
-            generation,
-            "resize",
-            Bytes::new(),
-            cols,
-            rows,
-        );
+        self.capture_locked(&mut states, generation, "resize", Bytes::new(), cols, rows);
     }
     pub fn end(&self, generation: Uuid) {
         self.capture_locked(
@@ -604,17 +772,21 @@ impl Recorder {
         self.inner.enabled.load(Ordering::Acquire)
     }
     pub fn pause(&self) {
+        let states = lock(&self.inner.generations);
         self.inner.enabled.store(false, Ordering::Release);
-        for state in lock(&self.inner.generations)
-            .values()
-            .filter(|state| !state.ended)
-        {
+        for state in states.values().filter(|state| !state.ended) {
             state.incomplete.store(true, Ordering::Release);
         }
+        lock(&self.inner.permit).take();
         self.inner.store.notify();
     }
-    pub fn resume(&self) {
+    pub fn resume(&self) -> Result<()> {
+        let mut permit = lock(&self.inner.permit);
+        if permit.is_none() {
+            *permit = Some(self.inner.store.recording_permit()?);
+        }
         self.inner.enabled.store(true, Ordering::Release);
+        Ok(())
     }
     pub fn incomplete(&self, generation: Option<Uuid>) -> bool {
         self.inner.capacity_exceeded.load(Ordering::Acquire)
@@ -736,13 +908,14 @@ impl Capture {
         )?;
         db.execute(
             "UPDATE generations SET last_event=?2,bytes=bytes+?3,incomplete=MAX(incomplete,?4),
-             ended=MAX(ended,?5) WHERE id=?1",
+             ended=MAX(ended,?5),ended_at=CASE WHEN ?5 THEN ?6 ELSE ended_at END WHERE id=?1",
             params![
                 generation,
                 self.sequence,
                 self.data.len() as i64,
                 gap,
-                self.kind == "end"
+                self.kind == "end",
+                self.at
             ],
         )?;
         *total += self.data.len() as i64;
@@ -767,7 +940,7 @@ pub struct ArchiveGeneration {
 pub fn generations(db: &Connection, terminal: Option<String>) -> Result<Vec<ArchiveGeneration>> {
     let mut query = db.prepare(
         "SELECT id,terminal,label,agent,created,bytes,incomplete,ended,cols,rows FROM generations
-         WHERE (?1 IS NULL OR terminal=?1) ORDER BY created DESC LIMIT 256",
+         WHERE (?1 IS NULL OR terminal=?1) AND id NOT IN (SELECT generation FROM archive_cleanup) ORDER BY created DESC LIMIT 256",
     )?;
     Ok(query
         .query_map([terminal], |r| {
@@ -789,7 +962,7 @@ pub fn generations(db: &Connection, terminal: Option<String>) -> Result<Vec<Arch
 pub fn archive_events(db: &Connection, generation: &str, after: i64) -> Result<serde_json::Value> {
     use base64::Engine;
     let exists: Option<i64> = db
-        .query_row("SELECT 1 FROM generations WHERE id=?1", [generation], |r| {
+        .query_row("SELECT 1 FROM generations WHERE id=?1 AND id NOT IN (SELECT generation FROM archive_cleanup)", [generation], |r| {
             r.get(0)
         })
         .optional()?;
@@ -854,6 +1027,55 @@ CREATE TABLE approval_attempts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_new_state_is_private_under_a_broad_parent_and_repair_preserves_files() {
+        use std::os::windows::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        let changed = std::process::Command::new("icacls.exe")
+            .arg(root.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)R"])
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(changed.status.success());
+        let directory = root.path().join("new-state");
+        let store = Store::open(directory.clone()).await.unwrap();
+        store.flush().await.unwrap();
+        windows_privacy::check(&directory).unwrap();
+        let legacy = root.path().join("legacy-state");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("workspaces.json"), b"preserved workspace data").unwrap();
+        std::fs::write(legacy.join("sharing.sqlite3"), b"preserved database bytes").unwrap();
+        assert!(matches!(
+            Store::open(legacy.clone()).await,
+            Err(Error("unsafe_state_directory"))
+        ));
+        repair_storage_permissions(&legacy).unwrap();
+        windows_privacy::check(&legacy).unwrap();
+        check_file(&legacy.join("sharing.sqlite3")).unwrap();
+        assert_eq!(
+            std::fs::read(legacy.join("workspaces.json")).unwrap(),
+            b"preserved workspace data"
+        );
+        assert_eq!(
+            std::fs::read(legacy.join("sharing.sqlite3")).unwrap(),
+            b"preserved database bytes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_repair_refuses_a_store_owned_by_another_running_server() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("state");
+        let _store = Store::open(directory.clone()).await.unwrap();
+        assert!(matches!(
+            repair_storage_permissions(&directory),
+            Err(Error("sharing_store_in_use"))
+        ));
+    }
 
     #[cfg(windows)]
     #[tokio::test]
@@ -972,7 +1194,7 @@ mod tests {
         recorder.output(generation, b"public");
         recorder.pause();
         recorder.output(generation, b"private");
-        recorder.resume();
+        recorder.resume().unwrap();
         recorder.begin(generation, 80, 24, true);
         recorder.output(generation, b"again");
         recorder.end(generation);

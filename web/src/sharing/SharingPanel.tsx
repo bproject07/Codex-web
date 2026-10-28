@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Archive } from "./Archive";
+import { StoragePanel } from "./StoragePanel";
 import { request, displayError, newId, proposalState, singleLine, validProposal, textBytes, TEXT_LIMIT, SharingError, type OwnerView, type Proposal } from "./api";
 
 export function SharingPanel({ token, terminalId, label, onClose }: {
@@ -13,6 +14,7 @@ export function SharingPanel({ token, terminalId, label, onClose }: {
   const [link, setLink] = useState("");
   const [address, setAddress] = useState(window.location.origin);
   const [history, setHistory] = useState(false);
+  const [storage, setStorage] = useState(false);
   const epoch = useRef(0);
   const action = useRef(false);
   const base = "/api/sessions/" + terminalId + "/sharing";
@@ -60,13 +62,15 @@ export function SharingPanel({ token, terminalId, label, onClose }: {
     <header className="share-heading"><h2 id="sharing-title">Share · {label}</h2>
       <button type="button" autoFocus aria-label="Close sharing" onClick={onClose}>Close</button></header>
     <nav className="share-actions" aria-label="Sharing views">
-      <button aria-pressed={!history} onClick={() => setHistory(false)}>Guests and proposals</button>
-      <button aria-pressed={history} onClick={() => setHistory(true)}>Recorded history</button>
+      <button aria-pressed={!history && !storage} onClick={() => { setStorage(false); setHistory(false); }}>Guests and proposals</button>
+      <button aria-pressed={history && !storage} onClick={() => { setStorage(false); setHistory(true); }}>Recorded history</button>
+      <button aria-pressed={storage} onClick={() => setStorage(true)}>Storage</button>
     </nav>
-    {error && <p className="share-error" role="alert">{error}</p>}
-    {history ? <Archive token={token} /> : <>
+    {error && !storage && <p className="share-error" role="alert">{error}</p>}
+    {storage ? <StoragePanel token={token} onRepaired={() => { setError(""); void refresh().catch((err: unknown) => setError(displayError(err))); }} /> : history ? <Archive token={token} /> : <>
       <p>Guests see this terminal and its recorded history. Creating an invitation records terminal output on this server.
         A terminal restart ends guest access; saved history remains available to you. Recording continues across restarts until you stop it.</p>
+      {view?.recording && <p role="status"><strong>Recording is on.</strong> Output is saved even when no guests are connected. Use Stop recording to pause storage growth.</p>}
       {view?.archiveIncomplete && <p role="status">The recording is incomplete or began after this terminal started.</p>}
       <div className="share-actions">
         <label>Address guests can reach <input value={address} type="url"

@@ -12,6 +12,7 @@ pub mod routes;
 pub mod session;
 pub mod sharing;
 pub mod sharing_routes;
+pub mod sharing_storage;
 pub mod sharing_store;
 pub mod terminal;
 pub mod transfer;
@@ -21,4 +22,6 @@ pub mod update_fs;
 pub mod update_manifest;
 pub mod updater;
 pub mod websocket;
+#[cfg(windows)]
+pub(crate) mod windows_private_storage;
 pub mod workspaces;

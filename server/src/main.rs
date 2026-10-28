@@ -185,16 +185,19 @@ async fn run(
                 config.state_dir.display()
             )
         })?;
+    let mut sharing_error = None;
     let sharing_store =
         match codex_web_terminal::sharing_store::Store::open(config.state_dir.clone()).await {
             Ok(store) => Some(store),
             Err(error) => {
+                sharing_error = Some(error);
                 tracing::error!(code = error.0, "session sharing storage is unavailable");
                 None
             }
         };
     let sharing =
         codex_web_terminal::sharing::Sharing::new(sharing_store.clone(), sessions.clone());
+    sharing.configure_storage(config.state_dir.clone(), sharing_error);
     let (update_tx, mut update_rx) = mpsc::channel(1);
     let (restart_tx, mut restart_rx) = mpsc::channel(1);
     let updates = UpdateManager::new(config.state_dir.clone(), config.update_policy, update_tx)?;
@@ -304,9 +307,7 @@ async fn run(
     .await;
 
     sharing.drain_receipts().await;
-    if let Some(store) = sharing_store {
-        let _ = store.flush().await;
-    }
+    let _ = sharing.flush_storage().await;
 
     match stop_cause {
         StopCause::Signal(signal) => {

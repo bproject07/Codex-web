@@ -539,7 +539,12 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
     builder.create(path)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    crate::windows_private_storage::create_directory(path)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn create_private_directory(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir(path)
 }

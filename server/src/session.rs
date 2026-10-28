@@ -562,15 +562,15 @@ impl SessionManager {
         )
     }
 
-    pub fn enable_recording(&self, recorder: Recorder) {
+    pub fn enable_recording(&self, recorder: Recorder) -> crate::sharing_store::Result<()> {
         let record = lock(&self.inner.record);
         let output = lock(&self.inner.output);
         let mut current = lock(&self.inner.recorder);
         if let Some(existing) = current.as_ref() {
             if existing.enabled() {
-                return;
+                return Ok(());
             }
-            existing.resume();
+            existing.resume()?;
             if let Some(generation) = record.session_id {
                 // Retain sequence numbers; never backfill the private pause.
                 existing.begin(generation, record.cols, record.rows, true);
@@ -579,7 +579,7 @@ impl SessionManager {
                     existing.end(generation);
                 }
             }
-            return;
+            return Ok(());
         }
         if let Some(generation) = record.session_id {
             recorder.begin(generation, record.cols, record.rows, true);
@@ -591,6 +591,7 @@ impl SessionManager {
             }
         }
         *current = Some(recorder);
+        Ok(())
     }
 
     pub fn pause_recording(&self) {
@@ -657,6 +658,19 @@ impl SessionManager {
         drop(record);
         self.notify_event();
         Ok(())
+    }
+
+    pub(crate) fn protects_recording(&self, generation: Uuid) -> bool {
+        // Cleanup must never wait for a native lifecycle operation. Uncertainty
+        // protects history until a later actor iteration can inspect it.
+        let Ok(record) = self.inner.record.try_lock() else {
+            return true;
+        };
+        record.session_id == Some(generation)
+            && matches!(
+                record.machine.state(),
+                Lifecycle::Starting | Lifecycle::Running | Lifecycle::Terminating
+            )
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
@@ -1630,12 +1644,14 @@ mod tests {
             Box::new(std::io::Cursor::new(b"final")),
         );
         assert_eq!(manager.snapshot().status, Lifecycle::Running);
-        manager.enable_recording(Recorder::new(
-            store.clone(),
-            Uuid::new_v4(),
-            "Fixture".into(),
-            "Codex".into(),
-        ));
+        manager
+            .enable_recording(Recorder::new(
+                store.clone(),
+                Uuid::new_v4(),
+                "Fixture".into(),
+                "Codex".into(),
+            ))
+            .unwrap();
         store.flush().await.unwrap();
         store
             .run(|db| {

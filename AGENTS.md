@@ -406,6 +406,16 @@ Linux in addition to the normal frontend, Rust, and package checks.
   Renewing a grant revokes its predecessor without changing the guest's name.
 - Changes require `scripts/sharing-regression.py --browser` on Windows and
   Linux, alongside peer, transfer, output-flow and normal Rust/frontend checks.
+- Sharing storage changes also require `scripts/sharing-storage-regression.py
+  --browser --report storage-metrics.json` on Windows and Linux. Preserve exact
+  retained bytes, preview-bound cleanup, durable deletion requests, bounded actor
+  batches and guest/approval ledgers. Automatic retention is opt-in and uses
+  completion age; live generations and pending receipts are never eligible.
+  Maintenance admission must exclude enabled recorders and new sharing mutations
+  while retaining ownership of receipt persistence and HTTP-cancelled work.
+  Windows creates new state directories with private ACLs; existing ACL repair
+  is an explicit owner action restricted to the validated configured directory
+  and fixed sharing files. Refuse untrusted owners, links and another store lease.
 
 ## Transfer invariants
 

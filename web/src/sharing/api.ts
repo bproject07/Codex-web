@@ -48,8 +48,34 @@ const errors: Record<string, string> = {
   confirm_empty_prompt: "Confirm that the agent is waiting at an empty prompt.",
   storage_unavailable: "Sharing storage is unavailable. Terminal sessions continue running.",
   storage_busy: "Sharing storage is busy. Refresh the status before retrying.",
+  unsafe_state_directory: "The server's data folder permissions are not private. Open Storage to repair Windows permissions.",
+  unsafe_state_file: "A sharing database file has unsafe permissions or is a link. Open Storage for recovery options.",
+  sharing_store_in_use: "Another server is using this sharing database. Each server needs its own data folder.",
+  sharing_schema_too_new: "This sharing database requires a newer application version.",
+  storage_maintenance: "Sharing storage maintenance is running. Terminal sessions continue running.",
+  permissions_repair_failed: "Windows refused the permission repair. Check the server account's access to its data folder.",
+  permissions_owner_mismatch: "The data folder or a database file belongs to another account. Ask the server administrator to check ownership.",
+  repair_unavailable: "Automatic permission repair is unavailable for this storage problem.",
+  recording_enabled: "Choose Stop recording on every recorded terminal before reclaiming disk space. Terminals can keep running.",
+  delivery_pending: "A proposal delivery is still awaiting its receipt. Retry after it settles.",
+  cleanup_pending: "Recording deletion is still running. Wait for it to finish before reclaiming space.",
+  cleanup_changed: "The eligible recordings changed. Preview cleanup again before deleting.",
+  insufficient_disk_space: "There is not enough temporary disk space to compact this older database safely.",
+  invalid_storage_policy: "Choose 1–3650 days and a recording budget between 16 and 2048 MiB.",
   recording_active: "Stop the terminal and wait for its final output before deleting this recording.",
 };
+
+export interface StoragePolicy { enabled: boolean; retentionDays: number; maxBytes: number }
+export interface StorageUsage {
+  available: boolean; code?: string; canRepair?: boolean; repairing?: boolean;
+  databaseBytes: number; walBytes: number; sharedMemoryBytes: number; diskBytes: number;
+  reusableBytes: number; archiveBytes: number; recordings: number; cleanupPending: number;
+  recordingEnabledCount: number; maintenance: boolean; freeDiskBytes: number;
+  incrementalCompaction: boolean; policy: StoragePolicy;
+}
+export interface CleanupFilter { olderThanDays?: number; generations?: string[] }
+export interface CleanupPreview { count: number; bytes: number; fingerprint: string }
+export interface CompactionResult { beforeBytes: number; afterBytes: number; reclaimedBytes: number; elapsedMs: number }
 export class SharingError extends Error {
   constructor(public code: string, public status: number) {
     super(errors[code] ?? code.replaceAll("_", " "));

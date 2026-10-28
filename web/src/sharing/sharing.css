@@ -49,3 +49,8 @@
   .share-proposal { padding: 12px; }
   .share-actions > label { flex: 1 1 100%; }
 }
+.storage-sizes { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .4rem 1rem; }
+.storage-sizes dt, .storage-sizes dd { margin: 0; overflow-wrap: anywhere; }
+.sharing-storage h4 { margin: 1.25rem 0 .5rem; }
+.sharing-storage select[multiple] { min-width: min(26rem, 100%); max-width: 100%; }
+.sharing-storage input[type="number"] { width: 9rem; }

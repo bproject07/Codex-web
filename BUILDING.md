@@ -583,6 +583,29 @@ The public Windows release is MSVC. A local GNU fallback build has a different
 target dependency graph and is not approved for redistribution by the MSVC
 bundle.
 
+## Sharing storage efficiency validation
+
+`scripts/sharing-storage-regression.py --server <packaged-binary> --browser
+--report storage-metrics.json` runs in CI and release validation on Windows and
+Linux. It creates a disposable legacy schema-1 database containing 128 MiB of
+removable raw output and 8 MiB of retained bytes. The check requires:
+
+- at least 70% physical database size reduction and over 64 MiB reclaimed;
+- exact SHA-256 preservation of the retained raw bytes and SQLite integrity;
+- unchanged live PTY identity, with measured input/output latency during cleanup
+  and compaction (maximum below the larger of 2 seconds or 20 times baseline);
+- preview identity checking, authentication, recording admission, policy validation
+  and persistence, and preservation of reserved guest names;
+- Windows ACL recovery on an existing database without restarting the live PTY;
+- mobile browser preview/cancel behavior and disabled-by-default retention.
+
+The regression prints only synthetic aggregate metrics; it never emits the
+server log or credentials. CI saves JSON measurements as `storage-efficiency-*`
+artifacts. Rust tests also cover cleanup batch limits, active-generation and
+pending-receipt protection, retention age and budget, recording/maintenance
+admission, and private Windows directory creation under a broadly readable parent.
+Use dedicated ports/state and synthetic fixtures for every run.
+
 ## Maintainer release workflow
 
 `.github/workflows/release.yml` has a non-publishing `workflow_dispatch` dry

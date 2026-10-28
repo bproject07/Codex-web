@@ -29,16 +29,23 @@ impl IntoResponse for Error {
             "access_denied" | "awaiting_admission" | "view_only" => StatusCode::FORBIDDEN,
             "not_found" => StatusCode::NOT_FOUND,
             "rate_limited" | "connection_limit" => StatusCode::TOO_MANY_REQUESTS,
-            "storage_unavailable" | "storage_busy" | "sharing_closed" => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            "storage_unavailable"
+            | "storage_busy"
+            | "sharing_closed"
+            | "unsafe_state_directory"
+            | "unsafe_state_file"
+            | "sharing_store_in_use"
+            | "sharing_schema_too_new"
+            | "storage_maintenance" => StatusCode::SERVICE_UNAVAILABLE,
             "invalid_mode"
             | "invalid_name"
             | "invalid_proposal"
             | "invalid_body"
             | "invalid_cursor"
             | "single_line_only"
-            | "confirm_empty_prompt" => StatusCode::BAD_REQUEST,
+            | "confirm_empty_prompt"
+            | "invalid_storage_policy"
+            | "confirmation_required" => StatusCode::BAD_REQUEST,
             _ => StatusCode::CONFLICT,
         };
         (
@@ -50,6 +57,15 @@ impl IntoResponse for Error {
 }
 pub fn owner_router() -> Router<AppState> {
     Router::new()
+        .route("/api/sharing/storage", get(storage_status))
+        .route("/api/sharing/storage/repair", post(repair_storage))
+        .route("/api/sharing/storage/compact", post(compact_storage))
+        .route("/api/sharing/storage/policy", post(storage_policy))
+        .route(
+            "/api/sharing/storage/cleanup/preview",
+            post(cleanup_preview),
+        )
+        .route("/api/sharing/storage/cleanup", post(cleanup_storage))
         .route(
             "/api/sessions/{id}/sharing",
             get(owner_view).delete(revoke_all),
@@ -150,6 +166,87 @@ async fn owner_view(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
     Ok(Json(state.sharing.owner_view(id).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Confirmation {
+    confirm: bool,
+}
+
+async fn storage_status(State(state): State<AppState>) -> Result<Json<serde_json::Value>> {
+    Ok(Json(state.sharing.storage_status().await?))
+}
+
+async fn repair_storage(State(state): State<AppState>, body: Bytes) -> Result<StatusCode> {
+    if !parse::<Confirmation>(&body)?.confirm {
+        return Err(Error("confirmation_required"));
+    }
+    state.sharing.repair_storage().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn compact_storage(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>> {
+    if !parse::<Confirmation>(&body)?.confirm {
+        return Err(Error("confirmation_required"));
+    }
+    Ok(Json(state.sharing.store()?.compact().await?))
+}
+
+async fn storage_policy(State(state): State<AppState>, body: Bytes) -> Result<StatusCode> {
+    let policy: crate::sharing_storage::Policy = parse(&body)?;
+    state
+        .sharing
+        .store()?
+        .run(move |db| {
+            crate::sharing_storage::save_policy(db, &policy)?;
+            crate::sharing_storage::retention(db)
+        })
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn cleanup_preview(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<crate::sharing_storage::CleanupPreview>> {
+    let filter: crate::sharing_storage::CleanupFilter = parse(&body)?;
+    Ok(Json(
+        state
+            .sharing
+            .store()?
+            .run(move |db| crate::sharing_storage::preview(db, &filter))
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CleanupRequest {
+    filter: crate::sharing_storage::CleanupFilter,
+    fingerprint: String,
+}
+
+async fn cleanup_storage(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<crate::sharing_storage::CleanupPreview>> {
+    let request: CleanupRequest = parse(&body)?;
+    if request.fingerprint.len() != 64 {
+        return Err(Error("invalid_body"));
+    }
+    Ok(Json(
+        state
+            .sharing
+            .store()?
+            .run(move |db| {
+                crate::sharing_storage::enqueue_cleanup(db, &request.filter, &request.fingerprint)
+            })
+            .await?,
+    ))
 }
 async fn record(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<StatusCode> {
     state.sharing.record(id)?;
