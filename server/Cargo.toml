@@ -25,7 +25,7 @@ hyper = { version = "1.7", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 portable-pty = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

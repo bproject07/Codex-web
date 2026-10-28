@@ -742,7 +742,10 @@ pages after cleanup; explicit compaction also truncates the WAL. Upgrading a
 schema-1 database preserves history and keeps automatic cleanup disabled. Its
 first explicit compaction converts it to incremental vacuum; this may require
 twice the database size plus a 64 MiB margin in free disk space. The application
-checks space before converting. Schema 2 adds cleanup requests, policy and
+checks space before converting. The conversion copy stays in the private state
+directory and SQLite commits its replacement transactionally. An interrupted
+copy is discarded under the exclusive store lease on the next startup.
+Schema 2 adds cleanup requests, policy and
 completion timestamps; older releases refuse sharing with this newer schema.
 
 **Automatic cleanup** is disabled by default. Saving an enabled policy explicitly

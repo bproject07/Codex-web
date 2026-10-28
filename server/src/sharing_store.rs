@@ -105,6 +105,7 @@ impl Store {
         lease
             .try_lock_exclusive()
             .map_err(|_| Error("sharing_store_in_use"))?;
+        remove_compaction_copy(directory)?;
         drop(private_file(&database)?);
         for suffix in ["sharing.sqlite3-wal", "sharing.sqlite3-shm"] {
             let path = directory.join(suffix);
@@ -125,7 +126,8 @@ impl Store {
         }
         connection.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
-             PRAGMA journal_size_limit=67108864; PRAGMA wal_autocheckpoint=1000;",
+             PRAGMA journal_size_limit=67108864; PRAGMA wal_autocheckpoint=1000;
+             PRAGMA temp_store=MEMORY;",
         )?;
         let page_size: i64 = connection.pragma_query_value(None, "page_size", |r| r.get(0))?;
         connection.pragma_update(
@@ -424,7 +426,7 @@ impl Store {
                 if !before.incremental_compaction {
                     let required = before.database_bytes.saturating_mul(2).saturating_add(64 * 1024 * 1024);
                     if before.free_disk_bytes < required { return Err(Error("insufficient_disk_space")); }
-                    db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; VACUUM;")?;
+                    compact_legacy(db, &directory)?;
                 } else {
                     db.execute_batch("PRAGMA incremental_vacuum;")?;
                 }
@@ -453,6 +455,60 @@ impl Store {
         .map_err(|_| Error("storage_unavailable"))??;
         receiver.await.map_err(|_| Error("storage_unavailable"))?
     }
+}
+
+const COMPACTION_COPY: &str = "sharing.compact.sqlite3";
+
+fn remove_compaction_copy(directory: &Path) -> Result<()> {
+    // Only our fixed scratch file, while holding the exclusive store lease.
+    // Never follow a link or remove an operator-owned/unprotected file.
+    let path = directory.join(COMPACTION_COPY);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {
+            check_file(&path)?;
+            std::fs::remove_file(path).map_err(|_| Error("storage_unavailable"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(Error("unsafe_state_file")),
+    }
+    Ok(())
+}
+
+fn compact_legacy(db: &mut Connection, directory: &Path) -> Result<()> {
+    // Plain VACUUM can spill a complete recording into the operating system's
+    // temporary directory. Keep the copy private and let SQLite's backup
+    // transaction replace the original without closing it or renaming WAL files.
+    remove_compaction_copy(directory)?;
+    let path = directory.join(COMPACTION_COPY);
+    drop(private_file(&path)?);
+    struct Scratch<'a>(&'a Path);
+    impl Drop for Scratch<'_> {
+        fn drop(&mut self) {
+            let _ = remove_compaction_copy(self.0);
+        }
+    }
+    let _scratch = Scratch(directory);
+    db.pragma_update(None, "auto_vacuum", 2)?;
+    db.execute(
+        "VACUUM main INTO ?1",
+        [path.to_str().ok_or(Error("unsafe_state_file"))?],
+    )?;
+    check_file(&path)?;
+    let copy = Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let backup = rusqlite::backup::Backup::new(&copy, db)?;
+    // The source is our private, immutable copy. A busy destination fails rather
+    // than retrying forever. Dropping an unfinished backup rolls it back.
+    loop {
+        match backup.step(256)? {
+            rusqlite::backup::StepResult::Done => break,
+            rusqlite::backup::StepResult::More => {}
+            _ => return Err(Error("storage_busy")),
+        }
+    }
+    Ok(())
 }
 
 pub fn repair_storage_permissions(directory: &Path) -> Result<()> {
@@ -1027,6 +1083,74 @@ CREATE TABLE approval_attempts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_compaction_preserves_data_and_rejects_an_unsafe_scratch_path() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("state");
+        crate::workspaces::prepare_state_directory_sync(&directory).unwrap();
+        let path = directory.join("sharing.sqlite3");
+        drop(private_file(&path).unwrap());
+        let mut db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY;
+            CREATE TABLE preserved(id INTEGER PRIMARY KEY, data BLOB);
+            INSERT INTO preserved VALUES(7,x'001b5b33316dff'); PRAGMA user_version=2;",
+        )
+        .unwrap();
+        let scratch = directory.join(COMPACTION_COPY);
+        std::fs::create_dir(&scratch).unwrap();
+        assert!(matches!(
+            compact_legacy(&mut db, &directory),
+            Err(Error("unsafe_state_file"))
+        ));
+        assert_eq!(
+            db.query_row("SELECT hex(data) FROM preserved WHERE id=7", [], |r| r
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+            "001B5B33316DFF"
+        );
+        std::fs::remove_dir(&scratch).unwrap();
+        compact_legacy(&mut db, &directory).unwrap();
+        assert!(!scratch.exists());
+        assert_eq!(
+            db.pragma_query_value(None, "auto_vacuum", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.query_row("SELECT hex(data) FROM preserved WHERE id=7", [], |r| r
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+            "001B5B33316DFF"
+        );
+        assert_eq!(
+            db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_discards_only_the_private_interrupted_compaction_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("state");
+        crate::workspaces::prepare_state_directory_sync(&directory).unwrap();
+        let scratch = directory.join(COMPACTION_COPY);
+        private_file(&scratch).unwrap().set_len(4096).unwrap();
+        let store = Store::open(directory).await.unwrap();
+        assert!(!scratch.exists());
+        assert!(store.storage_usage().await.is_ok());
+    }
 
     #[cfg(windows)]
     #[tokio::test]

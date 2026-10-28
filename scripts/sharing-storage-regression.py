@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import hashlib
 import importlib.util
 import json
@@ -77,7 +78,7 @@ def main():
             database = state / "sharing.sqlite3"
             old, kept = str(uuid.uuid4()), str(uuid.uuid4())
             kept_chunk = (b"synthetic-preserved-raw-\x1b[31m\r\n" * 1024)[:16384]
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db:
                 db.executescript("DROP TABLE archive_cleanup; DROP TABLE storage_policy; ALTER TABLE generations DROP COLUMN ended_at; PRAGMA user_version=1;")
                 db.execute("PRAGMA auto_vacuum=NONE")
                 db.execute("VACUUM")
@@ -162,6 +163,7 @@ def main():
                     time.sleep(0.01)
                 result = compact.result()
             after = api(base)
+            assert not (state / "sharing.compact.sqlite3").exists(), "Compaction left a scratch copy"
             assert after["incrementalCompaction"] and after["recordings"] == 2
             assert after["databaseBytes"] < initial["databaseBytes"] * 0.3, "Physical database failed to shrink by at least 70%"
             assert result["reclaimedBytes"] > 64 * 1024 * 1024, "Compaction must measure substantial reclaimed disk space"
@@ -186,7 +188,7 @@ def main():
             capture_attachment.close()
             capture_attachment = None
             sharing.stop(process)
-            with sqlite3.connect(database) as db:
+            with closing(sqlite3.connect(database)) as db:
                 assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
                 assert db.execute("SELECT name FROM guests WHERE id='reserved'").fetchone()[0] == "Reserved fixture"
                 assert db.execute("SELECT retention_days FROM storage_policy").fetchone()[0] == 90

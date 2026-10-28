@@ -62,7 +62,7 @@ class WebSocketAttachment:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("timed out reading a terminal WebSocket frame")
-            self.connection.settimeout(min(remaining, 1.0))
+            self.connection.settimeout(remaining)
             chunk = self.connection.recv(64 * 1024)
             if not chunk:
                 raise ConnectionError("terminal WebSocket closed unexpectedly")
